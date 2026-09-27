@@ -6,7 +6,7 @@ const ADMIN_URL = 'https://admin.cacusabytaitus.com/';
 // duplicada acá porque el Service Worker corre en su propio contexto, sin acceso
 // al scope de la página, y la necesita para volver a suscribirse solo en
 // pushsubscriptionchange (ver más abajo).
-const VAPID_PUB_KEY = 'BLLRPGO7zFrAiyfZ1KzNlaysb9wUVJnZeog3Z4sVJRqSFXiodQ9g8PALWr2uYT7sRuZ6W2V0iaDRQ-5XUcQif9U';
+const VAPID_PUB_KEY = 'BN4s4OMy37e_t9xSZv5LN70Y_oErfOlPir3F-uKRVTsUCbmm496DCJqoP7RrV68NEvFamXGt9B73PFo4wTmBBJQ';
 
 function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - base64String.length % 4) % 4);
