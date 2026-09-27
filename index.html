@@ -736,12 +736,21 @@ function compressImage(file, maxPx = 900) {
         cv.width = w; cv.height = h;
         cv.getContext('2d').drawImage(img, 0, 0, w, h);
         URL.revokeObjectURL(url);
-        cv.toBlob(blob => {
+        const done = blob => {
           if (!blob) { reject(new Error('No se pudo procesar la imagen.')); return; }
           const fr = new FileReader();
           fr.onload = e => resolve(e.target.result.split(',')[1]);
           fr.onerror = () => reject(new Error('No se pudo leer la imagen procesada.'));
           fr.readAsDataURL(blob);
+        };
+        // Safari (iPhone/Mac) no sabe codificar WebP: toBlob('image/webp') devuelve en
+        // silencio un PNG sin comprimir (~1 MB por foto — 45 fotos del catálogo eran PNG
+        // con nombre .webp, auditoría SEO 27 sep). En ese caso se re-codifica como JPEG,
+        // que Safari sí comprime; el navegador lo muestra igual aunque el archivo se
+        // llame .webp (las imágenes se detectan por contenido, no por extensión).
+        cv.toBlob(blob => {
+          if (blob && blob.type !== 'image/webp') cv.toBlob(done, 'image/jpeg', 0.85);
+          else done(blob);
         }, 'image/webp', 0.82);
       } catch (err) { try { URL.revokeObjectURL(url); } catch(_){} reject(err); }
     };
