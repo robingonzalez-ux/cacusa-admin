@@ -164,14 +164,14 @@ const DEFAULT_LOVERS = {
     { title: 'Llega a tu puerta', desc: 'Tu caja de joyería seleccionada llega directamente a tu domicilio, cada mes, como un regalo que te mereces.' }
   ],
   conditions: [
-    { title: 'Pago recurrente mensual', desc: 'El cobro se realiza automáticamente cada mes, el mismo día en que te suscribiste. El cargo aparecerá en tu estado de cuenta como CACUSA by Taitus.' },
+    { title: 'Pago mensual por factura', desc: 'Tres días antes de tu fecha de renovación te llega por correo una factura de Square por $19.99 ($219.89 en el plan anual). La pagas con Apple Pay, Google Pay o tarjeta. El cargo aparece en tu estado de cuenta como CACUSA by Taitus.' },
     { title: 'Envío tras confirmación de pago', desc: 'Los envíos se realizan durante la tercera semana de cada mes, una vez confirmado el pago. El tiempo de entrega es de 5 a 15 días hábiles según el país de destino. Si aún no has recibido tu caja en los primeros días del mes, no es una demora — los envíos aún no han salido.' },
     { title: 'Sin devoluciones', desc: 'No se aceptan devoluciones ni reembolsos en esta modalidad de suscripción. Cada pieza es seleccionada y enviada especialmente para ti con dedicación. Excepción: si tu pieza llega con un defecto de fabricación, repórtalo con fotos dentro de las primeras 48 horas y te la reponemos sin costo.' },
     { title: 'Selección aleatoria por CACUSA', desc: 'Las joyas son seleccionadas de forma aleatoria por el equipo de CACUSA. La sorpresa y la cuidadosa selección son parte de la experiencia del club.' },
     { title: 'Tipos de piezas incluidas', desc: 'Las 2 piezas mensuales pueden ser aretes, anillos, pulseras o collares — elaboradas en acero inoxidable: no se oxidan, no se ponen negras y mantienen su brillo con el tiempo.' },
     { title: 'Sin cambios por artículos de tienda', desc: 'Las joyas de la suscripción no pueden canjearse ni cambiarse por artículos disponibles en la tienda online. Son piezas exclusivas del club.' },
-    { title: 'Política de cancelación', desc: 'Puedes cancelar tu suscripción cuando quieras directamente desde el enlace "Manage subscription" que Square te envía por correo al confirmarse cada pago — no necesitas escribirnos ni esperar respuesta. La cancelación aplica a partir del siguiente ciclo de cobro: si el cargo del mes o año en curso ya se procesó, tu suscripción sigue activa y recibirás la caja correspondiente a ese período — no ofrecemos reembolsos sobre cobros ya procesados. Para que la cancelación aplique antes del próximo cobro, hazlo con al menos 5 días de anticipación a tu fecha de renovación. Si tienes problemas para encontrar el enlace, escríbenos por WhatsApp o a facturacioncacusa@gmail.com y te ayudamos.' },
-    { title: 'Pago fallido', desc: 'Si tu pago no se procesa exitosamente, Square intentará el cobro nuevamente de forma automática. Mientras el pago esté pendiente, el envío del mes quedará suspendido hasta que se regularice la situación.' },
+    { title: 'Política de cancelación', desc: 'No hay cobros automáticos: si no quieres seguir, simplemente no pagues la próxima factura, o escríbenos por WhatsApp o a facturacioncacusa@gmail.com y la anulamos. No ofrecemos reembolsos sobre pagos ya hechos: recibes la caja de ese período. Si te suscribiste antes de octubre de 2026 con cobro automático de tarjeta, puedes cancelar desde el enlace "Manage subscription" que Square te envía con cada pago, o escribirnos y te ayudamos.' },
+    { title: 'Pago pendiente', desc: 'Si no pagas la factura en su fecha, Square te envía recordatorios. A los 7 días sin pago tu membresía se pausa: el 5% de descuento, el envío gratis y la caja del mes quedan en espera. Puedes reactivarla cuando quieras pagando la factura pendiente.' },
     { title: 'Cambios de precio', desc: 'Cualquier modificación en el precio de la suscripción será comunicada con al menos 30 días de anticipación a través del email registrado. Tienes derecho a cancelar sin cargo si no estás de acuerdo con el nuevo precio.' },
     { title: 'Datos personales', desc: 'Tu información de envío (nombre, dirección, teléfono) se utiliza exclusivamente para gestionar la entrega de tus joyas. No compartimos tus datos con terceros. El procesamiento del pago lo realiza Square de forma segura.' }
   ],
@@ -183,7 +183,7 @@ const DEFAULT_LOVERS = {
     { q: '¿Cuándo recibiré mi primera caja?', a: 'Tu primera caja se envía dentro de los primeros 5 días hábiles después de tu suscripción. A partir del segundo mes, los envíos salen durante la tercera semana del mes, junto con todas las suscripciones.' },
     { q: '¿Puedo elegir las joyas que recibo?', a: 'No — la sorpresa es parte de la experiencia. Cada mes, el equipo de CACUSA selecciona las 2 piezas que recibirás, cuidando siempre variedad y calidad, sin que tengas que elegir nada.' },
     { q: '¿Envían a toda la República del Ecuador y USA?', a: 'Sí. El envío está incluido en el precio de la membresía tanto para Ecuador como para Estados Unidos, sin costo adicional.' },
-    { q: '¿Cómo es el pago mensual?', a: 'El cobro se realiza automáticamente cada mes con tu tarjeta a través de Square, nuestro procesador de pagos seguro. Square te envía un recibo por email después de cada cobro.' }
+    { q: '¿Cómo es el pago mensual?', a: 'Cada mes te llega por correo una factura de Square y la pagas con Apple Pay, Google Pay o tarjeta, en un toque. No guardamos tu tarjeta ni hacemos cobros automáticos. Square te envía el recibo después de cada pago.' }
   ],
   ctaScript: '¿Lista para unirte?',
   ctaHeading: 'Tu joya de este mes te está esperando',
@@ -2408,7 +2408,7 @@ function LoversPageTab({ lovers, setLovers, setDirty }) {
         </div>
         <div style={{ marginTop: 10, fontSize: 12, color: '#E85D8A', fontWeight: 600 }}>Vista previa: ahorra {savePct}% · ≈ ${perMonthAnnual}/mes en el plan anual</div>
         <div style={{ marginTop: 12, background: '#FFF7E6', border: '1.5px solid #F5C77A', borderRadius: 10, padding: '10px 14px', fontSize: 12, color: '#8A6416', lineHeight: 1.5 }}>
-          ⚠️ <strong>Importante:</strong> esto solo cambia el precio que se <em>muestra</em> en la página. El cobro real lo procesa un enlace de pago fijo de Square (uno para el plan mensual, otro para el anual), que tiene su propio monto configurado del lado de Square — cambiarlo aquí NO cambia lo que Square cobra. Si subes o bajas el precio, avísame para actualizar también los enlaces de Square y que ambos coincidan.
+          ⚠️ <strong>Importante:</strong> esto solo cambia el precio que se <em>muestra</em> en la página. Lo que se cobra en las facturas de Lovers está fijo en el Worker (LOVERS_PRICES_CENTS en lovers-webhook-worker.js: $19.99 mensual y $219.89 anual) — cambiarlo aquí NO cambia lo que Square cobra. Si subes o bajas el precio, avísame para actualizar también el Worker.
         </div>
       </div>
 
@@ -3161,6 +3161,31 @@ function LoversTab({ products = [], token }) {
 
   const cancelInSquare = async s => {
     if (busyId === s.id) return; // ya hay una accion (cancelar/eliminar) en curso sobre esta fila
+    // Cobro por factura (2 oct): no hay suscripción en Square que cancelar — se anula la
+    // factura pendiente (si hay) y ya no se le generan más.
+    if (s.modo_cobro === 'factura') {
+      const nombreF = [s.nombre, s.apellido].filter(Boolean).join(' ') || s.email || 'esta suscriptora';
+      if (!confirm(`¿Cancelar la membresía de ${nombreF}? Se anula su factura pendiente en Square y no se le mandan más facturas.`)) return;
+      setBusyId(s.id); setCancelingId(s.id);
+      try {
+        const r = await loversApi('/admin/cancel-lovers-invoice', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ firebaseKey: s.id }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok && data.ok) {
+          setSubs(prev => prev.map(x => x.id === s.id
+            ? { ...x, estado_pago: 'cancelado', fecha_cancelacion: new Date().toISOString().slice(0, 10), factura_actual: '' }
+            : x));
+        } else {
+          alert(`No se pudo cancelar: ${data.error || r.status}`);
+        }
+      } catch (e) { alert(`Error al cancelar: ${e.message}`); }
+      setBusyId(null);
+      setCancelingId(null);
+      return;
+    }
     if (!s.square_subscription_id) {
       alert('Esta suscriptora no tiene un Subscription ID guardado — no se puede cancelar automáticamente. Cancélala manualmente desde Square Dashboard → Subscriptions.');
       return;
@@ -3187,8 +3212,10 @@ function LoversTab({ products = [], token }) {
     setCancelingId(null);
   };
 
-  const estadoColor = e => ({ 'activo': '#22c55e', 'pendiente': '#f59e0b', 'cancelado': '#ef4444', 'pago_fallido': '#dc2626' }[e] || '#7A6B85');
-  const estadoLabel = e => ({ 'activo': 'Activo ✓', 'pendiente': 'Pendiente', 'cancelado': 'Cancelado', 'pago_fallido': 'Pago fallido ⚠️' }[e] || e || 'Pendiente');
+  const estadoColor = e => ({ 'activo': '#22c55e', 'pendiente': '#f59e0b', 'cancelado': '#ef4444', 'pago_fallido': '#dc2626', 'vencido': '#B45309' }[e] || '#7A6B85');
+  const estadoLabel = e => ({ 'activo': 'Activo ✓', 'pendiente': 'Pendiente', 'cancelado': 'Cancelado', 'pago_fallido': 'Pago fallido ⚠️', 'vencido': 'Sin pagar (pausada)' }[e] || e || 'Pendiente');
+  // Solo se muestra como link una URL real de Square (la factura pendiente).
+  const isSquareUrl = u => /^https:\/\/[a-z0-9.-]*square(up)?\.(com|site|link)\//i.test(u || '');
   const fmt = iso => { try { return new Date(iso).toLocaleDateString('es', { day:'2-digit', month:'short', year:'numeric' }); } catch { return iso || '—'; } };
   const todayIso = new Date().toISOString().slice(0, 10);
 
@@ -3414,6 +3441,11 @@ function LoversTab({ products = [], token }) {
                       </div>
                     )}
                     {s.fecha_cancelacion && <div style={{ fontSize: 11, color: '#ef4444', textAlign: 'right' }}>Canceló: {fmt(s.fecha_cancelacion)}</div>}
+                    {s.modo_cobro === 'factura' && <div style={{ fontSize: 11, color: '#7A6B85', textAlign: 'right' }}>Cobro por factura (Apple Pay)</div>}
+                    {s.envio_pendiente && <div style={{ fontSize: 11, color: '#B45309', textAlign: 'right', fontWeight: 600 }}>Pagó, falta que confirme su correo (dirección)</div>}
+                    {isSquareUrl(s.factura_actual) && (
+                      <a href={s.factura_actual} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: '#C0336E', fontWeight: 600 }}>Ver factura pendiente →</a>
+                    )}
                     <select
                       disabled={!!updating[s.id]}
                       value={s.estado_pago || 'pendiente'}
@@ -3422,6 +3454,7 @@ function LoversTab({ products = [], token }) {
                       <option value="pendiente">Pendiente</option>
                       <option value="activo">Activo</option>
                       <option value="pago_fallido">Pago fallido</option>
+                      <option value="vencido">Sin pagar (pausada)</option>
                       <option value="cancelado">Cancelado</option>
                     </select>
                     <button
@@ -3447,7 +3480,7 @@ function LoversTab({ products = [], token }) {
                       <button
                         onClick={() => cancelInSquare(s)}
                         disabled={busyId === s.id}
-                        title={s.square_subscription_id ? '' : 'Sin Subscription ID guardado — cancela manualmente en Square'}
+                        title={s.modo_cobro === 'factura' || s.square_subscription_id ? '' : 'Sin Subscription ID guardado — cancela manualmente en Square'}
                         style={{ fontSize: 11, padding: '4px 10px', borderRadius: 8, border: '1.5px solid #FBBF24', background: 'white', color: '#B45309', cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600, opacity: busyId === s.id ? .5 : 1 }}>
                         {cancelingId === s.id ? 'Cancelando…' : 'Cancelar en Square'}
                       </button>
