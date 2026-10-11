@@ -3107,8 +3107,9 @@ function LoversTab({ products = [], token }) {
       });
       if (r.ok) {
         const d = await r.json().catch(() => ({}));
+        if (d.aviso) alert(d.aviso);
         setSubs(prev => prev.map(s => s.id === sub.id ? {
-          ...s, estado_pago: nuevoEstado,
+          ...s, estado_pago: d.estado_pago || nuevoEstado,
           ...(d.vence ? { vence: d.vence } : {}),
           ...(d.fecha_pausa !== undefined ? { fecha_pausa: d.fecha_pausa } : {}),
         } : s));
@@ -3561,7 +3562,7 @@ function LoversTab({ products = [], token }) {
                       </div>
                     )}
                     {s.fecha_cancelacion && <div style={{ fontSize: 11, color: '#ef4444', textAlign: 'right' }}>Canceló: {fmt(s.fecha_cancelacion)}</div>}
-                    {s.estado_pago === 'pausado' && s.fecha_pausa && <div style={{ fontSize: 11, color: '#6B7280', textAlign: 'right' }}>En pausa desde {fmt(s.fecha_pausa)} · al reanudar se corre el vencimiento</div>}
+                    {s.estado_pago === 'pausado' && <div style={{ fontSize: 11, color: '#6B7280', textAlign: 'right' }}>En pausa{s.fecha_pausa ? ` desde ${fmt(s.fecha_pausa)}` : ''} · {s.beneficios_off || (s.vence && s.vence < todayIso) ? 'beneficios pausados' : `beneficios hasta ${fmt(s.vence)}`} · se reactiva al pagar</div>}
                     {s.modo_cobro === 'factura' && <div style={{ fontSize: 11, color: '#7A6B85', textAlign: 'right' }}>Cobro por factura (Apple Pay)</div>}
                     {s.envio_pendiente && <div style={{ fontSize: 11, color: '#B45309', textAlign: 'right', fontWeight: 600 }}>Pagó, falta que confirme su correo (dirección)</div>}
                     {isSquareUrl(s.factura_actual) && (
@@ -3576,7 +3577,7 @@ function LoversTab({ products = [], token }) {
                       <option value="activo">Activo</option>
                       <option value="pago_fallido">Pago fallido</option>
                       <option value="vencido">Sin pagar (pausada)</option>
-                      {s.metodo_pago === 'manual' && <option value="pausado">En pausa (manual)</option>}
+                      {(s.estado_pago === 'activo' || s.estado_pago === 'pausado') && <option value="pausado">En pausa</option>}
                       <option value="cancelado">Cancelado</option>
                     </select>
                     <button
