@@ -2990,6 +2990,22 @@ function LoversTab({ products = [], token }) {
     headers: { 'X-Admin-Key': token, ...(opts?.headers || {}) },
   });
 
+  // Sincronizar con Square (11 oct): recupera pagos cuyo aviso de Square nunca llegó.
+  const [sync, setSync] = useState(null);
+  const runSync = async (dryRun) => {
+    if (!dryRun && !confirm('¿Registrar estos pagos y crear sus pedidos de envío?')) return;
+    setSync(prev => ({ ...(prev || {}), loading: true }));
+    try {
+      const r = await loversApi('/admin/lovers-sync', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dryRun }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setSync({ error: d.error || ('Error ' + r.status) }); return; }
+      setSync(d);
+      if (!dryRun) await load();
+    } catch (e) { setSync({ error: e.message }); }
+  };
+
   // Duplicados (11 oct): vista previa primero, fusión solo después de confirmar.
   const [dedupe, setDedupe] = useState(null); // null | {loading} | {grupos} | {error}
   const runDedupe = async (dryRun) => {
@@ -3241,6 +3257,51 @@ function LoversTab({ products = [], token }) {
       <div style={{ fontSize: 13, color: '#7A6B85', marginBottom: 20 }}>Suscriptoras del club mensual $19.99/mes. Datos guardados al momento de procesar el pago.</div>
 
       {/* ── Alta manual (clientas que pagan por transferencia, sin suscripción recurrente en Square) ── */}
+      <div style={{ background: 'white', borderRadius: 16, border: '1px solid #EDE8EA', padding: '20px 24px', marginBottom: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14, color: '#1A1118', marginBottom: 4 }}>Sincronizar con Square</div>
+            <div style={{ fontSize: 12, color: '#7A6B85' }}>Busca en Square pagos que no quedaron registrados y crea sus pedidos del mes. Se revisa sola cada día; este botón lo hace ahora.</div>
+          </div>
+          <button onClick={() => runSync(true)} disabled={sync?.loading}
+            style={{ background: 'white', color: '#C0336E', border: '1.5px solid #C0336E', borderRadius: 999, padding: '9px 20px', fontFamily: 'inherit', fontWeight: 700, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', opacity: sync?.loading ? .5 : 1 }}>
+            {sync?.loading ? 'Revisando…' : 'Sincronizar con Square'}
+          </button>
+        </div>
+        {sync && !sync.loading && (
+          <div role="status" aria-live="polite" style={{ marginTop: 14, fontSize: 12, color: '#5A4A60', lineHeight: 1.6 }}>
+            {sync.error && <div style={{ color: '#B3261E' }}>⚠ {sync.error}</div>}
+            {sync.dryRun === false && <div style={{ color: '#2C6149' }}>✓ Listo: {sync.registrados || 0} pago(s) registrado(s) con su pedido.</div>}
+            {sync.dryRun && sync.pagosSinRegistrar && sync.pagosSinRegistrar.length === 0 && <div style={{ color: '#2C6149' }}>✓ Todos los pagos de Square ya están registrados.</div>}
+            {sync.dryRun && sync.pagosSinRegistrar && sync.pagosSinRegistrar.length > 0 && (
+              <div>
+                <strong>Pagos en Square sin registrar:</strong>
+                {sync.pagosSinRegistrar.map(p => <div key={p.factura}>· {p.nombre} — ${p.monto} — {p.fecha}</div>)}
+                <button onClick={() => runSync(false)}
+                  style={{ marginTop: 8, background: '#C0336E', color: 'white', border: 'none', borderRadius: 999, padding: '8px 18px', fontFamily: 'inherit', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
+                  Registrar pagos y crear pedidos
+                </button>
+              </div>
+            )}
+            {sync.pagosAnteriores && sync.pagosAnteriores.length > 0 && (
+              <div style={{ marginTop: 8, color: '#7A6B85' }}>
+                Pagos anteriores sin registrar (no se crea pedido, se asume que ya se enviaron): {sync.pagosAnteriores.map(p => `${p.nombre} (${p.fecha})`).join(', ')}
+              </div>
+            )}
+            {sync.pagosFallidos && sync.pagosFallidos.length > 0 && (
+              <div style={{ marginTop: 8, color: '#B45309' }}>
+                <strong>Cobros fallidos o sin pagar en Square:</strong>
+                {sync.pagosFallidos.map(p => <div key={p.factura}>· {p.nombre} — ${p.monto} — {p.fecha} ({p.estado})</div>)}
+              </div>
+            )}
+            {sync.noEncontradas && sync.noEncontradas.length > 0 && (
+              <div style={{ marginTop: 8, color: '#7A6B85' }}>No se encontraron en Square (revisar email/teléfono): {sync.noEncontradas.map(n => n.nombre).join(', ')}</div>
+            )}
+            {sync.errores && sync.errores.length > 0 && <div style={{ marginTop: 8, color: '#B3261E' }}>⚠ {sync.errores.join(' · ')}</div>}
+          </div>
+        )}
+      </div>
+
       <div style={{ background: 'white', borderRadius: 16, border: '1px solid #EDE8EA', padding: '20px 24px', marginBottom: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <div>
