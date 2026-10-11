@@ -2990,6 +2990,22 @@ function LoversTab({ products = [], token }) {
     headers: { 'X-Admin-Key': token, ...(opts?.headers || {}) },
   });
 
+  // Duplicados (11 oct): vista previa primero, fusión solo después de confirmar.
+  const [dedupe, setDedupe] = useState(null); // null | {loading} | {grupos} | {error}
+  const runDedupe = async (dryRun) => {
+    if (!dryRun && !confirm('¿Fusionar estos duplicados? Se conserva la suscriptora más antigua de cada grupo y se borran las demás. No se puede deshacer.')) return;
+    setDedupe(prev => ({ ...(prev || {}), loading: true }));
+    try {
+      const r = await loversApi('/admin/lovers-dedupe', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dryRun }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setDedupe({ error: d.error || ('Error ' + r.status) }); return; }
+      if (dryRun) setDedupe({ grupos: d.grupos || [] });
+      else { setDedupe({ done: d.fusionadas || 0 }); await load(); }
+    } catch (e) { setDedupe({ error: e.message }); }
+  };
+
   const load = async () => {
     setLoading(true);
     try {
@@ -3225,6 +3241,43 @@ function LoversTab({ products = [], token }) {
       <div style={{ fontSize: 13, color: '#7A6B85', marginBottom: 20 }}>Suscriptoras del club mensual $19.99/mes. Datos guardados al momento de procesar el pago.</div>
 
       {/* ── Alta manual (clientas que pagan por transferencia, sin suscripción recurrente en Square) ── */}
+      <div style={{ background: 'white', borderRadius: 16, border: '1px solid #EDE8EA', padding: '20px 24px', marginBottom: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14, color: '#1A1118', marginBottom: 4 }}>Suscriptoras duplicadas</div>
+            <div style={{ fontSize: 12, color: '#7A6B85' }}>Junta en una sola a las suscriptoras que se duplicaron al renovar. Primero muestra qué haría, sin cambiar nada.</div>
+          </div>
+          <button onClick={() => runDedupe(true)} disabled={dedupe?.loading}
+            style={{ background: 'white', color: '#C0336E', border: '1.5px solid #C0336E', borderRadius: 999, padding: '9px 20px', fontFamily: 'inherit', fontWeight: 700, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', opacity: dedupe?.loading ? .5 : 1 }}>
+            {dedupe?.loading ? 'Revisando…' : 'Revisar duplicados'}
+          </button>
+        </div>
+        {dedupe && !dedupe.loading && (
+          <div role="status" aria-live="polite" style={{ marginTop: 14, fontSize: 12, color: '#5A4A60', lineHeight: 1.6 }}>
+            {dedupe.error && <div style={{ color: '#B3261E' }}>⚠ {dedupe.error}</div>}
+            {dedupe.done != null && <div style={{ color: '#2C6149' }}>✓ Listo: {dedupe.done} grupo(s) fusionado(s).</div>}
+            {dedupe.grupos && dedupe.grupos.length === 0 && <div style={{ color: '#2C6149' }}>✓ No hay duplicados.</div>}
+            {dedupe.grupos && dedupe.grupos.length > 0 && (
+              <div>
+                {dedupe.grupos.map((g, i) => (
+                  <div key={i} style={{ border: '1px solid #F5EFF8', borderRadius: 10, padding: '10px 12px', marginBottom: 8 }}>
+                    <div><strong>Se conserva:</strong> {g.conservar.nombre || '—'} · {g.conservar.email} · desde {g.conservar.fecha || '—'}</div>
+                    {g.borrar.map(b => (
+                      <div key={b.id} style={{ color: '#B3261E' }}>Se borra: {b.nombre || '—'} · {b.email} · {b.fecha || '—'} ({b.estado_pago || '—'})</div>
+                    ))}
+                  </div>
+                ))}
+                <div style={{ marginBottom: 8 }}>Revisa que cada grupo sea de verdad la misma persona antes de fusionar.</div>
+                <button onClick={() => runDedupe(false)}
+                  style={{ background: '#C0336E', color: 'white', border: 'none', borderRadius: 999, padding: '8px 18px', fontFamily: 'inherit', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
+                  Fusionar {dedupe.grupos.length} grupo(s)
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       <div style={{ background: 'white', borderRadius: 16, border: '1px solid #EDE8EA', padding: '20px 24px', marginBottom: 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <div>
