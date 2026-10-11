@@ -3397,7 +3397,8 @@ function LoversTab({ products = [], token }) {
             {dedupe.grupos && dedupe.grupos.length > 0 && (
               <div>
                 {dedupe.grupos.map((g, i) => (
-                  <div key={i} style={{ border: '1px solid #F5EFF8', borderRadius: 10, padding: '10px 12px', marginBottom: 8 }}>
+                  <div key={i} style={{ border: g.soloNombre ? '1.5px solid #F5C77A' : '1px solid #F5EFF8', background: g.soloNombre ? '#FFF7E6' : 'transparent', borderRadius: 10, padding: '10px 12px', marginBottom: 8 }}>
+                    {g.soloNombre && <div style={{ color: '#8A6416', fontWeight: 700, marginBottom: 4 }}>⚠ Revisar: coincide solo el nombre. Fusiona solo si estás segura de que es la misma persona.</div>}
                     <div><strong>Se conserva:</strong> {g.conservar.nombre || '—'} · {g.conservar.email} · desde {g.conservar.fecha || '—'}</div>
                     {g.borrar.map(b => (
                       <div key={b.id} style={{ color: '#B3261E' }}>Se borra: {b.nombre || '—'} · {b.email} · {b.fecha || '—'} ({b.estado_pago || '—'})</div>
