@@ -3106,9 +3106,15 @@ function LoversTab({ products = [], token }) {
         body: JSON.stringify({ estado_pago: nuevoEstado }),
       });
       if (r.ok) {
-        setSubs(prev => prev.map(s => s.id === sub.id ? { ...s, estado_pago: nuevoEstado } : s));
+        const d = await r.json().catch(() => ({}));
+        setSubs(prev => prev.map(s => s.id === sub.id ? {
+          ...s, estado_pago: nuevoEstado,
+          ...(d.vence ? { vence: d.vence } : {}),
+          ...(d.fecha_pausa !== undefined ? { fecha_pausa: d.fecha_pausa } : {}),
+        } : s));
       } else {
-        alert('No se pudo actualizar el estado — intenta de nuevo.');
+        const d = await r.json().catch(() => ({}));
+        alert(d.error || 'No se pudo actualizar el estado — intenta de nuevo.');
       }
     } catch (_) { alert('Error de conexión al actualizar el estado.'); }
     setUpdating(u => { const n = { ...u }; delete n[sub.id]; return n; });
@@ -3244,8 +3250,8 @@ function LoversTab({ products = [], token }) {
     setCancelingId(null);
   };
 
-  const estadoColor = e => ({ 'activo': '#22c55e', 'pendiente': '#f59e0b', 'cancelado': '#ef4444', 'pago_fallido': '#dc2626', 'vencido': '#B45309' }[e] || '#7A6B85');
-  const estadoLabel = e => ({ 'activo': 'Activo ✓', 'pendiente': 'Pendiente', 'cancelado': 'Cancelado', 'pago_fallido': 'Pago fallido ⚠️', 'vencido': 'Sin pagar (pausada)' }[e] || e || 'Pendiente');
+  const estadoColor = e => ({ 'activo': '#22c55e', 'pendiente': '#f59e0b', 'cancelado': '#ef4444', 'pago_fallido': '#dc2626', 'vencido': '#B45309', 'pausado': '#6B7280' }[e] || '#7A6B85');
+  const estadoLabel = e => ({ 'activo': 'Activo ✓', 'pendiente': 'Pendiente', 'cancelado': 'Cancelado', 'pago_fallido': 'Pago fallido ⚠️', 'vencido': 'Sin pagar (pausada)', 'pausado': 'En pausa ⏸' }[e] || e || 'Pendiente');
   // Solo se muestra como link una URL real de Square (la factura pendiente).
   const isSquareUrl = u => /^https:\/\/[a-z0-9.-]*square(up)?\.(com|site|link)\//i.test(u || '');
   const fmt = iso => { try { return new Date(iso).toLocaleDateString('es', { day:'2-digit', month:'short', year:'numeric' }); } catch { return iso || '—'; } };
@@ -3555,6 +3561,7 @@ function LoversTab({ products = [], token }) {
                       </div>
                     )}
                     {s.fecha_cancelacion && <div style={{ fontSize: 11, color: '#ef4444', textAlign: 'right' }}>Canceló: {fmt(s.fecha_cancelacion)}</div>}
+                    {s.estado_pago === 'pausado' && s.fecha_pausa && <div style={{ fontSize: 11, color: '#6B7280', textAlign: 'right' }}>En pausa desde {fmt(s.fecha_pausa)} · al reanudar se corre el vencimiento</div>}
                     {s.modo_cobro === 'factura' && <div style={{ fontSize: 11, color: '#7A6B85', textAlign: 'right' }}>Cobro por factura (Apple Pay)</div>}
                     {s.envio_pendiente && <div style={{ fontSize: 11, color: '#B45309', textAlign: 'right', fontWeight: 600 }}>Pagó, falta que confirme su correo (dirección)</div>}
                     {isSquareUrl(s.factura_actual) && (
@@ -3569,6 +3576,7 @@ function LoversTab({ products = [], token }) {
                       <option value="activo">Activo</option>
                       <option value="pago_fallido">Pago fallido</option>
                       <option value="vencido">Sin pagar (pausada)</option>
+                      {s.metodo_pago === 'manual' && <option value="pausado">En pausa (manual)</option>}
                       <option value="cancelado">Cancelado</option>
                     </select>
                     <button
