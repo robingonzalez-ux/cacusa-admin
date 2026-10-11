@@ -165,7 +165,7 @@ const DEFAULT_LOVERS = {
   ],
   conditions: [
     { title: 'Pago mensual por factura', desc: 'Tres días antes de tu fecha de renovación te llega por correo una factura de Square por $19.99 ($219.89 en el plan anual). La pagas con Apple Pay, Google Pay o tarjeta. El cargo aparece en tu estado de cuenta como CACUSA by Taitus.' },
-    { title: 'Envío tras confirmación de pago', desc: 'Los envíos se realizan durante la tercera semana de cada mes, una vez confirmado el pago. El tiempo de entrega es de 5 a 15 días hábiles según el país de destino. Si aún no has recibido tu caja en los primeros días del mes, no es una demora — los envíos aún no han salido.' },
+    { title: 'Envío tras confirmación de pago', desc: 'Los envíos se realizan juntos durante la tercera semana de cada mes (del 15 al 21). Entran en el envío del mes los pagos confirmados hasta el día 10; los pagos posteriores salen en el envío del mes siguiente. El tiempo de entrega es de 5 a 15 días hábiles según el país de destino.' },
     { title: 'Sin devoluciones', desc: 'No se aceptan devoluciones ni reembolsos en esta modalidad de suscripción. Cada pieza es seleccionada y enviada especialmente para ti con dedicación. Excepción: si tu pieza llega con un defecto de fabricación, repórtalo con fotos dentro de las primeras 48 horas y te la reponemos sin costo.' },
     { title: 'Selección aleatoria por CACUSA', desc: 'Las joyas son seleccionadas de forma aleatoria por el equipo de CACUSA. La sorpresa y la cuidadosa selección son parte de la experiencia del club.' },
     { title: 'Tipos de piezas incluidas', desc: 'Las 2 piezas mensuales pueden ser aretes, anillos, pulseras o collares — elaboradas en acero inoxidable: no se oxidan, no se ponen negras y mantienen su brillo con el tiempo.' },
@@ -177,10 +177,10 @@ const DEFAULT_LOVERS = {
   ],
   shippingNotice: {
     title: 'Importante sobre los tiempos de envío',
-    text: 'Las suscripciones se envían todas juntas durante la tercera semana del mes. Esto es diferente a un pedido regular de la tienda. Si te unes a mediados de mes, tu primera caja saldrá en la tercera semana del mes siguiente. Si aún no has recibido tu caja en los primeros días del mes, no es una demora — simplemente aún no ha llegado el momento del envío mensual.'
+    text: 'Las suscripciones se envían todas juntas durante la tercera semana del mes (del 15 al 21). Esto es diferente a un pedido regular de la tienda. Si tu pago se confirma hasta el día 10, tu caja sale ese mes; si es después, sale en la tercera semana del mes siguiente. Si aún no has recibido tu caja en los primeros días del mes, no es una demora — simplemente aún no ha llegado el momento del envío mensual.'
   },
   faq: [
-    { q: '¿Cuándo recibiré mi primera caja?', a: 'Tu primera caja se envía dentro de los primeros 5 días hábiles después de tu suscripción. A partir del segundo mes, los envíos salen durante la tercera semana del mes, junto con todas las suscripciones.' },
+    { q: '¿Cuándo recibiré mi primera caja?', a: 'Todas las cajas, incluida la primera, salen juntas en la tercera semana del mes (del 15 al 21). Si tu pago se confirma hasta el día 10, tu caja sale ese mismo mes; si es después del 10, sale en la tercera semana del mes siguiente.' },
     { q: '¿Puedo elegir las joyas que recibo?', a: 'No — la sorpresa es parte de la experiencia. Cada mes, el equipo de CACUSA selecciona las 2 piezas que recibirás, cuidando siempre variedad y calidad, sin que tengas que elegir nada.' },
     { q: '¿Envían a toda la República del Ecuador y USA?', a: 'Sí. El envío está incluido en el precio de la membresía tanto para Ecuador como para Estados Unidos, sin costo adicional.' },
     { q: '¿Cómo es el pago mensual?', a: 'Cada mes te llega por correo una factura de Square y la pagas con Apple Pay, Google Pay o tarjeta, en un toque. No guardamos tu tarjeta ni hacemos cobros automáticos. Square te envía el recibo después de cada pago.' }
@@ -1866,6 +1866,7 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
           <span>Total</span><span style={{ color: '#E8508A' }}>${order.total}</span>
         </div>
       </div>
+      {order.lote && <div style={{ display: 'inline-block', fontSize: 11, fontWeight: 700, color: '#C0336E', background: '#FCE8F3', borderRadius: 99, padding: '2px 10px', width: 'fit-content' }}>♡ Lote Lovers {order.lote} · sale del 15 al 21</div>}
       {order.notas && <div style={{ fontSize: 12, color: '#7A6880', fontStyle: 'italic' }}>📝 {order.notas}</div>}
 
       {/* ── Tracking ── */}
@@ -2990,6 +2991,22 @@ function LoversTab({ products = [], token }) {
     headers: { 'X-Admin-Key': token, ...(opts?.headers || {}) },
   });
 
+  // Lote mensual de envíos (11 oct): corte día 10, sale la 3ra semana.
+  const [loteMes, setLoteMes] = useState(new Date().toISOString().slice(0, 7));
+  const [lote, setLote] = useState(null);
+  const runLote = async (dryRun) => {
+    if (!dryRun && !confirm(`¿Crear los pedidos del lote ${loteMes}? Se crea 1 pedido por suscriptora (no se duplican).`)) return;
+    setLote(prev => ({ ...(prev || {}), loading: true }));
+    try {
+      const r = await loversApi('/admin/lovers-batch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ month: loteMes, dryRun }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setLote({ error: d.error || ('Error ' + r.status) }); return; }
+      setLote(d);
+    } catch (e) { setLote({ error: e.message }); }
+  };
+
   // Sincronizar con Square (11 oct): recupera pagos cuyo aviso de Square nunca llegó.
   const [sync, setSync] = useState(null);
   const runSync = async (dryRun) => {
@@ -3264,6 +3281,49 @@ function LoversTab({ products = [], token }) {
       <div style={{ fontSize: 13, color: '#7A6B85', marginBottom: 20 }}>Suscriptoras del club mensual $19.99/mes. Datos guardados al momento de procesar el pago.</div>
 
       {/* ── Alta manual (clientas que pagan por transferencia, sin suscripción recurrente en Square) ── */}
+      <div style={{ background: 'white', borderRadius: 16, border: '1px solid #EDE8EA', padding: '20px 24px', marginBottom: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14, color: '#1A1118', marginBottom: 4 }}>Lote de envío del mes</div>
+            <div style={{ fontSize: 12, color: '#7A6B85' }}>Todas las cajas salen juntas del 15 al 21. Entra quien pagó hasta el día 10 (anuales y manuales vigentes, cada mes). Se arma solo desde el día 11.</div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <label htmlFor="loteMes" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }}>Mes del lote</label>
+            <input id="loteMes" type="month" value={loteMes} onChange={e => { setLoteMes(e.target.value); setLote(null); }}
+              style={{ padding: '7px 10px', borderRadius: 8, border: '1px solid #e0e0e0', fontFamily: 'inherit', fontSize: 12 }} />
+            <button onClick={() => runLote(true)} disabled={lote?.loading}
+              style={{ background: 'white', color: '#C0336E', border: '1.5px solid #C0336E', borderRadius: 999, padding: '9px 20px', fontFamily: 'inherit', fontWeight: 700, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', opacity: lote?.loading ? .5 : 1 }}>
+              {lote?.loading ? 'Revisando…' : 'Ver lote'}
+            </button>
+          </div>
+        </div>
+        {lote && !lote.loading && (
+          <div role="status" aria-live="polite" style={{ marginTop: 14, fontSize: 12, color: '#5A4A60', lineHeight: 1.6 }}>
+            {lote.error && <div style={{ color: '#B3261E' }}>⚠ {lote.error}</div>}
+            {lote.dryRun === false && <div style={{ color: '#2C6149' }}>✓ Listo: {lote.creados || 0} pedido(s) nuevo(s) en Pedidos (filtro "Lote Lovers").</div>}
+            {lote.incluidas && (
+              <div>
+                <strong>{lote.incluidas.length} caja(s) en el lote {lote.month}:</strong>
+                {lote.incluidas.map(p => <div key={p.id}>· {p.nombre} — {p.motivo}{p.ciudad ? ` — ${p.ciudad}` : ''}</div>)}
+              </div>
+            )}
+            {lote.yaConPedido && lote.yaConPedido.length > 0 && (
+              <div style={{ marginTop: 6, color: '#7A6B85' }}>Ya tienen su pedido de este ciclo (creado antes del lote): {lote.yaConPedido.map(p => p.nombre).join(', ')}</div>
+            )}
+            {lote.sinDireccion && lote.sinDireccion.length > 0 && (
+              <div style={{ marginTop: 6, color: '#B45309' }}>Sin dirección (no se crea pedido hasta completarla): {lote.sinDireccion.map(p => p.nombre).join(', ')}</div>
+            )}
+            {lote.dryRun && lote.incluidas && lote.incluidas.length > 0 && (
+              <button onClick={() => runLote(false)}
+                style={{ marginTop: 8, background: '#C0336E', color: 'white', border: 'none', borderRadius: 999, padding: '8px 18px', fontFamily: 'inherit', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
+                Crear pedidos del lote
+              </button>
+            )}
+            {lote.errores && lote.errores.length > 0 && <div style={{ marginTop: 8, color: '#B3261E' }}>⚠ {lote.errores.join(' · ')}</div>}
+          </div>
+        )}
+      </div>
+
       <div style={{ background: 'white', borderRadius: 16, border: '1px solid #EDE8EA', padding: '20px 24px', marginBottom: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <div>
@@ -4459,6 +4519,7 @@ function App() {
   const [loversCount, setLoversCount] = useState(0);
   const [showOrderModal, setShowOrderModal] = useState(false);
   const [ordersView, setOrdersView]         = useState('active');
+  const [loteOnly, setLoteOnly]             = useState(false);
   const [histSearch, setHistSearch]         = useState('');
   const [histFrom, setHistFrom]             = useState('');
   const [histTo, setHistTo]                 = useState('');
@@ -4997,7 +5058,8 @@ function App() {
         {activeTab === 'orders' && (() => {
           const ACTIVE_STATES  = ['Nuevo', 'Confirmado', 'En proceso', 'Enviado'];
           const DONE_STATES    = ['Entregado', 'Cancelado'];
-          const activeOrders   = orders.filter(o => ACTIVE_STATES.includes(o.estado || 'Nuevo'));
+          const loteCount      = orders.filter(o => o.lote && ACTIVE_STATES.includes(o.estado || 'Nuevo')).length;
+          const activeOrders   = orders.filter(o => ACTIVE_STATES.includes(o.estado || 'Nuevo') && (!loteOnly || o.lote));
           const histOrders     = orders.filter(o => DONE_STATES.includes(o.estado || 'Nuevo'));
           const histFiltered   = histOrders.filter(o => {
             const q = histSearch.toLowerCase();
@@ -5040,6 +5102,13 @@ function App() {
                   </button>
                 ))}
               </div>
+              {ordersView === 'active' && loteCount > 0 && (
+                <button onClick={() => setLoteOnly(v => !v)}
+                  style={{ marginBottom: 16, padding: '7px 16px', borderRadius: 99, fontSize: 12, fontWeight: 700, fontFamily: 'inherit', cursor: 'pointer',
+                    background: loteOnly ? '#C0336E' : 'white', color: loteOnly ? 'white' : '#C0336E', border: '1.5px solid #C0336E' }}>
+                  ♡ Lote Lovers ({loteCount}){loteOnly ? ' · ver todos' : ''}
+                </button>
+              )}
 
               {/* Vista: Activos */}
               {ordersView === 'active' && (
