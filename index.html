@@ -3338,15 +3338,17 @@ function LoversTab({ products = [], token }) {
         {sync && !sync.loading && (
           <div role="status" aria-live="polite" style={{ marginTop: 14, fontSize: 12, color: '#5A4A60', lineHeight: 1.6 }}>
             {sync.error && <div style={{ color: '#B3261E' }}>⚠ {sync.error}</div>}
-            {sync.dryRun === false && <div style={{ color: '#2C6149' }}>✓ Listo: {sync.registrados || 0} pago(s) registrado(s) con su pedido.</div>}
-            {sync.dryRun && sync.pagosSinRegistrar && sync.pagosSinRegistrar.length === 0 && <div style={{ color: '#2C6149' }}>✓ Todos los pagos de Square ya están registrados.</div>}
-            {sync.dryRun && sync.pagosSinRegistrar && sync.pagosSinRegistrar.length > 0 && (
+            {sync.dryRun === false && <div style={{ color: '#2C6149' }}>✓ Listo: {sync.registrados || 0} pago(s) registrado(s){(sync.fechasCorregidas || []).length ? ` y ${sync.fechasCorregidas.length} fecha(s) corregida(s)` : ''}. Ahora vuelve a "Ver lote" para sumarlas al lote.</div>}
+            {sync.dryRun && sync.pagosSinRegistrar && sync.pagosSinRegistrar.length === 0 && !(sync.fechasCorregidas || []).length && <div style={{ color: '#2C6149' }}>✓ Todos los pagos de Square ya están registrados.</div>}
+            {sync.dryRun && sync.pagosSinRegistrar && (sync.pagosSinRegistrar.length > 0 || (sync.fechasCorregidas || []).length > 0) && (
               <div>
-                <strong>Pagos en Square sin registrar:</strong>
+                {sync.pagosSinRegistrar.length > 0 && <strong>Pagos en Square sin registrar:</strong>}
                 {sync.pagosSinRegistrar.map(p => <div key={p.factura}>· {p.nombre} — ${p.monto} — {p.fecha}</div>)}
+                {(sync.fechasCorregidas || []).length > 0 && <div style={{ marginTop: 6 }}><strong>Fechas de pago a corregir:</strong></div>}
+                {(sync.fechasCorregidas || []).map(p => <div key={'f' + p.factura}>· {p.nombre} — pagó el {p.fecha} (estaba como {p.antes})</div>)}
                 <button onClick={() => runSync(false)}
                   style={{ marginTop: 8, background: '#C0336E', color: 'white', border: 'none', borderRadius: 999, padding: '8px 18px', fontFamily: 'inherit', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
-                  Registrar pagos y crear pedidos
+                  Registrar pagos
                 </button>
               </div>
             )}
