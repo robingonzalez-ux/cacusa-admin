@@ -3281,6 +3281,13 @@ function LoversTab({ products = [], token }) {
       <div style={{ fontSize: 13, color: '#7A6B85', marginBottom: 20 }}>Suscriptoras del club mensual $19.99/mes. Datos guardados al momento de procesar el pago.</div>
 
       {/* ── Alta manual (clientas que pagan por transferencia, sin suscripción recurrente en Square) ── */}
+      {/* Herramientas avanzadas (11 oct): el lote, la sincronización con Square y la revisión
+          de duplicados corren solos cada día — esto queda cerrado por defecto para no confundir. */}
+      <details style={{ marginBottom: 16 }}>
+        <summary style={{ cursor: 'pointer', fontSize: 13, fontWeight: 700, color: '#7A6B85', padding: '8px 0' }}>
+          Herramientas avanzadas (no hace falta usarlas: el lote y Square se actualizan solos cada día)
+        </summary>
+        <div style={{ marginTop: 10 }}>
       <div style={{ background: 'white', borderRadius: 16, border: '1px solid #EDE8EA', padding: '20px 24px', marginBottom: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <div>
@@ -3407,6 +3414,9 @@ function LoversTab({ products = [], token }) {
           </div>
         )}
       </div>
+
+        </div>
+      </details>
 
       <div style={{ background: 'white', borderRadius: 16, border: '1px solid #EDE8EA', padding: '20px 24px', marginBottom: 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
