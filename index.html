@@ -1627,6 +1627,20 @@ function PickupTodayButton({ token }) {
   );
 }
 
+// Nombre completo del cliente: los pedidos de Lovers guardan nombre y apellido por separado
+// (la tarjeta solo mostraba el nombre); los de la tienda traen el nombre completo en `nombre`
+// y el apellido vacío — no se repite si el apellido ya está dentro del nombre.
+function orderFullName(c) {
+  const n = String((c && c.nombre) || '').trim(), a = String((c && c.apellido) || '').trim();
+  if (!a || n.toLowerCase().includes(a.toLowerCase())) return n;
+  return n ? `${n} ${a}` : a;
+}
+// La tienda guarda "Ciudad, US" en la ciudad: se quita el país si ya va aparte.
+function orderCiudad(c) {
+  const ciudad = String((c && c.ciudad) || '').trim(), pais = String((c && c.pais) || '').trim();
+  return pais && ciudad.toLowerCase().endsWith(', ' + pais.toLowerCase()) ? ciudad.slice(0, -(pais.length + 2)).trim() : ciudad;
+}
+
 function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrackingChange, onCarrierChange, onClienteUpdate, onLabelGenerated }) {
   const [showLabelModal, setShowLabelModal] = React.useState(false);
   // País: `pais`, o lo que va después de la última coma de la ciudad ("Miami, US") — los
@@ -1670,6 +1684,31 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
   const saveAddr = () => {
     onClienteUpdate && onClienteUpdate(order, { ...addrDraft });
     setEditAddr(false);
+  };
+  // Red de seguridad (12 oct): un pedido de Lovers sin dirección (de cualquier origen) se
+  // completa eligiendo a la suscriptora: copia sus datos al pedido con el mismo patch que
+  // "Editar dirección" (ORDER_CLIENTE_PATCH_FIELDS).
+  const [fichas, setFichas] = React.useState(null); // null | 'cargando' | [..] | 'error'
+  const cargarFichas = async () => {
+    setFichas('cargando');
+    try {
+      const r = await fetch(`${LOVERS_WEBHOOK_URL}/admin/lovers`, { headers: { 'X-Admin-Key': token } });
+      const d = await r.json();
+      const arr = Object.entries(d.subscribers || {}).map(([id, v]) => ({ id, ...v }))
+        .filter(x => x && typeof x === 'object' && x.estado_pago !== 'cancelado')
+        .sort((a, b) => orderFullName(a).localeCompare(orderFullName(b)));
+      setFichas(r.ok ? arr : 'error');
+    } catch (_) { setFichas('error'); }
+  };
+  const completarDesdeFicha = id => {
+    const f = Array.isArray(fichas) ? fichas.find(x => x.id === id) : null;
+    if (!f) return;
+    const campos = {};
+    // Solo lo que la ficha SÍ tiene: el patch pone el valor tal cual, y uno vacío borraría el del pedido.
+    for (const k of ['nombre', 'apellido', 'email', 'telefono', 'direccion', 'apto', 'ciudad', 'estado', 'zip', 'pais']) if (String(f[k] || '').trim()) campos[k] = String(f[k]).trim();
+    if (!campos.direccion && !confirm(`${orderFullName(f)} tampoco tiene dirección en su ficha. ¿Copiar igual los demás datos?`)) return;
+    onClienteUpdate && onClienteUpdate(order, campos);
+    setFichas(null);
   };
   const buscarZip = async () => {
     setZipBusy(true); setZipErr(''); setZipFound(null);
@@ -1761,11 +1800,11 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
     <div style={{ background: 'white', borderRadius: 16, padding: 18, boxShadow: '0 2px 12px rgba(0,0,0,0.07)', border: '1px solid #f0ecf0', display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
-          <div style={{ fontWeight: 700, fontSize: 15, color: '#1A1118' }}>{(order.cliente && order.cliente.nombre) || 'Cliente'}</div>
-          <div style={{ fontSize: 12, color: '#7A6880', marginTop: 2 }}>{order.cliente && order.cliente.telefono} · {order.cliente && order.cliente.ciudad}</div>
+          <div style={{ fontWeight: 700, fontSize: 15, color: '#1A1118' }}>{orderFullName(order.cliente) || 'Cliente'}</div>
+          <div style={{ fontSize: 12, color: '#7A6880', marginTop: 2 }}>{order.cliente && order.cliente.telefono}{order.cliente?.telefono && order.cliente?.ciudad ? ' · ' : ''}{!order.cliente?.direccion && !order.cliente?.estado && !order.cliente?.zip ? (order.cliente && order.cliente.ciudad) : ''}</div>
           {(order.cliente?.direccion || order.cliente?.estado || order.cliente?.zip) && (
             <div style={{ fontSize: 12, color: '#7A6880', marginTop: 2 }}>
-              📍 {[order.cliente?.direccion, order.cliente?.apto, order.cliente?.estado, order.cliente?.zip, order.cliente?.pais].filter(Boolean).join(', ')}
+              📍 {[order.cliente?.direccion, order.cliente?.apto, orderCiudad(order.cliente), order.cliente?.estado, order.cliente?.zip, order.cliente?.pais].filter(Boolean).join(', ')}
             </div>
           )}
           {order.cliente?.email && <div style={{ fontSize: 12, color: '#7A6880', marginTop: 2 }}>✉️ {order.cliente.email}</div>}
@@ -1827,6 +1866,28 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
               style={{ marginTop: 4, fontSize: 11, fontWeight: 700, color: '#7A5F8A', background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
               ✎ Editar dirección
             </button>
+          )}
+          {order.pago === 'Lovers' && !order.cliente?.direccion && (
+            <div style={{ marginTop: 6, background: '#FFF7E6', border: '1px solid #F5C77A', borderRadius: 10, padding: '8px 10px', fontSize: 12, color: '#8A6416' }}>
+              <strong>Sin datos del cliente.</strong>{' '}
+              {fichas === null && (
+                <button onClick={cargarFichas} style={{ fontSize: 12, fontWeight: 700, color: '#8A6416', background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
+                  Completar desde una suscriptora
+                </button>
+              )}
+              {fichas === 'cargando' && 'Cargando suscriptoras…'}
+              {fichas === 'error' && <span style={{ color: '#B3261E' }}>No se pudo cargar la lista. Cierra y vuelve a intentar.</span>}
+              {Array.isArray(fichas) && (
+                <>
+                  <label htmlFor={`fichaSel-${order.id}`} style={srOnly}>Suscriptora</label>
+                  <select id={`fichaSel-${order.id}`} defaultValue="" onChange={e => completarDesdeFicha(e.target.value)}
+                    style={{ fontSize: 12, padding: '4px 6px', borderRadius: 6, border: '1px solid #F5C77A', fontFamily: 'inherit', maxWidth: '100%' }}>
+                    <option value="">Elige a la suscriptora…</option>
+                    {fichas.map(f => <option key={f.id} value={f.id}>{orderFullName(f) || f.email}{f.direccion ? '' : ' (sin dirección)'} · {f.email}</option>)}
+                  </select>
+                </>
+              )}
+            </div>
           )}
           {!order.cliente?.zip && order.cliente?.direccion && (
             <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -5173,6 +5234,8 @@ function App() {
             const q = histSearch.toLowerCase();
             const matchQ = !q ||
               ((o.cliente?.nombre || '').toLowerCase().includes(q)) ||
+              ((o.cliente?.apellido || '').toLowerCase().includes(q)) ||
+              ((o.cliente?.email || '').toLowerCase().includes(q)) ||
               ((o.cliente?.telefono || '').toLowerCase().includes(q)) ||
               ((o.cliente?.ciudad || '').toLowerCase().includes(q));
             const oDate = o.fecha ? o.fecha.substring(0, 10) : '';
