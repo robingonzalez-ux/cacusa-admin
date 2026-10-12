@@ -3279,7 +3279,14 @@ function LoversTab({ products = [], token }) {
   const estadoLabel = e => ({ 'activo': 'Activo ✓', 'pendiente': 'Pendiente', 'cancelado': 'Cancelado', 'pago_fallido': 'Pago fallido ⚠️', 'vencido': 'Sin pagar (pausada)', 'pausado': 'En pausa ⏸' }[e] || e || 'Pendiente');
   // Solo se muestra como link una URL real de Square (la factura pendiente).
   const isSquareUrl = u => /^https:\/\/[a-z0-9.-]*square(up)?\.(com|site|link)\//i.test(u || '');
-  const fmt = iso => { try { return new Date(iso).toLocaleDateString('es', { day:'2-digit', month:'short', year:'numeric' }); } catch { return iso || '—'; } };
+  // Las fechas guardadas como AAAA-MM-DD (último pago, válido hasta, inscripción) se leían como
+  // medianoche UTC y en Ecuador (UTC-5) salían UN DÍA ANTES (2026-10-03 → "02 oct"): se formatean en UTC.
+  const fmt = iso => {
+    try {
+      const soloDia = /^\d{4}-\d{2}-\d{2}$/.test(iso || '');
+      return new Date(soloDia ? iso + 'T12:00:00Z' : iso).toLocaleDateString('es', { day:'2-digit', month:'short', year:'numeric', ...(soloDia ? { timeZone: 'UTC' } : {}) });
+    } catch { return iso || '—'; }
+  };
   const todayIso = new Date().toISOString().slice(0, 10);
   // ¿La suscripción 'activo' tiene el pago al día? (12 oct, caso Rachely: salía "Activo"
   // sin ningún pago registrado y no había forma de notarlo). Misma regla que pagoAlDia()
@@ -3343,7 +3350,22 @@ function LoversTab({ products = [], token }) {
               </div>
             )}
             {lote.yaConPedido && lote.yaConPedido.length > 0 && (
-              <div style={{ marginTop: 6, color: '#7A6B85' }}>Ya tienen su pedido de este ciclo (creado antes del lote): {lote.yaConPedido.map(p => p.nombre).join(', ')}</div>
+              <div style={{ marginTop: 6, color: '#7A6B85' }}>Ya están trabajando su pedido de este ciclo (no se crea otro): {lote.yaConPedido.map(p => p.nombre).join(', ')}</div>
+            )}
+            {lote.reparacion && (lote.reparacion.adoptados.length + lote.reparacion.completados.length) > 0 && (
+              <div style={{ marginTop: 6, color: '#2C6149' }}>
+                {lote.dryRun === false ? '✓ Pedidos viejos completados con su dirección' : 'Se completarán con la dirección de su ficha (pedidos del sistema anterior)'}: {[...lote.reparacion.adoptados, ...lote.reparacion.completados].map(p => p.nombre).join(', ')}
+              </div>
+            )}
+            {lote.reparacion && lote.reparacion.borrados.length > 0 && (
+              <div style={{ marginTop: 6, color: '#2C6149' }}>
+                {lote.dryRun === false ? '✓ Duplicados quitados' : 'Se quitarán por duplicado (vacíos y sin trabajar)'}: {lote.reparacion.borrados.map(p => p.nombre).join(', ')}
+              </div>
+            )}
+            {lote.reparacion && lote.reparacion.sinResolver.length > 0 && (
+              <div style={{ marginTop: 6, color: '#B45309' }}>
+                ⚠ Tienen un pedido duplicado que ya tocaron (no se borra solo, revísalo en Pedidos): {lote.reparacion.sinResolver.map(p => p.nombre).join(', ')}
+              </div>
             )}
             {lote.sinDireccion && lote.sinDireccion.length > 0 && (
               <div style={{ marginTop: 6, color: '#B45309' }}>Sin dirección (no se crea pedido hasta completarla): {lote.sinDireccion.map(p => p.nombre).join(', ')}</div>
