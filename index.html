@@ -3059,12 +3059,13 @@ function LoversTab({ products = [], token }) {
   // Lote mensual de envíos (11 oct): corte día 10, sale la 3ra semana.
   const [loteMes, setLoteMes] = useState(new Date().toISOString().slice(0, 7));
   const [lote, setLote] = useState(null);
-  const runLote = async (dryRun) => {
-    if (!dryRun && !confirm(`¿Crear los pedidos del lote ${loteMes}? Se crea 1 pedido por suscriptora (no se duplican).`)) return;
+  const runLote = async (dryRun, limpiarVacios = false) => {
+    if (!dryRun && limpiarVacios && !confirm(`¿Quitar ${lote?.reparacion?.vacios?.length || 0} pedido(s) vacío(s) del sistema anterior? Son pedidos sin ningún dato del cliente que nadie ha tocado. No se puede deshacer. Después se crean los pedidos del lote que falten.`)) return;
+    if (!dryRun && !limpiarVacios && !confirm(`¿Crear los pedidos del lote ${loteMes}? Se crea 1 pedido por suscriptora (no se duplican).`)) return;
     setLote(prev => ({ ...(prev || {}), loading: true }));
     try {
       const r = await loversApi('/admin/lovers-batch', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ month: loteMes, dryRun }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ month: loteMes, dryRun, ...(limpiarVacios ? { limpiarVacios: true } : {}) }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { setLote({ error: d.error || ('Error ' + r.status) }); return; }
@@ -3421,6 +3422,20 @@ function LoversTab({ products = [], token }) {
             {lote.reparacion && lote.reparacion.borrados.length > 0 && (
               <div style={{ marginTop: 6, color: '#2C6149' }}>
                 {lote.dryRun === false ? '✓ Duplicados quitados' : 'Se quitarán por duplicado (vacíos y sin trabajar)'}: {lote.reparacion.borrados.map(p => p.nombre).join(', ')}
+              </div>
+            )}
+            {lote.reparacion && lote.reparacion.vacios && lote.reparacion.vacios.length > 0 && (
+              <div style={{ marginTop: 6, color: '#B45309' }}>
+                <strong>Pedidos viejos vacíos sin dueña ({lote.reparacion.vacios.length}):</strong>{' '}
+                {lote.reparacion.vacios.map(p => `${p.nombre} (${p.fecha})`).join(', ')}
+                {lote.dryRun && (
+                  <div>
+                    <button onClick={() => runLote(false, true)}
+                      style={{ marginTop: 6, background: 'white', color: '#B45309', border: '1.5px solid #B45309', borderRadius: 999, padding: '6px 14px', fontFamily: 'inherit', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
+                      Quitar estos pedidos vacíos
+                    </button>
+                  </div>
+                )}
               </div>
             )}
             {lote.reparacion && lote.reparacion.sinResolver.length > 0 && (
