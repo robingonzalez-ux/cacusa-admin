@@ -3391,7 +3391,12 @@ function LoversTab({ products = [], token }) {
                 )}
               </div>
             )}
-            {sync.dryRun && sync.pagosSinRegistrar && sync.pagosSinRegistrar.length === 0 && !(sync.fechasCorregidas || []).length && !(sync.pagosLink || []).length && <div style={{ color: '#2C6149' }}>✓ Todos los pagos de Square ya están registrados.</div>}
+            {sync.dryRun && sync.pagosSinRegistrar && sync.pagosSinRegistrar.length === 0 && !(sync.fechasCorregidas || []).length && !(sync.pagosLink || []).length && !(sync.sinPagoEncontrado || []).length && <div style={{ color: '#2C6149' }}>✓ Todos los pagos de Square ya están registrados.</div>}
+            {sync.sinPagoEncontrado && sync.sinPagoEncontrado.length > 0 && (
+              <div style={{ color: '#B91C1C', fontWeight: 700 }}>
+                ⚠ No se encontró ningún pago en Square de: {sync.sinPagoEncontrado.map(p => p.nombre).join(', ')}. Si ya pagaron, revisa en Square que el pago esté a su nombre; si pagaron por otro medio, regístralo en "Editar datos".
+              </div>
+            )}
             {sync.dryRun && sync.pagosSinRegistrar && (sync.pagosSinRegistrar.length > 0 || (sync.fechasCorregidas || []).length > 0 || (sync.pagosLink || []).length > 0) && (
               <div>
                 {sync.pagosSinRegistrar.length > 0 && <strong>Pagos en Square sin registrar:</strong>}
