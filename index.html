@@ -1629,8 +1629,12 @@ function PickupTodayButton({ token }) {
 
 function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrackingChange, onCarrierChange, onClienteUpdate, onLabelGenerated }) {
   const [showLabelModal, setShowLabelModal] = React.useState(false);
-  const paisUpper = ((order.cliente && order.cliente.pais) || '').toUpperCase();
-  const isUsOrder = ['USA', 'US', 'ESTADOS UNIDOS', 'UNITED STATES'].includes(paisUpper);
+  // País: `pais`, o lo que va después de la última coma de la ciudad ("Miami, US") — los
+  // pedidos Zelle/WhatsApp de la tienda lo guardaban así (12 oct). Misma regla que
+  // orderCountryParts() en cacusa-admin.
+  const paisUpper = (((order.cliente && order.cliente.pais) || '').trim()
+    || (((order.cliente && order.cliente.ciudad) || '').match(/,\s*([^,]+)$/) || [])[1] || '').trim().toUpperCase();
+  const isUsOrder = ['USA', 'US', 'ESTADOS UNIDOS', 'UNITED STATES', 'EEUU', 'EE.UU.', 'EE UU', 'EE. UU.'].includes(paisUpper);
   const dateStr = new Date(order.fecha).toLocaleDateString('es-EC', { day: '2-digit', month: 'short', year: 'numeric' });
   const estado = order.estado || 'Nuevo';
   const nextIdx = Math.min(ORDER_STATES.indexOf(estado) + 1, ORDER_STATES.length - 2);
@@ -3164,7 +3168,8 @@ function LoversTab({ products = [], token }) {
         setSubs(prev => prev.map(s => s.id === id ? { ...s, ...editForm } : s));
         if (editingId === id) setEditingId(null); // no cerrar otra fila que se haya abierto mientras tanto
       } else {
-        alert('No se pudieron guardar los cambios — intenta de nuevo.');
+        const d = await r.json().catch(() => ({}));
+        alert(d.error ? `No se guardó: ${d.error}` : 'No se pudieron guardar los cambios — intenta de nuevo.');
       }
     } catch (_) { alert('Error de conexión al guardar.'); }
     setSavingEdit(false);
@@ -3711,9 +3716,10 @@ function LoversTab({ products = [], token }) {
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
                       {[['Email', 'email'], ['Teléfono', 'telefono']].map(([lbl, key]) => (
                         <div key={key}>
-                          <div style={{ fontSize: 11, color: '#7A6B85', marginBottom: 4 }}>{lbl}</div>
-                          <input value={editForm[key]} onChange={e => ef(key, e.target.value)}
-                            style={{ width: '100%', boxSizing: 'border-box', border: '1.5px solid #EDE8EA', borderRadius: 8, padding: '7px 10px', fontSize: 13, fontFamily: 'inherit', outline: 'none' }} />
+                          <div style={{ fontSize: 11, color: '#7A6B85', marginBottom: 4 }}>{lbl}{key === 'email' ? ' (no se puede cambiar)' : ''}</div>
+                          {/* El email identifica la ficha en Firebase: el Worker no deja cambiarlo. */}
+                          <input value={editForm[key]} onChange={e => ef(key, e.target.value)} readOnly={key === 'email'}
+                            style={{ width: '100%', boxSizing: 'border-box', border: '1.5px solid #EDE8EA', borderRadius: 8, padding: '7px 10px', fontSize: 13, fontFamily: 'inherit', outline: 'none', ...(key === 'email' ? { background: '#F7F4F6', color: '#7A6B85' } : {}) }} />
                         </div>
                       ))}
                     </div>
