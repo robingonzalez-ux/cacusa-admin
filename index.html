@@ -2809,6 +2809,262 @@ function GiftCardsTab({ token }) {
   );
 }
 
+// ── Marketing por correo (13 oct) ────────────────────────────────────────────
+// Campañas a los registros del popup del 10% y/o a las suscriptoras de Lovers. Salen por
+// el mismo Gmail de los pedidos, en tandas (ver handleMktSendBatch en admin-worker.js):
+// este componente pide una tanda tras otra mientras la pestaña está abierta; si se cierra,
+// "Continuar envío" en el historial retoma desde donde quedó. Cada correo lleva link de
+// baja y la dirección postal (MKT_POSTAL_ADDRESS en Cloudflare).
+const MKT_EMPTY = { subject: '', preheader: '', title: '', body: '', imageUrl: '', ctaText: '', ctaUrl: '' };
+function MarketingTab({ token, products }) {
+  const [aud, setAud] = useState({ leads: true, lovers: ['activas'] });
+  const [audInfo, setAudInfo] = useState(null);
+  const [audErr, setAudErr] = useState('');
+  const [es, setEs] = useState(MKT_EMPTY);
+  const [conEn, setConEn] = useState(false);
+  const [en, setEn] = useState(MKT_EMPTY);
+  const [prodIds, setProdIds] = useState([]);
+  const [prodQ, setProdQ] = useState('');
+  const [previewLang, setPreviewLang] = useState('es');
+  const [preview, setPreview] = useState(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [testTo, setTestTo] = useState(() => { try { return localStorage.getItem('cacusa-mkt-test') || ''; } catch (_) { return ''; } });
+  const [busy, setBusy] = useState('');
+  const [msg, setMsg] = useState(null);
+  const [sending, setSending] = useState(null); // resumen de la campaña en curso
+  const [campaigns, setCampaigns] = useState(null);
+  const stopRef = useRef(false);
+
+  const payload = () => ({ es, en: conEn ? en : undefined, productIds: prodIds });
+  const loadCampaigns = () => apiCall('marketing/campaigns', { token }).then(d => setCampaigns(d.campaigns || [])).catch(() => setCampaigns([]));
+  useEffect(() => { loadCampaigns(); return () => { stopRef.current = true; }; }, []);
+  useEffect(() => {
+    setAudErr('');
+    apiCall('marketing/audience', { token, audiencia: aud }).then(setAudInfo).catch(e => { setAudInfo(null); setAudErr(e.message); });
+  }, [aud.leads, aud.lovers.join(',')]);
+
+  const toggleLovers = g => setAud(a => ({ ...a, lovers: a.lovers.includes(g) ? a.lovers.filter(x => x !== g) : [...a.lovers, g] }));
+  const doPreview = async (lang = previewLang) => {
+    setPreviewing(true);
+    try { setPreview(await apiCall('marketing/preview', { token, ...payload(), lang })); }
+    catch (e) { setPreview({ error: e.message }); }
+    setPreviewing(false);
+  };
+  const doTest = async () => {
+    setBusy('test'); setMsg(null);
+    try {
+      await apiCall('marketing/test', { token, ...payload(), to: testTo, lang: previewLang });
+      try { localStorage.setItem('cacusa-mkt-test', testTo); } catch (_) {}
+      setMsg({ ok: true, text: `✓ Prueba enviada a ${testTo}. Revisa tu correo (también Promociones/Spam).` });
+    } catch (e) { setMsg({ ok: false, text: e.message }); }
+    setBusy('');
+  };
+  // Pide tandas hasta terminar, llegar al tope diario, o que Gmail frene.
+  const runBatches = async (camp) => {
+    stopRef.current = false;
+    let c = camp, esperas = 0;
+    setSending(c);
+    while (!stopRef.current && c && !c.done) {
+      let d;
+      try { d = await apiCall('marketing/send-batch', { token, id: c.id }); }
+      catch (e) { setMsg({ ok: false, text: `Se detuvo el envío: ${e.message}. Puedes continuarlo desde el historial.` }); break; }
+      c = d.campaign; setSending(c);
+      if (d.ocupado) {
+        // Otra pestaña está mandando esta misma campaña: esperar y volver a mirar.
+        if (++esperas > 20) { setMsg({ ok: false, text: 'Otra pestaña está enviando esta campaña. Déjala terminar allá.' }); break; }
+        await new Promise(r => setTimeout(r, 3000)); continue;
+      }
+      esperas = 0;
+      if (d.topeDiario && !c.done) { setMsg({ ok: false, text: `Se llegó al tope de ${audInfo ? audInfo.topeDiario : 400} correos de marketing por hoy (para no frenar los correos de pedidos). Mañana toca "Continuar envío" en el historial.` }); break; }
+      if (d.frenado) { setMsg({ ok: false, text: `Gmail pidió una pausa (${d.frenado}). Prueba "Continuar envío" en un rato.` }); break; }
+    }
+    if (c && c.done) setMsg({ ok: true, text: `✓ Campaña enviada: ${c.sent} correo(s)${c.skipped ? `, ${c.skipped} se dieron de baja antes` : ''}${c.errores ? `, ${c.errores} con error` : ''}.` });
+    setSending(null);
+    loadCampaigns();
+  };
+  const doSend = async () => {
+    if (!audInfo || !audInfo.total) return;
+    if (!confirm(`¿Enviar "${es.subject}" a ${audInfo.total} persona(s)? No se puede deshacer.\n\nAntes, mándate una prueba y revísala.`)) return;
+    setBusy('send'); setMsg(null);
+    try {
+      const d = await apiCall('marketing/campaign', { token, ...payload(), audiencia: aud });
+      setBusy('');
+      await runBatches(d.campaign);
+    } catch (e) { setMsg({ ok: false, text: e.message }); setBusy(''); }
+  };
+
+  const inp = { padding: '9px 12px', borderRadius: 8, border: '1.5px solid #e0e0e0', fontSize: 13, width: '100%', boxSizing: 'border-box', fontFamily: 'inherit' };
+  const lbl = { fontSize: 12, fontWeight: 700, color: '#4A3550', display: 'block', marginBottom: 4, marginTop: 12 };
+  const card = { background: 'white', borderRadius: 12, border: '1px solid #EDE8EA', padding: 18, marginBottom: 16 };
+  const btn = (primary, disabled) => ({ padding: '10px 18px', borderRadius: 999, border: primary ? 'none' : '1.5px solid #C0336E', background: primary ? '#C0336E' : 'white', color: primary ? 'white' : '#C0336E', fontWeight: 700, fontSize: 13, cursor: disabled ? 'default' : 'pointer', opacity: disabled ? .55 : 1, fontFamily: 'inherit' });
+  const fmt = iso => { try { return new Date(iso).toLocaleString('es-EC', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); } catch { return iso; } };
+  const editor = (v, set, sufijo, idp) => (
+    <div>
+      <label style={lbl} htmlFor={idp + 'subj'}>Asunto{sufijo}</label>
+      <input id={idp + 'subj'} style={inp} maxLength={150} value={v.subject} onChange={e => set({ ...v, subject: e.target.value })} placeholder="Ej: Llegó la colección de otoño ✦" />
+      <label style={lbl} htmlFor={idp + 'pre'}>Texto de vista previa{sufijo} <span style={{ fontWeight: 400, color: '#7A6B85' }}>(lo que se ve junto al asunto en la bandeja)</span></label>
+      <input id={idp + 'pre'} style={inp} maxLength={200} value={v.preheader} onChange={e => set({ ...v, preheader: e.target.value })} />
+      <label style={lbl} htmlFor={idp + 'tit'}>Título{sufijo}</label>
+      <input id={idp + 'tit'} style={inp} maxLength={150} value={v.title} onChange={e => set({ ...v, title: e.target.value })} />
+      <label style={lbl} htmlFor={idp + 'body'}>Texto{sufijo} <span style={{ fontWeight: 400, color: '#7A6B85' }}>(línea en blanco = párrafo nuevo)</span></label>
+      <textarea id={idp + 'body'} style={{ ...inp, minHeight: 130, resize: 'vertical' }} maxLength={5000} value={v.body} onChange={e => set({ ...v, body: e.target.value })} />
+      <label style={lbl} htmlFor={idp + 'img'}>Imagen{sufijo} (link https://, opcional)</label>
+      <input id={idp + 'img'} style={inp} value={v.imageUrl} onChange={e => set({ ...v, imageUrl: e.target.value })} placeholder="https://cacusabytaitus.com/ui_kits/store/images/…" />
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 10 }}>
+        <div>
+          <label style={lbl} htmlFor={idp + 'cta'}>Texto del botón{sufijo}</label>
+          <input id={idp + 'cta'} style={inp} maxLength={60} value={v.ctaText} onChange={e => set({ ...v, ctaText: e.target.value })} placeholder="Ver la tienda" />
+        </div>
+        <div>
+          <label style={lbl} htmlFor={idp + 'ctau'}>Link del botón{sufijo}</label>
+          <input id={idp + 'ctau'} style={inp} value={v.ctaUrl} onChange={e => set({ ...v, ctaUrl: e.target.value })} placeholder="https://cacusabytaitus.com/ui_kits/store/" />
+        </div>
+      </div>
+    </div>
+  );
+  const q = prodQ.trim().toLowerCase();
+  const prodMatches = q ? (products || []).filter(p => String(p.name || '').toLowerCase().includes(q) && !prodIds.includes(String(p.id))).slice(0, 8) : [];
+  const prodById = id => (products || []).find(p => String(p.id) === String(id));
+  const enCurso = (campaigns || []).filter(c => !c.done);
+
+  return (
+    <div style={{ maxWidth: 820 }}>
+      <div style={{ fontWeight: 800, fontSize: 18, color: '#1A1118', marginBottom: 4 }}>✉ Marketing por correo</div>
+      <div style={{ fontSize: 13, color: '#7A6B85', marginBottom: 18 }}>Correos de promociones a quienes se registraron en el popup del 10% y a las suscriptoras de Lovers. Salen desde facturacioncacusa@gmail.com, cada uno con su link de baja. Primero mándate una prueba.</div>
+
+      {audInfo && !audInfo.direccionPostal && (
+        <div role="alert" style={{ ...card, background: '#FFF4E5', borderColor: '#F5C27A', color: '#7A4A00', fontSize: 13 }}>
+          <strong>Falta la dirección postal del negocio.</strong> La ley de EE.UU. exige ponerla en cada correo de promoción. Cárgala en Cloudflare → cacusa-admin → Settings → Variables and secrets → <code>MKT_POSTAL_ADDRESS</code> (tipo Text; ej. "PO Box 123, Clearwater, FL 33755"). Hasta entonces puedes ver la vista previa y mandarte pruebas, pero no enviar la campaña.
+        </div>
+      )}
+
+      {enCurso.length > 0 && !sending && (
+        <div style={{ ...card, background: '#FCE8F3', borderColor: '#F3C1DA' }}>
+          {enCurso.map(c => (
+            <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', fontSize: 13 }}>
+              <span style={{ flex: 1 }}>Envío sin terminar: <strong>{c.subject}</strong> — {c.next} de {c.total}</span>
+              <button style={btn(true, false)} onClick={() => runBatches(c)}>Continuar envío</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <fieldset style={{ ...card, margin: '0 0 16px' }}>
+        <legend style={{ fontWeight: 800, fontSize: 14, color: '#1A1118', padding: '0 6px' }}>1. ¿A quién?</legend>
+        <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, marginBottom: 8 }}>
+          <input type="checkbox" checked={aud.leads} onChange={e => setAud(a => ({ ...a, leads: e.target.checked }))} /> Registros del popup 10%
+        </label>
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 13 }}>
+          <span style={{ color: '#7A6B85' }}>Cacusa Lovers:</span>
+          {[['activas', 'Activas'], ['pausadas', 'Pausadas / vencidas'], ['canceladas', 'Canceladas / sin pagar']].map(([g, l]) => (
+            <label key={g} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input type="checkbox" checked={aud.lovers.includes(g)} onChange={() => toggleLovers(g)} /> {l}
+            </label>
+          ))}
+        </div>
+        <div role="status" aria-live="polite" style={{ marginTop: 12, fontSize: 13, color: audErr ? '#B3261E' : '#1A1118' }}>
+          {audErr ? audErr : audInfo ? (
+            <span><strong>{audInfo.total}</strong> persona(s) · {audInfo.conteo.landing} del popup, {audInfo.conteo.lovers} solo de Lovers{audInfo.conteo.enAmbas ? `, ${audInfo.conteo.enAmbas} en ambas (cuentan una vez)` : ''}{audInfo.conteo.bajas ? ` · ${audInfo.conteo.bajas} se dieron de baja (no reciben)` : ''} · hoy van {audInfo.enviadosHoy} de {audInfo.topeDiario}</span>
+          ) : 'Contando…'}
+        </div>
+      </fieldset>
+
+      <fieldset style={{ ...card, margin: '0 0 16px' }}>
+        <legend style={{ fontWeight: 800, fontSize: 14, color: '#1A1118', padding: '0 6px' }}>2. El correo</legend>
+        {editor(es, setEs, '', 'mkes-')}
+        <label style={lbl} htmlFor="mk-prod">Productos del catálogo (hasta 4, salen con foto, precio y link)</label>
+        <input id="mk-prod" style={inp} value={prodQ} onChange={e => setProdQ(e.target.value)} placeholder="Busca por nombre…" disabled={prodIds.length >= 4} />
+        {prodMatches.length > 0 && (
+          <div style={{ border: '1px solid #EDE8EA', borderRadius: 8, marginTop: 4 }}>
+            {prodMatches.map(p => (
+              <button key={p.id} type="button" onClick={() => { setProdIds(ids => [...ids, String(p.id)].slice(0, 4)); setProdQ(''); }}
+                style={{ display: 'flex', width: '100%', gap: 10, alignItems: 'center', padding: '6px 10px', border: 'none', borderBottom: '1px solid #F3EEF1', background: 'white', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, textAlign: 'left' }}>
+                {p.imageUrl && <img src={p.imageUrl} alt="" style={{ width: 32, height: 32, objectFit: 'cover', borderRadius: 6 }} />}
+                <span style={{ flex: 1 }}>{p.name}</span><span style={{ color: '#7A6B85' }}>${p.price}</span>
+                {String(p.available) === 'False' || p.available === false ? <span style={{ fontSize: 11, color: '#B3261E' }}>no disponible</span> : null}
+              </button>
+            ))}
+          </div>
+        )}
+        {prodIds.length > 0 && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+            {prodIds.map(id => { const p = prodById(id); return (
+              <span key={id} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#FCE8F3', borderRadius: 999, padding: '4px 6px 4px 12px', fontSize: 12 }}>
+                {p ? p.name : `#${id}`}
+                <button type="button" aria-label={`Quitar ${p ? p.name : id}`} onClick={() => setProdIds(ids => ids.filter(x => x !== id))}
+                  style={{ border: 'none', background: 'white', borderRadius: 999, width: 22, height: 22, cursor: 'pointer', color: '#C0336E', fontWeight: 700 }}>✕</button>
+              </span>
+            ); })}
+          </div>
+        )}
+        <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, marginTop: 16 }}>
+          <input type="checkbox" checked={conEn} onChange={e => setConEn(e.target.checked)} /> Agregar versión en inglés (si no, las que navegan en inglés lo reciben en español)
+        </label>
+        {conEn && <div style={{ borderTop: '1px dashed #EDE8EA', marginTop: 12 }}>{editor(en, setEn, ' (inglés)', 'mken-')}</div>}
+      </fieldset>
+
+      <fieldset style={{ ...card, margin: '0 0 16px' }}>
+        <legend style={{ fontWeight: 800, fontSize: 14, color: '#1A1118', padding: '0 6px' }}>3. Revisar y enviar</legend>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+          <button style={btn(false, previewing)} disabled={previewing} onClick={() => doPreview()}>{previewing ? 'Armando…' : 'Ver vista previa'}</button>
+          {conEn && (
+            <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center' }}>
+              Idioma:
+              <select value={previewLang} onChange={e => { setPreviewLang(e.target.value); if (preview) doPreview(e.target.value); }} style={{ ...inp, width: 'auto', padding: '6px 8px' }}>
+                <option value="es">Español</option><option value="en">Inglés</option>
+              </select>
+            </label>
+          )}
+        </div>
+        {preview && preview.error && <div role="alert" style={{ color: '#B3261E', fontSize: 13, marginTop: 10 }}>{preview.error}</div>}
+        {preview && preview.errores && preview.errores.length > 0 && <div role="alert" style={{ color: '#B3261E', fontSize: 13, marginTop: 10 }}>{preview.errores.join(' · ')}</div>}
+        {preview && preview.html && (
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontSize: 12, color: '#7A6B85', marginBottom: 6 }}>Asunto: <strong style={{ color: '#1A1118' }}>{preview.subject || '—'}</strong></div>
+            <iframe title="Vista previa del correo" sandbox="" srcDoc={preview.html} style={{ width: '100%', height: 620, border: '1px solid #EDE8EA', borderRadius: 12, background: '#FEF8FF' }} />
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end', marginTop: 16 }}>
+          <div style={{ flex: '1 1 220px' }}>
+            <label style={{ ...lbl, marginTop: 0 }} htmlFor="mk-test">Mandarme una prueba a</label>
+            <input id="mk-test" type="email" style={inp} value={testTo} onChange={e => setTestTo(e.target.value)} placeholder="tu@correo.com" />
+          </div>
+          <button style={btn(false, !!busy || !testTo)} disabled={!!busy || !testTo} onClick={doTest}>{busy === 'test' ? 'Enviando…' : 'Enviar prueba'}</button>
+        </div>
+        <div style={{ marginTop: 18, paddingTop: 16, borderTop: '1px solid #F3EEF1' }}>
+          <button style={btn(true, !!busy || !!sending || !audInfo || !audInfo.total || !audInfo.direccionPostal || !es.subject)}
+            disabled={!!busy || !!sending || !audInfo || !audInfo.total || !audInfo.direccionPostal || !es.subject} onClick={doSend}>
+            {busy === 'send' ? 'Preparando…' : `Enviar a ${audInfo ? audInfo.total : '…'} persona(s)`}
+          </button>
+        </div>
+        {sending && (
+          <div role="status" aria-live="polite" style={{ marginTop: 14, fontSize: 13 }}>
+            Enviando… {sending.next} de {sending.total}
+            <div style={{ height: 8, background: '#F3EEF1', borderRadius: 99, marginTop: 6, overflow: 'hidden' }}>
+              <div style={{ height: '100%', width: `${sending.total ? Math.round(100 * sending.next / sending.total) : 0}%`, background: '#C0336E', transition: 'width .3s' }} />
+            </div>
+            <button style={{ ...btn(false, false), marginTop: 10, padding: '6px 14px', fontSize: 12 }} onClick={() => { stopRef.current = true; }}>Pausar</button>
+          </div>
+        )}
+        {msg && <div role={msg.ok ? 'status' : 'alert'} aria-live={msg.ok ? 'polite' : 'assertive'} style={{ marginTop: 12, fontSize: 13, color: msg.ok ? '#2E7D32' : '#B3261E', overflowWrap: 'anywhere' }}>{msg.text}</div>}
+      </fieldset>
+
+      <div style={card}>
+        <div style={{ fontWeight: 800, fontSize: 14, color: '#1A1118', marginBottom: 10 }}>Historial</div>
+        {campaigns === null ? <div style={{ fontSize: 13, color: '#767676' }}>Cargando…</div>
+          : campaigns.length === 0 ? <div style={{ fontSize: 13, color: '#767676' }}>Todavía no se ha enviado ninguna campaña.</div>
+          : campaigns.map(c => (
+            <div key={c.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(0,110px) minmax(0,1fr) minmax(0,120px)', gap: 10, overflowWrap: 'anywhere', padding: '8px 0', borderBottom: '1px solid #F3EEF1', fontSize: 13, alignItems: 'center' }}>
+              <span style={{ color: '#7A6B85', fontSize: 12 }}>{fmt(c.createdAt)}</span>
+              <span><strong>{c.subject}</strong><span style={{ color: '#7A6B85', fontSize: 12 }}> · {c.createdBy}</span></span>
+              <span style={{ fontSize: 12, color: c.done ? '#2E7D32' : '#B45309' }}>{c.done ? `✓ ${c.sent} enviados` : `${c.next} de ${c.total}`}{c.errores ? ` · ${c.errores} error(es)` : ''}</span>
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
 // ── Leads Tab (registros 10%) ────────────────────────────────────────────────
 function LeadsTab({ token }) {
   const [leads, setLeads] = useState(null);
@@ -5128,6 +5384,7 @@ function App() {
             ['giftcards',  '🎁 Gift Cards',  0],
             ['cupones',    '🏷️ Cupones',    0],
             ['leads',      '📋 Leads 10%',  0],
+            ['marketing',  '✉ Marketing',   0],
             ['carts',      '🛒 Carritos abandonados', 0],
             ['lovers',     '🌸 Cacusa Lovers', loversCount],
             ['lovers-page','💌 Lovers (página)', 0],
@@ -5442,6 +5699,9 @@ function App() {
 
         {/* ── Leads 10% tab ── */}
         {activeTab === 'leads' && <LeadsTab token={session.token} />}
+
+        {/* ── Marketing por correo tab ── */}
+        {activeTab === 'marketing' && <MarketingTab token={session.token} products={products} />}
 
         {/* ── Carritos abandonados tab ── */}
         {activeTab === 'carts' && <AbandonedCartsTab token={session.token} orders={orders} />}
