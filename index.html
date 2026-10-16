@@ -2000,7 +2000,12 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
           onClose={() => setShowLabelModal(false)}
           onSuccess={data => {
             setShowLabelModal(false);
-            onLabelGenerated && onLabelGenerated(order, data);
+            // Guía de PRUEBA (USPS_ENV = tem): no se guarda en el pedido ni se avisa a la clienta.
+            if (data.test) {
+              alert('Guía de PRUEBA de USPS (modo de pruebas): dice "SAMPLE - DO NOT MAIL" y NO sirve para enviar. No se guardó en el pedido ni se le avisó a la clienta.');
+            } else {
+              onLabelGenerated && onLabelGenerated(order, data);
+            }
             if (data.labelBase64) openPdfBase64(data.labelBase64);
           }}
         />
