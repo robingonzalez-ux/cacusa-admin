@@ -1518,6 +1518,15 @@ function UspsLabelModal({ order, token, uspsDefault, onClose, onSuccess }) {
   // Cotización real en producción, sin comprar (16 oct): precio comercial de la cuenta y retail.
   const [rate, setRate] = React.useState(null);
   const [rateBusy, setRateBusy] = React.useState(false);
+  // Prueba gratis de producción (16 oct): autorización de pago sin crear guía.
+  const [prodCheck, setProdCheck] = React.useState(null);
+  const [prodBusy, setProdBusy] = React.useState(false);
+  const checkProd = async () => {
+    setProdBusy(true); setError(''); setProdCheck(null);
+    try { setProdCheck(await apiCall('usps/prod-payment-check', { token })); }
+    catch (e) { setError(e.message || 'No se pudo hacer la prueba.'); }
+    finally { setProdBusy(false); }
+  };
   const c = order.cliente || {};
   const checkRate = async () => {
     const w = Number(weightOz), l = Number(lengthIn), wi = Number(widthIn), h = Number(heightIn);
@@ -1591,6 +1600,18 @@ function UspsLabelModal({ order, token, uspsDefault, onClose, onSuccess }) {
         style={{ width: '100%', padding: '9px', background: 'white', color: '#3B82F6', border: '1.5px solid #3B82F6', borderRadius: 99, fontWeight: 700, fontSize: 12, cursor: (busy || rateBusy) ? 'default' : 'pointer', marginBottom: 12, opacity: rateBusy ? .7 : 1 }}>
         {rateBusy ? 'Cotizando…' : 'Cotizar precio real (sin comprar)'}
       </button>
+      <button type="button" onClick={checkProd} disabled={busy || prodBusy}
+        style={{ width: '100%', padding: '9px', background: 'white', color: '#6D28D9', border: '1.5px solid #6D28D9', borderRadius: 99, fontWeight: 700, fontSize: 12, cursor: (busy || prodBusy) ? 'default' : 'pointer', marginBottom: 12, opacity: prodBusy ? .7 : 1 }}>
+        {prodBusy ? 'Probando…' : 'Probar producción (gratis, no crea guía)'}
+      </button>
+      {prodCheck && (
+        <div role="status" aria-live="polite" style={{ fontSize: 12, borderRadius: 10, padding: '8px 12px', marginBottom: 12, lineHeight: 1.5, overflowWrap: 'anywhere', background: prodCheck.ok ? '#ECFDF5' : '#FEF2F2', color: prodCheck.ok ? '#065F46' : '#991B1B' }}>
+          {prodCheck.ok
+            ? <div><strong>✓ Producción lista:</strong> USPS autorizó el pago con la cuenta EPS {prodCheck.eps}. No se creó ninguna guía ni se cobró nada.</div>
+            : <div><strong>✕ Producción todavía no autoriza el pago</strong> (paso: {prodCheck.paso}{prodCheck.status ? `, ${prodCheck.status}` : ''}). No se cobró nada.<br />{prodCheck.error}</div>}
+          {prodCheck.claims && <div style={{ color: '#5B6B7F', marginTop: 4 }}>{prodCheck.claims}</div>}
+        </div>
+      )}
       {rate && (
         <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#1E3A5F', background: '#F0F7FF', borderRadius: 10, padding: '8px 12px', marginBottom: 12, lineHeight: 1.5 }}>
           <div><strong>Precio comercial para tu cuenta:</strong> {rate.commercial && rate.commercial.price != null ? '$' + Number(rate.commercial.price).toFixed(2) : '—'}{rate.commercial && rate.commercial.zone ? ` · zona ${rate.commercial.zone}` : ''}</div>
