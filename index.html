@@ -2000,11 +2000,20 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
           onClose={() => setShowLabelModal(false)}
           onSuccess={data => {
             setShowLabelModal(false);
+            // Desglose de lo que cobró USPS (franqueo + cada servicio extra), para comparar precios.
+            const c = data.costo;
+            const money = v => (v == null ? '—' : '$' + Number(v).toFixed(2));
+            const costoTxt = c
+              ? '\n\nCosto USPS:\n• Franqueo: ' + money(c.postage) +
+                (c.extras || []).map(x => '\n• ' + (x.name || 'Servicio extra') + ': ' + money(x.price)).join('') +
+                '\n• TOTAL: ' + money(c.total) + (c.zone ? '  (zona ' + c.zone + ')' : '')
+              : '';
             // Guía de PRUEBA (USPS_ENV = tem): no se guarda en el pedido ni se avisa a la clienta.
             if (data.test) {
-              alert('Guía de PRUEBA de USPS (modo de pruebas): dice "SAMPLE - DO NOT MAIL" y NO sirve para enviar. No se guardó en el pedido ni se le avisó a la clienta.');
+              alert('Guía de PRUEBA de USPS (modo de pruebas): dice "SAMPLE - DO NOT MAIL" y NO sirve para enviar. No se guardó en el pedido ni se le avisó a la clienta.' + costoTxt);
             } else {
               onLabelGenerated && onLabelGenerated(order, data);
+              if (costoTxt) alert('Guía generada.' + costoTxt);
             }
             if (data.labelBase64) openPdfBase64(data.labelBase64);
           }}
