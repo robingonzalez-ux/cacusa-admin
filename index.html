@@ -1515,7 +1515,22 @@ function UspsLabelModal({ order, token, uspsDefault, onClose, onSuccess }) {
   const [heightIn, setHeightIn] = React.useState(String(def.heightIn ?? ''));
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState('');
+  // Cotización real en producción, sin comprar (16 oct): precio comercial de la cuenta y retail.
+  const [rate, setRate] = React.useState(null);
+  const [rateBusy, setRateBusy] = React.useState(false);
   const c = order.cliente || {};
+  const checkRate = async () => {
+    const w = Number(weightOz), l = Number(lengthIn), wi = Number(widthIn), h = Number(heightIn);
+    if (!(w > 0 && l > 0 && wi > 0 && h > 0)) { setError('Peso y las 3 dimensiones del paquete son obligatorios.'); return; }
+    setRateBusy(true); setError(''); setRate(null);
+    try {
+      setRate(await apiCall('usps/rate-check', { token, orderId: order.id, weightOz: w, lengthIn: l, widthIn: wi, heightIn: h }));
+    } catch (e) {
+      setError(e.message || 'No se pudo cotizar.');
+    } finally {
+      setRateBusy(false);
+    }
+  };
   const submit = async () => {
     const w = Number(weightOz), l = Number(lengthIn), wi = Number(widthIn), h = Number(heightIn);
     if (!(w > 0 && l > 0 && wi > 0 && h > 0)) {
@@ -1572,6 +1587,19 @@ function UspsLabelModal({ order, token, uspsDefault, onClose, onSuccess }) {
       <div style={{ fontSize: 12, color: '#5B4A63', background: '#EFF6FF', borderRadius: 10, padding: '8px 12px', marginBottom: 14 }}>
         Este envío sale asegurado por $100 USD (USPS Insurance) — incluido en todas las guías.
       </div>
+      <button type="button" onClick={checkRate} disabled={busy || rateBusy}
+        style={{ width: '100%', padding: '9px', background: 'white', color: '#3B82F6', border: '1.5px solid #3B82F6', borderRadius: 99, fontWeight: 700, fontSize: 12, cursor: (busy || rateBusy) ? 'default' : 'pointer', marginBottom: 12, opacity: rateBusy ? .7 : 1 }}>
+        {rateBusy ? 'Cotizando…' : 'Cotizar precio real (sin comprar)'}
+      </button>
+      {rate && (
+        <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#1E3A5F', background: '#F0F7FF', borderRadius: 10, padding: '8px 12px', marginBottom: 12, lineHeight: 1.5 }}>
+          <div><strong>Precio comercial para tu cuenta:</strong> {rate.commercial && rate.commercial.price != null ? '$' + Number(rate.commercial.price).toFixed(2) : '—'}{rate.commercial && rate.commercial.zone ? ` · zona ${rate.commercial.zone}` : ''}</div>
+          <div><strong>Retail (mostrador):</strong> {rate.retail && rate.retail.price != null ? '$' + Number(rate.retail.price).toFixed(2) : '—'}</div>
+          {rate.commercial && rate.commercial.error && <div style={{ color: '#B91C1C' }}>Comercial: {rate.commercial.error}</div>}
+          {rate.retail && rate.retail.error && <div style={{ color: '#B91C1C' }}>Retail: {rate.retail.error}</div>}
+          <div style={{ color: '#5B6B7F' }}>Cotización de USPS en producción. No se compró nada.</div>
+        </div>
+      )}
       {error && <div role="alert" aria-live="assertive" style={{ background: '#FEE2E2', color: '#DC2626', borderRadius: 10, padding: '8px 12px', fontSize: 12, marginBottom: 12 }}>{error}</div>}
       <div style={{ display: 'flex', gap: 8 }}>
         <button onClick={onClose} disabled={busy}
