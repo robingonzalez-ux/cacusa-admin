@@ -3676,7 +3676,7 @@ function LoversTab({ products = [], token }) {
     } catch { return iso || '—'; }
   };
   const todayIso = new Date().toISOString().slice(0, 10);
-  // ¿La suscripción 'activo' tiene el pago al día? (12 oct, caso Rachely: salía "Activo"
+  // ¿La suscripción 'activo' tiene el pago al día? (caso real del 12 oct: salía "Activo"
   // sin ningún pago registrado y no había forma de notarlo). Misma regla que pagoAlDia()
   // en cacusa-lovers-webhook (que además avisa por push). Solo marca, no cambia el estado.
   const addDays = (iso, n) => { const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
