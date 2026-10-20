@@ -1522,7 +1522,7 @@ function UspsLabelModal({ order, token, uspsDefault, onClose, onSuccess }) {
   const [prodCheck, setProdCheck] = React.useState(null);
   const [prodBusy, setProdBusy] = React.useState(false);
   const checkProd = async () => {
-    setProdBusy(true); setError(''); setProdCheck(null);
+    setProdBusy(true); setError(''); setProdCheck(null); setRate(null);
     try { setProdCheck(await apiCall('usps/prod-payment-check', { token })); }
     catch (e) { setError(e.message || 'No se pudo hacer la prueba.'); }
     finally { setProdBusy(false); }
@@ -1531,7 +1531,7 @@ function UspsLabelModal({ order, token, uspsDefault, onClose, onSuccess }) {
   const checkRate = async () => {
     const w = Number(weightOz), l = Number(lengthIn), wi = Number(widthIn), h = Number(heightIn);
     if (!(w > 0 && l > 0 && wi > 0 && h > 0)) { setError('Peso y las 3 dimensiones del paquete son obligatorios.'); return; }
-    setRateBusy(true); setError(''); setRate(null);
+    setRateBusy(true); setError(''); setRate(null); setProdCheck(null);
     try {
       setRate(await apiCall('usps/rate-check', { token, orderId: order.id, weightOz: w, lengthIn: l, widthIn: wi, heightIn: h }));
     } catch (e) {
