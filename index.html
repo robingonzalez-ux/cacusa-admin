@@ -1614,7 +1614,12 @@ function UspsLabelModal({ order, token, uspsDefault, onClose, onSuccess }) {
       )}
       {rate && (
         <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#1E3A5F', background: '#F0F7FF', borderRadius: 10, padding: '8px 12px', marginBottom: 12, lineHeight: 1.5 }}>
-          <div><strong>Precio comercial para tu cuenta:</strong> {rate.commercial && rate.commercial.price != null ? '$' + Number(rate.commercial.price).toFixed(2) : '—'}{rate.commercial && rate.commercial.zone ? ` · zona ${rate.commercial.zone}` : ''}</div>
+          {rate.commercialPublished
+            ? <>
+                <div><strong>Con tu cuenta{rate.commercialAccount && rate.commercialAccount.account ? ` (EPS ${rate.commercialAccount.account})` : ''}:</strong> {rate.commercialAccount && rate.commercialAccount.price != null ? '$' + Number(rate.commercialAccount.price).toFixed(2) : 'USPS no dio un precio propio para tu cuenta'}{rate.commercialAccount && rate.commercialAccount.zone ? ` · zona ${rate.commercialAccount.zone}` : ''}</div>
+                <div><strong>Comercial publicado (sin descuento):</strong> {rate.commercialPublished.price != null ? '$' + Number(rate.commercialPublished.price).toFixed(2) : '—'}{rate.commercialPublished.zone ? ` · zona ${rate.commercialPublished.zone}` : ''}</div>
+              </>
+            : <div><strong>Precio comercial:</strong> {rate.commercial && rate.commercial.price != null ? '$' + Number(rate.commercial.price).toFixed(2) : '—'}{rate.commercial && rate.commercial.zone ? ` · zona ${rate.commercial.zone}` : ''}</div>}
           <div><strong>Retail (mostrador):</strong> {rate.retail && rate.retail.price != null ? '$' + Number(rate.retail.price).toFixed(2) : '—'}</div>
           {Array.isArray(rate.intentos) && rate.intentos.length > 0
             ? rate.intentos.map((x, i) => (
