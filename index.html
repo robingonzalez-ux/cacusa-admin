@@ -1499,10 +1499,11 @@ function loadQuagga() {
 }
 
 // ── Order Card ─────────────────────────────────────────────────────────────
-// ── Cotizar un envío USPS (20 oct): solo cotiza, en producción, sin comprar nada. Las guías
-// reales se compran en Click-N-Ship y el tracking se pega en el pedido. El modo de prueba de
-// USPS se quitó por completo (decisión de la usuaria): ningún botón compra ni llama a apis-tem.
-function UspsLabelModal({ order, token, uspsDefault, onClose }) {
+// ── Envío USPS de un pedido (20 oct): cotizar (gratis) y, para emergencias, generar una guía
+// REAL en producción, con confirmación previa porque cobra franqueo de la cuenta EPS. Lo
+// normal es comprar en Click-N-Ship (más barato) y pegar el tracking. El modo de prueba de
+// USPS se quitó por completo (decisión de la usuaria): nada llama a apis-tem.
+function UspsLabelModal({ order, token, uspsDefault, onClose, onSuccess }) {
   const srOnly = { position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clip: 'rect(0,0,0,0)', whiteSpace: 'nowrap', border: 0 };
   const def = uspsDefault || DEFAULT_SHIPPING.uspsDefaultPackage;
   // Precargados con el default de Envíos; se pueden ajustar antes de cotizar.
@@ -1513,6 +1514,7 @@ function UspsLabelModal({ order, token, uspsDefault, onClose }) {
   const [error, setError] = React.useState('');
   const [rate, setRate] = React.useState(null);
   const [rateBusy, setRateBusy] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
   const c = order.cliente || {};
   const checkRate = async () => {
     const w = Number(weightOz), l = Number(lengthIn), wi = Number(widthIn), h = Number(heightIn);
@@ -1526,9 +1528,25 @@ function UspsLabelModal({ order, token, uspsDefault, onClose }) {
       setRateBusy(false);
     }
   };
+  // Guía REAL: siempre pide confirmación con el precio cotizado (si se cotizó antes).
+  const generate = async () => {
+    const w = Number(weightOz), l = Number(lengthIn), wi = Number(widthIn), h = Number(heightIn);
+    if (!(w > 0 && l > 0 && wi > 0 && h > 0)) { setError('Peso y las 3 dimensiones del paquete son obligatorios.'); return; }
+    const quoted = rate && rate.commercial && rate.commercial.price != null ? ` (cotizado: $${Number(rate.commercial.price).toFixed(2)})` : '';
+    if (!window.confirm(`Esto compra una guía REAL de USPS${quoted} y la cobra a la cuenta EPS. Se guarda en el pedido y la clienta recibe el correo de envío.\n\nLo normal es comprar en Click-N-Ship (más barato). ¿Generar igual?`)) return;
+    setBusy(true); setError('');
+    try {
+      const data = await apiCall('order/usps-label', { token, orderId: order.id, weightOz: w, lengthIn: l, widthIn: wi, heightIn: h });
+      onSuccess(data);
+    } catch (e) {
+      setError(e.message || 'No se pudo generar la guía.');
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
-    <Modal onClose={onClose} label="Cotizar envío USPS">
-      <h3 style={{ margin: '0 0 12px', fontSize: 16, color: '#1A1118' }}>📦 Cotizar envío USPS</h3>
+    <Modal onClose={onClose} label="Envío USPS">
+      <h3 style={{ margin: '0 0 12px', fontSize: 16, color: '#1A1118' }}>📦 Envío USPS</h3>
       <div style={{ fontSize: 13, color: '#5B4A63', background: '#FAF7FB', borderRadius: 10, padding: '10px 12px', marginBottom: 14 }}>
         <div style={{ fontWeight: 700, marginBottom: 4 }}>{c.nombre} {c.apellido}</div>
         <div>{c.direccion}{c.apto ? ', ' + c.apto : ''}</div>
@@ -1564,7 +1582,7 @@ function UspsLabelModal({ order, token, uspsDefault, onClose }) {
         </div>
       </div>
       <div style={{ fontSize: 12, color: '#5B4A63', background: '#EFF6FF', borderRadius: 10, padding: '8px 12px', marginBottom: 14 }}>
-        Solo cotiza: no compra ninguna guía. Las guías reales se compran en Click-N-Ship y el tracking se pega en el pedido.
+        "Cotizar precio" no compra nada. "Generar guía real" compra y cobra (para emergencias): lo normal es comprar en Click-N-Ship, que es más barato, y pegar el tracking.
       </div>
       {rate && (
         <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#1E3A5F', background: '#F0F7FF', borderRadius: 10, padding: '8px 12px', marginBottom: 12, lineHeight: 1.5 }}>
@@ -1588,16 +1606,20 @@ function UspsLabelModal({ order, token, uspsDefault, onClose }) {
         </div>
       )}
       {error && <div role="alert" aria-live="assertive" style={{ background: '#FEE2E2', color: '#DC2626', borderRadius: 10, padding: '8px 12px', fontSize: 12, marginBottom: 12 }}>{error}</div>}
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button onClick={onClose}
-          style={{ flex: 1, padding: '10px', background: '#F3EFF5', color: '#5B4A63', border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+        <button onClick={onClose} disabled={busy}
+          style={{ flex: 1, padding: '10px', background: '#F3EFF5', color: '#5B4A63', border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 13, cursor: busy ? 'default' : 'pointer' }}>
           Cerrar
         </button>
-        <button type="button" onClick={checkRate} disabled={rateBusy}
-          style={{ flex: 1, padding: '10px', background: '#3B82F6', color: 'white', border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 13, cursor: rateBusy ? 'default' : 'pointer', opacity: rateBusy ? .7 : 1 }}>
+        <button type="button" onClick={checkRate} disabled={rateBusy || busy}
+          style={{ flex: 1, padding: '10px', background: '#3B82F6', color: 'white', border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 13, cursor: (rateBusy || busy) ? 'default' : 'pointer', opacity: rateBusy ? .7 : 1 }}>
           {rateBusy ? 'Cotizando…' : 'Cotizar precio'}
         </button>
       </div>
+      <button type="button" onClick={generate} disabled={busy || rateBusy}
+        style={{ width: '100%', padding: '10px', background: 'white', color: '#B91C1C', border: '1.5px solid #B91C1C', borderRadius: 99, fontWeight: 700, fontSize: 13, cursor: (busy || rateBusy) ? 'default' : 'pointer', opacity: busy ? .7 : 1 }}>
+        {busy ? 'Generando…' : 'Generar guía real (cobra)'}
+      </button>
     </Modal>
   );
 }
@@ -1988,7 +2010,7 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
         {isUsOrder && !order.tracking && (
           <button onClick={() => setShowLabelModal(true)}
             style={{ marginTop: 8, width: '100%', padding: '8px', background: '#3B82F6', color: 'white', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
-            📦 Cotizar envío USPS
+            📦 Envío USPS (cotizar / generar)
           </button>
         )}
         {(order.labelBase64 || order.labelStored) && (
@@ -2013,6 +2035,20 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
           token={token}
           uspsDefault={uspsDefault}
           onClose={() => setShowLabelModal(false)}
+          onSuccess={data => {
+            setShowLabelModal(false);
+            onLabelGenerated && onLabelGenerated(order, data);
+            // Desglose de lo que cobró USPS (franqueo + cada servicio extra).
+            const c = data.costo;
+            const money = v => (v == null ? '—' : '$' + Number(v).toFixed(2));
+            const costoTxt = c
+              ? '\n\nCosto USPS:\n• Franqueo: ' + money(c.postage) +
+                (c.extras || []).map(x => '\n• ' + (x.name || 'Servicio extra') + ': ' + money(x.price)).join('') +
+                '\n• TOTAL: ' + money(c.total) + (c.zone ? '  (zona ' + c.zone + ')' : '')
+              : '';
+            alert('Guía generada' + (data.tracking ? ': ' + data.tracking : '') + '.' + costoTxt);
+            if (data.labelBase64) openPdfBase64(data.labelBase64);
+          }}
         />
       )}
 
@@ -4490,7 +4526,7 @@ function SettingsTab({ categories, setCategories, materials, setMaterials, shipp
         </div>
         <div style={{ borderTop: '1px solid #F0EAF3', marginTop: 18, paddingTop: 16 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: '#1A1118', marginBottom: 2 }}>📦 Paquete por defecto para guías USPS</div>
-          <div style={{ fontSize: 12, color: '#7A6B85', marginBottom: 14 }}>Peso/tamaño que se precarga al cotizar un envío USPS (botón "Cotizar envío USPS" en Pedidos).</div>
+          <div style={{ fontSize: 12, color: '#7A6B85', marginBottom: 14 }}>Peso/tamaño que se precarga al cotizar o generar un envío USPS (botón "Envío USPS" en Pedidos).</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
             <div>
               <label style={lbl}>Peso (oz)</label>
