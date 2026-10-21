@@ -1584,27 +1584,34 @@ function UspsLabelModal({ order, token, uspsDefault, onClose, onSuccess }) {
       <div style={{ fontSize: 12, color: '#5B4A63', background: '#EFF6FF', borderRadius: 10, padding: '8px 12px', marginBottom: 14 }}>
         "Cotizar precio" no compra nada. "Generar guía real" compra y cobra (para emergencias): lo normal es comprar en Click-N-Ship, que es más barato, y pegar el tracking.
       </div>
-      {rate && (
-        <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#1E3A5F', background: '#F0F7FF', borderRadius: 10, padding: '8px 12px', marginBottom: 12, lineHeight: 1.5 }}>
-          {rate.commercialPublished
-            ? <>
-                <div><strong>Con tu cuenta{rate.commercialAccount && rate.commercialAccount.account ? ` (EPS ${rate.commercialAccount.account})` : ''}:</strong> {rate.commercialAccount && rate.commercialAccount.price != null ? '$' + Number(rate.commercialAccount.price).toFixed(2) : 'USPS no dio un precio propio para tu cuenta'}{rate.commercialAccount && rate.commercialAccount.zone ? ` · zona ${rate.commercialAccount.zone}` : ''}</div>
-                <div><strong>Comercial publicado (sin descuento):</strong> {rate.commercialPublished.price != null ? '$' + Number(rate.commercialPublished.price).toFixed(2) : '—'}{rate.commercialPublished.zone ? ` · zona ${rate.commercialPublished.zone}` : ''}</div>
-              </>
-            : <div><strong>Precio comercial:</strong> {rate.commercial && rate.commercial.price != null ? '$' + Number(rate.commercial.price).toFixed(2) : '—'}{rate.commercial && rate.commercial.zone ? ` · zona ${rate.commercial.zone}` : ''}</div>}
-          <div><strong>Retail (mostrador):</strong> {rate.retail && rate.retail.price != null ? '$' + Number(rate.retail.price).toFixed(2) : '—'}</div>
-          {Array.isArray(rate.intentos) && rate.intentos.length > 0
-            ? rate.intentos.map((x, i) => (
-                <div key={i} style={{ color: x.price != null ? '#166534' : '#B91C1C' }}>
-                  Intento {i + 1} ({x.como}): {x.price != null ? '$' + Number(x.price).toFixed(2) : x.error}
-                </div>
-              ))
-            : (rate.commercial && rate.commercial.error && <div style={{ color: '#B91C1C' }}>Comercial: {rate.commercial.error}</div>)}
-          {rate.retail && rate.retail.error && <div style={{ color: '#B91C1C' }}>Retail: {rate.retail.error}</div>}
-          {rate.claims && <div style={{ color: '#5B6B7F', overflowWrap: 'anywhere' }}>{rate.claims}</div>}
-          <div style={{ color: '#5B6B7F' }}>Cotización de USPS en producción. No se compró nada.{rate.version ? ` (${rate.version})` : ' (versión anterior del servidor)'}</div>
-        </div>
-      )}
+      {rate && (() => {
+        // 21 oct: el problema del token está resuelto; se muestran solo los precios y una línea de
+        // estado. El diagnóstico (intentos, datos del token, registro) queda en "Ver detalles técnicos".
+        const money = x => (x && x.price != null ? '$' + Number(x.price).toFixed(2) : null);
+        const acct = rate.commercialAccount || rate.commercial;
+        const conectada = /trae tu cuenta: sí/.test(rate.claims || '');
+        const errores = [acct && acct.price == null && acct.error, rate.retail && rate.retail.price == null && rate.retail.error].filter(Boolean);
+        return (
+          <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#1E3A5F', background: '#F0F7FF', borderRadius: 10, padding: '8px 12px', marginBottom: 12, lineHeight: 1.5 }}>
+            <div><strong>Con tu cuenta:</strong> {money(acct) || 'USPS no dio un precio para tu cuenta'}{acct && acct.zone ? ` · zona ${acct.zone}` : ''}</div>
+            <div><strong>Precio de mostrador:</strong> {money(rate.retail) || '—'}</div>
+            {errores.map((e, i) => <div key={i} style={{ color: '#B91C1C', overflowWrap: 'anywhere' }}>{String(e).slice(0, 200)}</div>)}
+            <div style={{ marginTop: 4, color: conectada ? '#166534' : '#B91C1C' }}>
+              {conectada ? '✓ Cuenta USPS conectada' : 'Cuenta USPS sin datos: haz Refresh Claims en cop.usps.com y vuelve a cotizar.'}
+            </div>
+            <div style={{ color: '#5B6B7F' }}>No se compró nada.</div>
+            <details style={{ marginTop: 6, color: '#5B6B7F' }}>
+              <summary style={{ cursor: 'pointer' }}>Ver detalles técnicos</summary>
+              {rate.commercialPublished && <div>Comercial publicado (sin descuento): {money(rate.commercialPublished) || '—'}</div>}
+              {Array.isArray(rate.intentos) && rate.intentos.map((x, i) => (
+                <div key={i}>Intento {i + 1} ({x.como}): {x.price != null ? '$' + Number(x.price).toFixed(2) : x.error}</div>
+              ))}
+              {rate.claims && <div style={{ overflowWrap: 'anywhere' }}>{rate.claims}</div>}
+              <div>{rate.version || 'versión anterior del servidor'}</div>
+            </details>
+          </div>
+        );
+      })()}
       {error && <div role="alert" aria-live="assertive" style={{ background: '#FEE2E2', color: '#DC2626', borderRadius: 10, padding: '8px 12px', fontSize: 12, marginBottom: 12 }}>{error}</div>}
       <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
         <button onClick={onClose} disabled={busy}
