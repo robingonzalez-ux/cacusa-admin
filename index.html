@@ -1639,15 +1639,27 @@ function UspsLabelModal({ order, token, uspsDefault, onClose, onSuccess }) {
 function PickupTodayButton({ token }) {
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg] = React.useState(null);
+  // 21 oct (pickup-2): primero pregunta cuántos paquetes detectó el servidor (pedidos de hoy con
+  // tracking de USPS, incluidos los de Click-N-Ship), deja corregir la cantidad y recién ahí pide.
   const request = async () => {
     setBusy(true); setMsg(null);
     try {
-      const data = await apiCall('usps/schedule-pickup', { token });
+      const pre = await apiCall('usps/schedule-pickup', { token, preview: true });
+      if (pre.alreadyRequested) {
+        setMsg({ ok: true, text: `Ya se pidió la recolección de hoy — confirmación #${pre.confirmationNumber} (${pre.packageCount} paquete${pre.packageCount !== 1 ? 's' : ''}, ${pre.pickupDate}).` });
+        return;
+      }
+      const lista = (pre.clientas || []).length ? '\n\nPedidos de hoy con tracking USPS:\n• ' + pre.clientas.join('\n• ') : '\n\nNo hay pedidos de hoy con tracking USPS en el panel.';
+      const ans = window.prompt(`Recolección USPS (el cartero toca la puerta y se lleva los paquetes).${lista}\n\n¿Cuántos paquetes van a estar listos? (No la pidas también en Click-N-Ship.)`, String(pre.detected || ''));
+      if (ans == null) return;
+      const n = Math.floor(Number(ans));
+      if (!(n >= 1 && n <= 50)) { setMsg({ ok: false, text: 'Indica una cantidad de paquetes entre 1 y 50.' }); return; }
+      const data = await apiCall('usps/schedule-pickup', { token, packageCount: n });
       setMsg({
         ok: true,
         text: data.alreadyRequested
           ? `Ya se había pedido la recolección de hoy — confirmación #${data.confirmationNumber}.`
-          : `Recolección pedida — confirmación #${data.confirmationNumber} (${data.packageCount} paquete${data.packageCount !== 1 ? 's' : ''}).`,
+          : `Recolección pedida para ${data.pickupDate} — confirmación #${data.confirmationNumber} (${data.packageCount} paquete${data.packageCount !== 1 ? 's' : ''}).`,
       });
     } catch (e) {
       setMsg({ ok: false, text: e.message || 'No se pudo pedir la recolección.' });
