@@ -1631,6 +1631,136 @@ function UspsLabelModal({ order, token, uspsDefault, onClose, onSuccess }) {
   );
 }
 
+// ── Pestaña Clientes (22 oct): buscador de clientas a partir de los pedidos ya cargados, y su
+// ficha con los pedidos y "Notificar estado por WhatsApp" (mismo mensaje que la tarjeta).
+function clienteKey(c) {
+  // Últimos 9 dígitos: el mismo número escrito con o sin código de país (+1 305…, 305…;
+  // +593 99…, 099…) cae en la misma clienta.
+  const tel = String((c && c.telefono) || '').replace(/[^0-9]/g, '');
+  if (tel.length >= 7) return 'tel:' + tel.slice(-9);
+  const em = String((c && c.email) || '').trim().toLowerCase();
+  if (em) return 'mail:' + em;
+  return 'name:' + orderFullName(c).toLowerCase().trim();
+}
+function ClientesTab({ orders }) {
+  const [q, setQ] = React.useState('');
+  const [sel, setSel] = React.useState(null);
+  const clientes = React.useMemo(() => {
+    const map = new Map();
+    for (const o of orders || []) {
+      const c = o.cliente || {};
+      const k = clienteKey(c);
+      if (k === 'name:') continue;
+      if (!map.has(k)) map.set(k, { key: k, pedidos: [] });
+      map.get(k).pedidos.push(o);
+    }
+    const out = [];
+    for (const g of map.values()) {
+      g.pedidos.sort((a, b) => String(b.fecha || '').localeCompare(String(a.fecha || '')));
+      const last = g.pedidos[0];
+      // Datos de contacto: los más recientes que no estén vacíos.
+      const pick = f => (g.pedidos.find(o => o.cliente && String(o.cliente[f] || '').trim()) || {}).cliente?.[f] || '';
+      g.nombre = orderFullName(last.cliente) || 'Cliente';
+      g.telefono = pick('telefono'); g.email = pick('email');
+      g.cliente = last.cliente || {};
+      g.ultimo = last.fecha || '';
+      g.texto = [g.nombre, g.telefono, g.email, pick('ciudad'),
+        ...g.pedidos.map(o => [o.numero, o.tracking, o.cliente && o.cliente.apellido].filter(Boolean).join(' '))].join(' ').toLowerCase();
+      out.push(g);
+    }
+    return out.sort((a, b) => String(b.ultimo).localeCompare(String(a.ultimo)));
+  }, [orders]);
+  const fmt = f => { const d = new Date(f); return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString('es-EC', { day: '2-digit', month: 'short', year: 'numeric' }); };
+  const card = { background: 'white', borderRadius: 14, padding: 14, border: '1px solid #f0ecf0', boxShadow: '0 2px 10px rgba(0,0,0,0.05)' };
+
+  if (sel) {
+    const g = clientes.find(x => x.key === sel);
+    if (!g) { setSel(null); return null; }
+    const c = g.cliente;
+    return (
+      <div>
+        <button type="button" onClick={() => setSel(null)}
+          style={{ marginBottom: 12, padding: '8px 14px', background: '#F3EFF5', color: '#5B4A63', border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
+          ← Volver
+        </button>
+        <div style={{ ...card, marginBottom: 14 }}>
+          <div style={{ fontWeight: 800, fontSize: 18, color: '#1A1118' }}>{g.nombre}</div>
+          {g.telefono && <div style={{ fontSize: 13, color: '#7A6880', marginTop: 4 }}>📞 {g.telefono}</div>}
+          {g.email && <div style={{ fontSize: 13, color: '#7A6880', marginTop: 2 }}>✉️ {g.email}</div>}
+          {(c.direccion || c.ciudad) && <div style={{ fontSize: 13, color: '#7A6880', marginTop: 2 }}>📍 {[c.direccion, c.apto, orderCiudad(c), c.estado, c.zip, c.pais].filter(Boolean).join(', ')}</div>}
+          <div style={{ fontSize: 12, color: '#9A8AA3', marginTop: 6 }}>{g.pedidos.length} pedido{g.pedidos.length !== 1 ? 's' : ''}</div>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {g.pedidos.map(o => {
+            const estado = o.estado || 'Nuevo';
+            const tel = String((o.cliente && o.cliente.telefono) || g.telefono || '').replace(/[^0-9]/g, '');
+            const link = waLink(tel, buildOrderStatusMsg(o));
+            const tn = String(o.tracking || '').replace(/\s+/g, '');
+            const carrierUp = String(o.carrier || '').trim().toUpperCase();
+            const isUsps = !!tn && (carrierUp === 'USPS' || (!carrierUp && /^9\d{19,21}$/.test(tn)));
+            return (
+              <div key={o.id} style={card}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <div style={{ fontSize: 13, color: '#5B4A63' }}>
+                    {o.numero && <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#7A5F8A', background: '#F3EFF5', padding: '2px 8px', borderRadius: 6, marginRight: 8 }}>#{o.numero}</span>}
+                    {fmt(o.fecha)}
+                  </div>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: 'white', background: STATE_COLORS[estado] || '#94A3B8', padding: '3px 10px', borderRadius: 99 }}>{estado}</span>
+                </div>
+                <div style={{ fontSize: 13, color: '#1A1118', marginTop: 8 }}>
+                  {(o.productos || []).map(p => p.name).filter(Boolean).join(', ') || <span style={{ color: '#9A8AA3' }}>{o.lote ? 'Caja Lovers ' + o.lote : 'Sin productos'}</span>}
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 800, color: '#E8508A', marginTop: 4 }}>${o.total}</div>
+                {o.tracking && (
+                  <div style={{ fontSize: 12, color: '#5B4A63', marginTop: 6 }}>
+                    📦 {o.carrier ? o.carrier + ' · ' : ''}{o.tracking}
+                    {isUsps && <a href={'https://tools.usps.com/go/TrackConfirmAction?tLabels=' + encodeURIComponent(tn)} target="_blank" rel="noopener noreferrer" style={{ marginLeft: 8, color: '#3B82F6', fontWeight: 700 }}>Ver seguimiento</a>}
+                  </div>
+                )}
+                {link
+                  ? <a href={link} target="_blank" rel="noopener noreferrer"
+                      style={{ display: 'block', marginTop: 10, textAlign: 'center', padding: '9px', background: '#DCF8C6', color: '#128C7E', borderRadius: 99, fontSize: 13, fontWeight: 700, textDecoration: 'none' }}>
+                      💬 Notificar estado por WhatsApp
+                    </a>
+                  : <div style={{ marginTop: 10, textAlign: 'center', padding: '9px', background: '#F3F4F6', color: '#9CA3AF', borderRadius: 99, fontSize: 13, fontWeight: 700 }}>Sin teléfono</div>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  const term = q.trim().toLowerCase();
+  const terms = term.split(/\s+/).filter(Boolean);
+  const lista = terms.length ? clientes.filter(g => terms.every(t => g.texto.includes(t) || g.texto.replace(/[^0-9a-z@.]/g, '').includes(t.replace(/[^0-9a-z@.]/g, '')))) : clientes;
+  return (
+    <div>
+      <div style={{ fontWeight: 800, fontSize: 18, color: '#1A1118', marginBottom: 12 }}>Clientes</div>
+      <label htmlFor="clientesBuscar" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0,0,0,0)' }}>Buscar cliente</label>
+      <input id="clientesBuscar" value={q} onChange={e => setQ(e.target.value)} placeholder="Buscar por nombre, teléfono, correo, ciudad, # de pedido o tracking…"
+        style={{ width: '100%', boxSizing: 'border-box', padding: '11px 14px', border: '1.5px solid #E5DCE8', borderRadius: 12, fontSize: 14, marginBottom: 12, fontFamily: 'inherit' }} />
+      <div style={{ fontSize: 12, color: '#9A8AA3', marginBottom: 8 }}>{lista.length} cliente{lista.length !== 1 ? 's' : ''}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {lista.slice(0, 100).map(g => (
+          <button key={g.key} type="button" onClick={() => setSel(g.key)}
+            style={{ ...card, textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, color: '#1A1118' }}>{g.nombre}</div>
+              <div style={{ fontSize: 12, color: '#7A6880', marginTop: 2 }}>{[g.telefono, g.email].filter(Boolean).join(' · ')}</div>
+            </div>
+            <div style={{ fontSize: 12, color: '#9A8AA3', textAlign: 'right', whiteSpace: 'nowrap' }}>
+              {g.pedidos.length} pedido{g.pedidos.length !== 1 ? 's' : ''}<br />{fmt(g.ultimo)}
+            </div>
+          </button>
+        ))}
+        {lista.length > 100 && <div style={{ fontSize: 12, color: '#9A8AA3' }}>Mostrando 100 — escribe más para filtrar.</div>}
+        {!lista.length && <div style={{ fontSize: 13, color: '#9A8AA3' }}>No se encontraron clientes.</div>}
+      </div>
+    </div>
+  );
+}
+
 // Avisos de USPS a la clienta (22 oct): el servidor los registra solo al quedar el pedido con
 // tracking de USPS y correo válido; acá se ve el estado y se puede reintentar si quedó pendiente.
 function UspsNotifyStatus({ order, token }) {
@@ -1722,6 +1852,39 @@ function PickupTodayButton({ token }) {
 // Nombre completo del cliente: los pedidos de Lovers guardan nombre y apellido por separado
 // (la tarjeta solo mostraba el nombre); los de la tienda traen el nombre completo en `nombre`
 // y el apellido vacío — no se repite si el apellido ya está dentro del nombre.
+// ── Mensaje de estado del pedido por WhatsApp (22 oct) — compartido por la tarjeta del pedido
+// y la ficha de la clienta (pestaña Clientes), así las 2 mandan exactamente lo mismo.
+// opts: { estado, tracking, carrier } para usar lo que se está editando en la tarjeta.
+function buildOrderStatusMsg(order, opts = {}) {
+  const estado = opts.estado || order.estado || 'Nuevo';
+  const trackVal = String(opts.tracking != null ? opts.tracking : (order.tracking || '')).trim();
+  const carrierVal = String(opts.carrier != null ? opts.carrier : (order.carrier || '')).trim();
+  const nombre = (order.cliente && order.cliente.nombre) || 'Cliente';
+  const carrierLine = carrierVal ? ' (' + carrierVal + ')' : '';
+  const tn = trackVal.replace(/\s+/g, '');
+  const isUsps = !!tn && (carrierVal.toUpperCase() === 'USPS' || (!carrierVal && /^9\d{19,21}$/.test(tn)));
+  const uspsLink = isUsps ? '\n🔎 Sigue tu paquete: https://tools.usps.com/go/TrackConfirmAction?tLabels=' + encodeURIComponent(tn) : '';
+  const trackLine = trackVal ? '\n📦 *Tracking*' + carrierLine + ': ' + trackVal + uspsLink : (carrierVal ? '\n🚛 *Transportista:* ' + carrierVal : '');
+  const STATE_MSG = {
+    'Confirmado':  '✅ Tu pedido ha sido *confirmado*. Estamos preparando todo con mucho cariño.',
+    'En proceso':  '🔨 Tu pedido está *en proceso de elaboración*. Cada pieza se hace a mano especialmente para ti.',
+    'Enviado':     '🚚 ¡Tu pedido ya fue *enviado*! Pronto llegará a tus manos.' + trackLine,
+    'Entregado':   '🎉 Tu pedido fue *entregado*. ¡Esperamos que lo ames!',
+    'Cancelado':   'Tu pedido ha sido *cancelado*. Si tienes preguntas, escríbenos.',
+  };
+  const stateMsg = STATE_MSG[estado] || 'Tu pedido está en estado: *' + estado + '*.';
+  const numLine = order.numero ? '🧾 *Pedido #' + order.numero + '*\n' : '';
+  return 'Hola ' + nombre + '! 🌸\n' + numLine + stateMsg + '\n\nGracias por confiar en *CACUSA by Taitus* 💕';
+}
+// Link de WhatsApp: en computadora abre WhatsApp Web directo; en el celular, la app (wa.me).
+function waLink(phoneDigits, text) {
+  const num = String(phoneDigits || '').replace(/[^0-9]/g, '');
+  if (!num) return null;
+  const mobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+  return mobile
+    ? 'https://wa.me/' + num + '?text=' + encodeURIComponent(text)
+    : 'https://web.whatsapp.com/send?phone=' + num + '&text=' + encodeURIComponent(text);
+}
 function orderFullName(c) {
   const n = String((c && c.nombre) || '').trim(), a = String((c && c.apellido) || '').trim();
   if (!a || n.toLowerCase().includes(a.toLowerCase())) return n;
@@ -1869,23 +2032,7 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
     }
   };
 
-  const buildStatusWaUrl = () => {
-    const nombre = (order.cliente && order.cliente.nombre) || 'Cliente';
-    const num = order.numero ? ' *#' + order.numero + '*' : '';
-    const carrierLine = carrierVal ? ' vía *' + carrierVal + '*' : '';
-    const trackLine = trackVal ? '\n📦 *Tracking' + carrierLine + ':* ' + trackVal : (carrierVal ? '\n🚛 *Transportista:* ' + carrierVal : '');
-    const STATE_MSG = {
-      'Confirmado':  '✅ Tu pedido ha sido *confirmado*. Estamos preparando todo con mucho cariño.',
-      'En proceso':  '🔨 Tu pedido está *en proceso de elaboración*. Cada pieza se hace a mano especialmente para ti.',
-      'Enviado':     '🚚 ¡Tu pedido ya fue *enviado*! Pronto llegará a tus manos.' + trackLine,
-      'Entregado':   '🎉 Tu pedido fue *entregado*. ¡Esperamos que lo ames!',
-      'Cancelado':   'Tu pedido ha sido *cancelado*. Si tienes preguntas, escríbenos.',
-    };
-    const stateMsg = STATE_MSG[estado] || 'Tu pedido está en estado: *' + estado + '*.';
-    const numLine = order.numero ? '🧾 *Pedido' + num + '*\n' : '';
-    const msg = 'Hola ' + nombre + '! 🌸\n' + numLine + stateMsg + '\n\nGracias por confiar en *CACUSA by Taitus* 💕';
-    return waNum ? 'https://wa.me/' + waNum + '?text=' + encodeURIComponent(msg) : null;
-  };
+  const buildStatusWaUrl = () => waLink(waNum, buildOrderStatusMsg(order, { estado, tracking: trackVal, carrier: carrierVal }));
   const waStatusUrl = buildStatusWaUrl();
 
   return (
@@ -5492,6 +5639,7 @@ function App() {
           {[
             ['products',   '💎 Productos',  products.length],
             ['orders',     '📦 Pedidos',    pendingOrders],
+            ['clientes',   '👤 Clientes',   0],
             ['descuentos', '🏷️ Descuentos', products.filter(p => p.promo && p.promo.price && (!p.promo.endsAt || new Date(p.promo.endsAt) >= new Date())).length + combos.length],
             ['mercado',    '🌍 Mercado',    0],
             ['landing',    '🏠 Landing',    0],
@@ -5807,6 +5955,8 @@ function App() {
         )}
 
         {/* ── Gift Cards tab ── */}
+        {activeTab === 'clientes' && <ClientesTab orders={orders} />}
+
         {activeTab === 'giftcards' && <GiftCardsTab token={session.token} />}
 
         {/* ── Cupones tab ── */}
