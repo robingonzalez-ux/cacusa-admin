@@ -1735,7 +1735,30 @@ function orderMatchesSearch(o, q) {
 }
 // ── Mensaje de estado del pedido por WhatsApp (22 oct) — compartido por la tarjeta del pedido
 // y la ficha de la clienta (pestaña Clientes), así las 2 mandan exactamente lo mismo.
-// opts: { estado, tracking, carrier } para usar lo que se está editando en la tarjeta.
+// opts: { estado, tracking, carrier } para usar lo que se está editando en la tarjeta, y
+// usps: { statusCategory, status, expectedDeliveryDate } con el estado real del paquete en USPS.
+const USPS_CATEGORY_ES = {
+  'pre-shipment': 'Etiqueta creada (USPS todavía no recibe el paquete)',
+  'accepted': 'Recibido por USPS',
+  'in transit': 'En camino',
+  'out for delivery': 'En reparto hoy',
+  'delivered': 'Entregado',
+  'available for pickup': 'Listo para retirar en la oficina de USPS',
+  'delivery attempt': 'Intento de entrega',
+  'alert': 'Aviso de USPS (revisa el seguimiento)',
+  'return to sender': 'Devuelto al remitente',
+};
+function uspsStatusLines(u) {
+  if (!u) return '';
+  const cat = String(u.statusCategory || '').trim().toLowerCase();
+  const estado = USPS_CATEGORY_ES[cat] || u.statusCategory || u.status || '';
+  let fecha = '';
+  if (u.expectedDeliveryDate && cat !== 'delivered') {
+    const m = String(u.expectedDeliveryDate).match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) fecha = new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString('es-EC', { weekday: 'long', day: 'numeric', month: 'long' });
+  }
+  return (estado ? '\n📍 *Estado en USPS:* ' + estado : '') + (fecha ? '\n🗓️ *Entrega estimada:* ' + fecha : '');
+}
 function buildOrderStatusMsg(order, opts = {}) {
   const estado = opts.estado || order.estado || 'Nuevo';
   const trackVal = String(opts.tracking != null ? opts.tracking : (order.tracking || '')).trim();
@@ -1745,7 +1768,7 @@ function buildOrderStatusMsg(order, opts = {}) {
   const tn = trackVal.replace(/\s+/g, '');
   const isUsps = !!tn && (carrierVal.toUpperCase() === 'USPS' || (!carrierVal && /^9\d{19,21}$/.test(tn)));
   const uspsLink = isUsps ? '\n🔎 Sigue tu paquete: https://tools.usps.com/go/TrackConfirmAction?tLabels=' + encodeURIComponent(tn) : '';
-  const trackLine = trackVal ? '\n📦 *Tracking*' + carrierLine + ': ' + trackVal + uspsLink : (carrierVal ? '\n🚛 *Transportista:* ' + carrierVal : '');
+  const trackLine = trackVal ? '\n📦 *Tracking*' + carrierLine + ': ' + trackVal + (isUsps ? uspsStatusLines(opts.usps) : '') + uspsLink : (carrierVal ? '\n🚛 *Transportista:* ' + carrierVal : '');
   const STATE_MSG = {
     'Confirmado':  '✅ Tu pedido ha sido *confirmado*. Estamos preparando todo con mucho cariño.',
     'En proceso':  '🔨 Tu pedido está *en proceso de elaboración*. Cada pieza se hace a mano especialmente para ti.',
@@ -2159,6 +2182,23 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
         <button onClick={() => onStatusChange(order, 'Cancelado')}
           style={{ padding: '8px 12px', background: '#FEE2E2', color: '#DC2626', borderRadius: 99, fontSize: 12, fontWeight: 700, border: 'none', cursor: 'pointer' }} title="Cancelar">✕</button>
         {waStatusUrl && <a href={waStatusUrl} target="_blank" rel="noopener noreferrer" title="Notificar estado por WhatsApp"
+          onClick={async e => {
+            // 22 oct: con tracking de USPS (ya guardado), antes de abrir WhatsApp se consulta el estado
+            // real del paquete en USPS y se agrega al mensaje. Si USPS no responde, va el mensaje normal.
+            const tn = String(trackVal || '').replace(/\s+/g, '');
+            const cu = String(carrierVal || '').trim().toUpperCase();
+            const usps = !!tn && tn === String(order.tracking || '').replace(/\s+/g, '') && (cu === 'USPS' || (!cu && /^9\d{19,21}$/.test(tn)));
+            if (!usps || (estado !== 'Enviado' && estado !== 'Entregado')) return;
+            e.preventDefault();
+            const w = window.open('', '_blank');
+            let u = null;
+            try {
+              const d = await Promise.race([apiCall('order/usps-status', { token, orderId: order.id }), new Promise(r => setTimeout(() => r(null), 8000))]);
+              if (d && d.ok) u = d;
+            } catch (_) {}
+            const url = waLink(waNum, buildOrderStatusMsg(order, { estado, tracking: trackVal, carrier: carrierVal, usps: u }));
+            if (w) w.location.href = url; else window.location.href = url;
+          }}
           style={{ padding: '8px 12px', background: '#DCF8C6', color: '#128C7E', borderRadius: 99, fontSize: 12, fontWeight: 700, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 4 }}>💬 Notificar</a>}
         <button onClick={() => onDelete(order)}
           style={{ padding: '8px 12px', background: '#F9F5F7', color: '#7A6B85', borderRadius: 99, fontSize: 12, border: 'none', cursor: 'pointer' }} title="Eliminar">🗑</button>
