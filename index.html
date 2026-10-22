@@ -1748,18 +1748,33 @@ const USPS_CATEGORY_ES = {
   'alert': 'Aviso de USPS (revisa el seguimiento)',
   'return to sender': 'Devuelto al remitente',
 };
-function uspsStatusLines(u) {
+// Idioma de la clienta (22 oct): 1) el que se eligió/guardó (tienda ES/EN o selector del pedido);
+// 2) por teléfono: códigos de países de habla inglesa → inglés; 3) todo lo demás (Ecuador, resto de
+// Latinoamérica y +1 de EE. UU.) → español (decisión de Robin: la mayoría de clientas +1 habla español).
+const EN_PHONE_PREFIXES = ['44', '61', '64', '353'];
+function orderLang(order) {
+  const id = order && order.cliente && order.cliente.idioma;
+  if (id === 'en' || id === 'es') return id;
+  const raw = String((order && order.cliente && order.cliente.telefono) || '').trim();
+  const d = raw.replace(/[^0-9]/g, '');
+  if ((raw.startsWith('+') || raw.startsWith('00')) && EN_PHONE_PREFIXES.some(p => d.replace(/^00/, '').startsWith(p))) return 'en';
+  return 'es';
+}
+function uspsStatusLines(u, lang = 'es') {
   if (!u) return '';
   const cat = String(u.statusCategory || '').trim().toLowerCase();
-  const estado = USPS_CATEGORY_ES[cat] || u.statusCategory || u.status || '';
+  const en = lang === 'en';
+  const estado = en ? (u.statusCategory || u.status || '') : (USPS_CATEGORY_ES[cat] || u.statusCategory || u.status || '');
   let fecha = '';
   if (u.expectedDeliveryDate && cat !== 'delivered') {
     const m = String(u.expectedDeliveryDate).match(/^(\d{4})-(\d{2})-(\d{2})/);
-    if (m) fecha = new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString('es-EC', { weekday: 'long', day: 'numeric', month: 'long' });
+    if (m) fecha = new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString(en ? 'en-US' : 'es-EC', { weekday: 'long', day: 'numeric', month: 'long' });
   }
-  return (estado ? '\n📍 *Estado en USPS:* ' + estado : '') + (fecha ? '\n🗓️ *Entrega estimada:* ' + fecha : '');
+  return (estado ? (en ? '\n📍 *USPS status:* ' : '\n📍 *Estado en USPS:* ') + estado : '') + (fecha ? (en ? '\n🗓️ *Estimated delivery:* ' : '\n🗓️ *Entrega estimada:* ') + fecha : '');
 }
 function buildOrderStatusMsg(order, opts = {}) {
+  const lang = opts.lang || orderLang(order);
+  const en = lang === 'en';
   const estado = opts.estado || order.estado || 'Nuevo';
   const trackVal = String(opts.tracking != null ? opts.tracking : (order.tracking || '')).trim();
   const carrierVal = String(opts.carrier != null ? opts.carrier : (order.carrier || '')).trim();
@@ -1767,8 +1782,20 @@ function buildOrderStatusMsg(order, opts = {}) {
   const carrierLine = carrierVal ? ' (' + carrierVal + ')' : '';
   const tn = trackVal.replace(/\s+/g, '');
   const isUsps = !!tn && (carrierVal.toUpperCase() === 'USPS' || (!carrierVal && /^9\d{19,21}$/.test(tn)));
-  const uspsLink = isUsps ? '\n🔎 Sigue tu paquete: https://tools.usps.com/go/TrackConfirmAction?tLabels=' + encodeURIComponent(tn) : '';
-  const trackLine = trackVal ? '\n📦 *Tracking*' + carrierLine + ': ' + trackVal + (isUsps ? uspsStatusLines(opts.usps) : '') + uspsLink : (carrierVal ? '\n🚛 *Transportista:* ' + carrierVal : '');
+  const uspsLink = isUsps ? (en ? '\n🔎 Track your package: ' : '\n🔎 Sigue tu paquete: ') + 'https://tools.usps.com/go/TrackConfirmAction?tLabels=' + encodeURIComponent(tn) : '';
+  const trackLine = trackVal ? '\n📦 *Tracking*' + carrierLine + ': ' + trackVal + (isUsps ? uspsStatusLines(opts.usps, lang) : '') + uspsLink : (carrierVal ? (en ? '\n🚛 *Carrier:* ' : '\n🚛 *Transportista:* ') + carrierVal : '');
+  if (en) {
+    const STATE_EN = {
+      'Confirmado':  '✅ Your order has been *confirmed*. We are preparing everything with love.',
+      'En proceso':  '🔨 Your order is *being made*. Every piece is handmade just for you.',
+      'Enviado':     '🚚 Your order has been *shipped*! It will be in your hands soon.' + trackLine,
+      'Entregado':   '🎉 Your order was *delivered*. We hope you love it!',
+      'Cancelado':   'Your order has been *cancelled*. If you have any questions, message us.',
+    };
+    const st = STATE_EN[estado] || 'Your order status: *' + estado + '*.';
+    const nl = order.numero ? '🧾 *Order #' + order.numero + '*\n' : '';
+    return 'Hi ' + nombre + '! 🌸\n' + nl + st + '\n\nThank you for trusting *CACUSA by Taitus* 💕';
+  }
   const STATE_MSG = {
     'Confirmado':  '✅ Tu pedido ha sido *confirmado*. Estamos preparando todo con mucho cariño.',
     'En proceso':  '🔨 Tu pedido está *en proceso de elaboración*. Cada pieza se hace a mano especialmente para ti.',
@@ -2181,6 +2208,18 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
         )}
         <button onClick={() => onStatusChange(order, 'Cancelado')}
           style={{ padding: '8px 12px', background: '#FEE2E2', color: '#DC2626', borderRadius: 99, fontSize: 12, fontWeight: 700, border: 'none', cursor: 'pointer' }} title="Cancelar">✕</button>
+        {waStatusUrl && (() => {
+          // Idioma del WhatsApp de esta clienta (22 oct): se ve cuál se va a usar y se cambia con un toque
+          // (se guarda en el pedido). Tienda web = idioma en que compró; manual = por teléfono, default ES.
+          const lang = orderLang(order);
+          return (
+            <button type="button" title={lang === 'en' ? 'El WhatsApp sale en inglés — toca para español' : 'El WhatsApp sale en español — toca para inglés'}
+              onClick={() => onClienteUpdate && onClienteUpdate(order, { idioma: lang === 'en' ? 'es' : 'en' })}
+              style={{ padding: '8px 10px', background: '#F3EFF5', color: '#5B4A63', borderRadius: 99, fontSize: 12, fontWeight: 800, border: 'none', cursor: 'pointer' }}>
+              {lang === 'en' ? 'EN' : 'ES'}
+            </button>
+          );
+        })()}
         {waStatusUrl && <a href={waStatusUrl} target="_blank" rel="noopener noreferrer" title="Notificar estado por WhatsApp"
           onClick={async e => {
             // 22 oct: con tracking de USPS (ya guardado), antes de abrir WhatsApp se consulta el estado
