@@ -1653,7 +1653,8 @@ function UspsNotifyStatus({ order, token }) {
   if (!valid) text = 'Avisos de USPS: el pedido no tiene correo de la clienta.';
   else if (!cur) { text = 'Avisos de USPS: activándose…'; canRetry = true; }
   else if (cur.status === 'activo') { text = `✓ USPS le avisa a ${email} (fecha de entrega y entrega).`; color = '#166534'; }
-  else if (cur.status === 'pendiente') { text = 'Avisos de USPS: pendiente (USPS todavía no tiene el número). Se reintenta solo.'; canRetry = true; }
+  else if (cur.status === 'pendiente') { text = /tope diario/.test(cur.msg || '') ? 'Avisos de USPS: pendientes (se llegó al tope diario de avisos automáticos).' : 'Avisos de USPS: pendientes (USPS todavía no tenía el número). Toca "Activar ahora" más tarde.'; canRetry = true; }
+  else if (cur.status === 'omitido') { text = 'Avisos de USPS: no activados (tracking de antes del 21 oct).'; canRetry = true; }
   else { text = 'Avisos de USPS: no se pudieron activar.'; color = '#B91C1C'; canRetry = true; }
   return (
     <div style={{ marginTop: 6, fontSize: 11, color, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }} title={cur && cur.msg ? cur.msg : ''}>
