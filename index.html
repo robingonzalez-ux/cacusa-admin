@@ -1631,6 +1631,43 @@ function UspsLabelModal({ order, token, uspsDefault, onClose, onSuccess }) {
   );
 }
 
+// Avisos de USPS a la clienta (22 oct): el servidor los registra solo al quedar el pedido con
+// tracking de USPS y correo válido; acá se ve el estado y se puede reintentar si quedó pendiente.
+function UspsNotifyStatus({ order, token }) {
+  const [state, setState] = React.useState(order.uspsNotify || null);
+  const [busy, setBusy] = React.useState(false);
+  React.useEffect(() => { setState(order.uspsNotify || null); }, [order.uspsNotify && order.uspsNotify.at, order.tracking]);
+  const tn = String(order.tracking || '').replace(/\s+/g, '');
+  const carrierUp = String(order.carrier || '').trim().toUpperCase();
+  if (!tn || !(carrierUp === 'USPS' || (!carrierUp && /^9\d{19,21}$/.test(tn)))) return null;
+  const email = String((order.cliente && order.cliente.email) || '').trim();
+  const valid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  const cur = state && state.for === tn ? state : null;
+  const retry = async () => {
+    setBusy(true);
+    try { const d = await apiCall('order/usps-notify', { token, orderId: order.id }); setState(d.uspsNotify || null); }
+    catch (e) { setState({ for: tn, status: 'error', msg: e.message }); }
+    finally { setBusy(false); }
+  };
+  let text, color = '#7A6B85', canRetry = false;
+  if (!valid) text = 'Avisos de USPS: el pedido no tiene correo de la clienta.';
+  else if (!cur) { text = 'Avisos de USPS: activándose…'; canRetry = true; }
+  else if (cur.status === 'activo') { text = `✓ USPS le avisa a ${email} (fecha de entrega y entrega).`; color = '#166534'; }
+  else if (cur.status === 'pendiente') { text = 'Avisos de USPS: pendiente (USPS todavía no tiene el número). Se reintenta solo.'; canRetry = true; }
+  else { text = 'Avisos de USPS: no se pudieron activar.'; color = '#B91C1C'; canRetry = true; }
+  return (
+    <div style={{ marginTop: 6, fontSize: 11, color, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }} title={cur && cur.msg ? cur.msg : ''}>
+      <span>{text}</span>
+      {valid && canRetry && (
+        <button type="button" onClick={retry} disabled={busy}
+          style={{ padding: '3px 10px', fontSize: 11, fontWeight: 700, background: '#F3EFF5', color: '#5B4A63', border: 'none', borderRadius: 99, cursor: busy ? 'default' : 'pointer' }}>
+          {busy ? 'Activando…' : 'Activar ahora'}
+        </button>
+      )}
+    </div>
+  );
+}
+
 // Botón "Pedir recolección de hoy" (Carrier Pickup) — no está atado a un pedido
 // puntual (el cartero pasa una vez por la dirección y se lleva TODO lo que esté listo
 // ese día), a diferencia de la cotización USPS, que sí es por pedido. El servidor ya
@@ -2059,6 +2096,7 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
             </a>
           );
         })()}
+        <UspsNotifyStatus order={order} token={token} />
       </div>
       {showLabelModal && (
         <UspsLabelModal
