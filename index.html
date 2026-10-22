@@ -2046,6 +2046,19 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
             🖨️ Ver/imprimir guía USPS
           </button>
         )}
+        {/* 22 oct: seguimiento en usps.com para cualquier pedido con tracking de USPS (también los
+            de Click-N-Ship pegados a mano, que no tienen PDF en el panel). */}
+        {(() => {
+          const tn = String(order.tracking || '').replace(/\s+/g, '');
+          const carrierUp = String(order.carrier || '').trim().toUpperCase();
+          if (!tn || !(carrierUp === 'USPS' || (!carrierUp && /^9\d{19,21}$/.test(tn)))) return null;
+          return (
+            <a href={`https://tools.usps.com/go/TrackConfirmAction?tLabels=${encodeURIComponent(tn)}`} target="_blank" rel="noopener noreferrer"
+              style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 8, textAlign: 'center', padding: '8px', background: '#F3EFF5', color: '#5B4A63', borderRadius: 8, fontSize: 12, fontWeight: 700, textDecoration: 'none' }}>
+              📍 Ver seguimiento en USPS
+            </a>
+          );
+        })()}
       </div>
       {showLabelModal && (
         <UspsLabelModal
