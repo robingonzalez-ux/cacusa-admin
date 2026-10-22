@@ -1807,6 +1807,23 @@ function buildOrderStatusMsg(order, opts = {}) {
   const numLine = order.numero ? '🧾 *Pedido #' + order.numero + '*\n' : '';
   return 'Hola ' + nombre + '! 🌸\n' + numLine + stateMsg + '\n\nGracias por confiar en *CACUSA by Taitus* 💕';
 }
+// Número para WhatsApp con código de país (22 oct, auditoría): "0991234567" (Ecuador sin código) →
+// 593991234567; "991234567" → 593…; 10 dígitos de un pedido a EE. UU. → 1 + número; "00…" → sin 00.
+// Antes iba tal cual y wa.me abría un número inválido o de otra persona.
+function waPhone(order) {
+  const c = (order && order.cliente) || {};
+  let d = String(c.telefono || '').replace(/[^0-9]/g, '');
+  if (!d) return '';
+  if (d.startsWith('00')) d = d.slice(2);
+  const raw = String(c.telefono || '').trim();
+  if (raw.startsWith('+') || raw.startsWith('00')) return d;
+  const pais = (String(c.pais || '') + ' ' + String(c.ciudad || '')).toUpperCase();
+  const isUs = /\b(USA|US|ESTADOS UNIDOS|UNITED STATES|EEUU|EE\.?\s?UU)\b/.test(pais);
+  if (d.length === 10 && d.startsWith('0')) return '593' + d.slice(1);
+  if (d.length === 9 && d.startsWith('9')) return '593' + d;
+  if (d.length === 10 && isUs) return '1' + d;
+  return d;
+}
 // Link de WhatsApp: en computadora abre WhatsApp Web directo; en el celular, la app (wa.me).
 function waLink(phoneDigits, text) {
   const num = String(phoneDigits || '').replace(/[^0-9]/g, '');
@@ -1839,7 +1856,7 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
   const estado = order.estado || 'Nuevo';
   const nextIdx = Math.min(ORDER_STATES.indexOf(estado) + 1, ORDER_STATES.length - 2);
   const nextState = ORDER_STATES[nextIdx];
-  const waNum = ((order.cliente && order.cliente.telefono) || '').replace(/[^0-9]/g, '');
+  const waNum = waPhone(order);
   const [trackVal, setTrackVal]     = React.useState(order.tracking || '');
   const [carrierVal, setCarrierVal] = React.useState(order.carrier || '');
   const [scanErr, setScanErr]       = React.useState('');
@@ -1847,7 +1864,10 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
   React.useEffect(() => { setTrackVal(order.tracking || ''); }, [order.tracking]);
   React.useEffect(() => { setCarrierVal(order.carrier || ''); }, [order.carrier]);
 
-  const handleTrackChange   = v => { setTrackVal(v);   onTrackingChange && onTrackingChange(order, v); };
+  // 22 oct (auditoría): el tracking se guarda al salir del campo o con Enter (antes, con cada tecla:
+  // un pedido "Enviado" podía mandar el correo de envío con el número a medias). El escaneo guarda directo.
+  const commitTracking      = v => { const t = String(v || '').trim(); if (t !== String(order.tracking || '').trim()) onTrackingChange && onTrackingChange(order, t); };
+  const handleTrackChange   = v => { setTrackVal(v); commitTracking(v); };
   const handleCarrierChange = v => { setCarrierVal(v); onCarrierChange  && onCarrierChange(order, v); };
 
   // ── Estimar código postal a partir de dirección + estado (cuando falta) ──
@@ -2110,7 +2130,9 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
         <div style={{ display: 'flex', gap: 6 }}>
           <input
             value={trackVal}
-            onChange={e => handleTrackChange(e.target.value)}
+            onChange={e => setTrackVal(e.target.value)}
+            onBlur={e => commitTracking(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commitTracking(e.currentTarget.value); e.currentTarget.blur(); } }}
             placeholder="Número o código de seguimiento…"
             style={{ flex: 1, padding: '7px 10px', border: '1.5px solid #BFDBFE', borderRadius: 8, fontSize: 12, outline: 'none', fontFamily: 'inherit', background: 'white' }}
           />
@@ -2206,7 +2228,7 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
             → {nextState}
           </button>
         )}
-        <button onClick={() => onStatusChange(order, 'Cancelado')}
+        <button onClick={() => { if (window.confirm('¿Cancelar el pedido' + (order.numero ? ' #' + order.numero : '') + '?')) onStatusChange(order, 'Cancelado'); }}
           style={{ padding: '8px 12px', background: '#FEE2E2', color: '#DC2626', borderRadius: 99, fontSize: 12, fontWeight: 700, border: 'none', cursor: 'pointer' }} title="Cancelar">✕</button>
         {waStatusUrl && (() => {
           // Idioma del WhatsApp de esta clienta (22 oct): se ve cuál se va a usar y se cambia con un toque
@@ -2230,6 +2252,7 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
             if (!usps || (estado !== 'Enviado' && estado !== 'Entregado')) return;
             e.preventDefault();
             const w = window.open('', '_blank');
+            if (w) { try { w.opener = null; } catch (_) {} }
             let u = null;
             try {
               const d = await Promise.race([apiCall('order/usps-status', { token, orderId: order.id }), new Promise(r => setTimeout(() => r(null), 8000))]);
@@ -2239,7 +2262,7 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
             if (w) w.location.href = url; else window.location.href = url;
           }}
           style={{ padding: '8px 12px', background: '#DCF8C6', color: '#128C7E', borderRadius: 99, fontSize: 12, fontWeight: 700, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 4 }}>💬 Notificar</a>}
-        <button onClick={() => onDelete(order)}
+        <button onClick={() => { if (window.confirm('¿Eliminar el pedido' + (order.numero ? ' #' + order.numero : '') + '? No se puede deshacer.')) onDelete(order); }}
           style={{ padding: '8px 12px', background: '#F9F5F7', color: '#7A6B85', borderRadius: 99, fontSize: 12, border: 'none', cursor: 'pointer' }} title="Eliminar">🗑</button>
       </div>
     </div>
@@ -5170,6 +5193,8 @@ function App() {
   const [syncing, setSyncing]         = useState(false);
   const [syncMsg, setSyncMsg]         = useState('');
   const [dirty, setDirty]             = useState(false);
+  const dirtyRef = React.useRef(false);
+  React.useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
   const [filter, setFilter]           = useState('all');
   const [search, setSearch]           = useState('');
   const [editProduct, setEditProd]    = useState(null);
@@ -5296,7 +5321,12 @@ function App() {
     try {
       const res = await apiLoad(session.token);
       // ── Productos + configuración ──
-      if (res.products) {
+      // 22 oct (auditoría): el auto-refresh (cada 30 s / al volver a la pestaña) NO pisa productos ni
+      // textos si hay cambios sin publicar — antes se perdían en silencio. dirtyRef porque el intervalo
+      // guarda el loadData del primer render.
+      if (silent && dirtyRef.current) {
+        // se salta productos/config; abajo se siguen agregando los pedidos nuevos
+      } else if (res.products) {
         const data = JSON.parse(res.products);
         const prods = Array.isArray(data) ? data : (data.products || []);
         setProducts(prods.map(p => ({ ...p, available: p.available !== false })));
@@ -5350,7 +5380,7 @@ function App() {
           pages:  JSON.stringify(mergedPages),
           lovers: JSON.stringify(mergedLovers)
         };
-      } else {
+      } else if (!silent) {
         setProducts([]);
         setSyncMsg('📦 No hay productos aún. Agrega tu primer producto y haz clic en "Publicar".');
       }
@@ -5469,11 +5499,21 @@ function App() {
   };
   // Persiste solo el cambio puntual de UN pedido (nunca el array completo — ver
   // auditoría de concurrencia, antes esto podía perder pedidos nuevos en silencio).
+  // 22 oct (auditoría): si un cambio de pedido no se guarda, se avisa (antes solo console.warn y la
+  // pantalla mostraba el cambio como si estuviera guardado).
   const updateOrderRemote = (id, patch) => {
-    apiOrderUpdate(session.token, id, patch).catch(e => console.warn('order update:', e));
+    apiOrderUpdate(session.token, id, patch).catch(e => {
+      console.warn('order update:', e);
+      if (e && e.status === 401) sessionExpired();
+      else setSyncMsg('❌ No se guardó el último cambio de un pedido (' + (e && e.message || 'error de red') + '). Recarga los datos y vuelve a intentarlo.');
+    });
   };
   const deleteOrderRemote = (id) => {
-    apiOrderDelete(session.token, id).catch(e => console.warn('order delete:', e));
+    apiOrderDelete(session.token, id).catch(e => {
+      console.warn('order delete:', e);
+      if (e && e.status === 401) sessionExpired();
+      else setSyncMsg('❌ No se pudo eliminar el pedido (' + (e && e.message || 'error de red') + '). Recarga los datos.');
+    });
   };
   const toggleProd = p => { setProducts(prev => prev.map(x => x.id === p.id ? { ...x, available: !x.available } : x)); setDirty(true); };
   const deleteProd = p => { setProducts(prev => prev.filter(x => x.id !== p.id)); setDelConfirm(null); setDirty(true); };
@@ -5527,7 +5567,7 @@ function App() {
           onClick={e => e.stopPropagation()}>
           <div style={{ padding: '8px 12px', fontSize: 12, color: '#767676', fontWeight: 600, borderBottom: '1px solid #f0f0f0', marginBottom: 4 }}>{USERS[session.username].avatar} {session.name}</div>
           {[
-            ['🔄 Recargar datos', () => { loadData(); setShowMenu(false); }],
+            ['🔄 Recargar datos', () => { if (!dirty || window.confirm('Tienes cambios sin publicar. ¿Recargar y descartarlos?')) loadData(); setShowMenu(false); }],
             ['🌐 Ver tienda', () => { window.open(STORE_URL, '_blank'); setShowMenu(false); }],
             // Auditoría (20 sep, F21-c): revoca TODOS los tokens de esta cuenta en el
             // servidor (no solo el de este navegador) — útil si se sospecha que un token
@@ -5809,12 +5849,12 @@ function App() {
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 14 }}>
                             {grupo.map(o => (
                               <OrderCard key={o.id} order={o} token={session.token} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
-                                onStatusChange={(ord, newState) => { setOrders(orders.map(x => x.id === ord.id ? { ...x, estado: newState } : x)); updateOrderRemote(ord.id, { estado: newState }); }}
-                                onDelete={ord => { setOrders(orders.filter(x => x.id !== ord.id)); deleteOrderRemote(ord.id); }}
-                                onTrackingChange={(ord, tracking) => { setOrders(orders.map(x => x.id === ord.id ? { ...x, tracking } : x)); updateOrderRemote(ord.id, { tracking }); }}
-                                onCarrierChange={(ord, carrier) => { setOrders(orders.map(x => x.id === ord.id ? { ...x, carrier } : x)); updateOrderRemote(ord.id, { carrier }); }}
-                                onClienteUpdate={(ord, updates) => { setOrders(orders.map(x => x.id === ord.id ? { ...x, cliente: { ...x.cliente, ...updates } } : x)); updateOrderRemote(ord.id, { cliente: updates }); }}
-                                onLabelGenerated={(ord, data) => { setOrders(orders.map(x => x.id === ord.id ? { ...x, tracking: data.tracking, carrier: 'USPS', labelBase64: data.labelBase64, labelStored: true } : x)); }}
+                                onStatusChange={(ord, newState) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, estado: newState } : x)); updateOrderRemote(ord.id, { estado: newState }); }}
+                                onDelete={ord => { setOrders(prev => prev.filter(x => x.id !== ord.id)); deleteOrderRemote(ord.id); }}
+                                onTrackingChange={(ord, tracking) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, tracking } : x)); updateOrderRemote(ord.id, { tracking }); }}
+                                onCarrierChange={(ord, carrier) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, carrier } : x)); updateOrderRemote(ord.id, { carrier }); }}
+                                onClienteUpdate={(ord, updates) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, cliente: { ...x.cliente, ...updates } } : x)); updateOrderRemote(ord.id, { cliente: updates }); }}
+                                onLabelGenerated={(ord, data) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, tracking: data.tracking, carrier: 'USPS', labelBase64: data.labelBase64, labelStored: true } : x)); }}
                               />
                             ))}
                           </div>
@@ -5859,7 +5899,7 @@ function App() {
                   {histOrders.length === 0 ? (
                     <div style={{ textAlign: 'center', padding: '80px 0', color: '#767676' }}>
                       <div style={{ fontSize: 52, marginBottom: 12 }}>📋</div>
-                      <div style={{ fontSize: 16 }}>No hay pedidos completados aún</div>
+                      <div style={{ fontSize: 16 }}>{histSearch ? 'Ningún pedido del historial coincide con la búsqueda' : 'No hay pedidos completados aún'}</div>
                     </div>
                   ) : histFiltered.length === 0 ? (
                     <div style={{ textAlign: 'center', padding: '60px 0', color: '#767676', fontSize: 14 }}>
@@ -5879,12 +5919,12 @@ function App() {
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 14 }}>
                               {grupo.map(o => (
                                 <OrderCard key={o.id} order={o} token={session.token} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
-                                  onStatusChange={(ord, newState) => { setOrders(orders.map(x => x.id === ord.id ? { ...x, estado: newState } : x)); updateOrderRemote(ord.id, { estado: newState }); }}
-                                  onDelete={ord => { setOrders(orders.filter(x => x.id !== ord.id)); deleteOrderRemote(ord.id); }}
-                                  onTrackingChange={(ord, tracking) => { setOrders(orders.map(x => x.id === ord.id ? { ...x, tracking } : x)); updateOrderRemote(ord.id, { tracking }); }}
-                                  onCarrierChange={(ord, carrier) => { setOrders(orders.map(x => x.id === ord.id ? { ...x, carrier } : x)); updateOrderRemote(ord.id, { carrier }); }}
-                                  onClienteUpdate={(ord, updates) => { setOrders(orders.map(x => x.id === ord.id ? { ...x, cliente: { ...x.cliente, ...updates } } : x)); updateOrderRemote(ord.id, { cliente: updates }); }}
-                                  onLabelGenerated={(ord, data) => { setOrders(orders.map(x => x.id === ord.id ? { ...x, tracking: data.tracking, carrier: 'USPS', labelBase64: data.labelBase64, labelStored: true } : x)); }}
+                                  onStatusChange={(ord, newState) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, estado: newState } : x)); updateOrderRemote(ord.id, { estado: newState }); }}
+                                  onDelete={ord => { setOrders(prev => prev.filter(x => x.id !== ord.id)); deleteOrderRemote(ord.id); }}
+                                  onTrackingChange={(ord, tracking) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, tracking } : x)); updateOrderRemote(ord.id, { tracking }); }}
+                                  onCarrierChange={(ord, carrier) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, carrier } : x)); updateOrderRemote(ord.id, { carrier }); }}
+                                  onClienteUpdate={(ord, updates) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, cliente: { ...x.cliente, ...updates } } : x)); updateOrderRemote(ord.id, { cliente: updates }); }}
+                                  onLabelGenerated={(ord, data) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, tracking: data.tracking, carrier: 'USPS', labelBase64: data.labelBase64, labelStored: true } : x)); }}
                                 />
                               ))}
                             </div>
