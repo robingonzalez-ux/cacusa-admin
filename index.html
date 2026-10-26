@@ -1720,6 +1720,196 @@ function PickupTodayButton({ token }) {
   );
 }
 
+// Click-N-Ship en lote (26 oct): si la API de USPS sale más cara, se exportan los pedidos
+// pendientes a EE.UU. en el CSV de "Import Batch of Labels" (lo arma el Worker, que tiene la
+// dirección de remitente) y, ya hechas las guías allá, se importa el CSV que baja Click-N-Ship
+// para pegar cada tracking en su pedido (cruce por Reference ID = id del pedido).
+function parseCsv(text) {
+  const rows = []; let row = [], cur = '', q = false;
+  const s = String(text || '').replace(/^﻿/, '');
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (q) {
+      if (ch === '"') { if (s[i + 1] === '"') { cur += '"'; i++; } else q = false; }
+      else cur += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === ',') { row.push(cur); cur = ''; }
+    else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && s[i + 1] === '\n') i++;
+      row.push(cur); cur = '';
+      if (row.some(c => c.trim())) rows.push(row);
+      row = [];
+    } else cur += ch;
+  }
+  row.push(cur);
+  if (row.some(c => c.trim())) rows.push(row);
+  return rows;
+}
+// Filas del CSV de Click-N-Ship → { ref, tracking }. Busca las columnas por nombre (la del
+// tracking contiene "tracking"; la de la referencia es "Reference ID"/"Reference Number", no la 2).
+function cnsTrackingRows(text) {
+  const rows = parseCsv(text);
+  const hi = rows.findIndex(r => r.some(c => /tracking/i.test(c)) && r.some(c => /reference/i.test(c)));
+  if (hi < 0) throw new Error('No encontré las columnas de referencia y tracking en ese archivo.');
+  const H = rows[hi].map(c => c.trim());
+  const ti = H.findIndex(c => /tracking/i.test(c));
+  const ri = H.findIndex(c => /reference/i.test(c) && !/2/.test(c));
+  if (ri < 0) throw new Error('No encontré la columna "Reference ID" en ese archivo.');
+  return rows.slice(hi + 1).map(r => ({ ref: String(r[ri] || '').trim(), tracking: String(r[ti] || '').replace(/\s+/g, '') })).filter(r => r.ref || r.tracking);
+}
+function ClickNShipTools({ token, uspsDefault, orders, onImported }) {
+  const [exp, setExp] = React.useState(null);   // { orders, sel, pkg, insured }
+  const [imp, setImp] = React.useState(null);   // { matches, unmatched, conflicts, markSent }
+  const [busy, setBusy] = React.useState(false);
+  const [msg, setMsg] = React.useState(null);
+  const fileRef = React.useRef(null);
+  const def = uspsDefault || DEFAULT_SHIPPING.uspsDefaultPackage;
+
+  const openExport = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const pre = await apiCall('order/cns-export', { token, preview: true });
+      if (!pre.orders.length) { setMsg({ ok: false, text: 'No hay pedidos a EE.UU. pendientes de guía.' }); return; }
+      const sel = {}; pre.orders.forEach(o => { sel[o.id] = !o.issues.length; });
+      setExp({ orders: pre.orders, sel, pkg: { ...def }, insured: 100 });
+    } catch (e) { setMsg({ ok: false, text: e.message || 'No se pudo leer los pedidos.' }); }
+    finally { setBusy(false); }
+  };
+  const doExport = async () => {
+    const ids = exp.orders.filter(o => exp.sel[o.id]).map(o => o.id);
+    setBusy(true); setMsg(null);
+    try {
+      const data = await apiCall('order/cns-export', { token, ids, ...exp.pkg, insuredValue: exp.insured });
+      const url = URL.createObjectURL(new Blob([data.csv], { type: 'text/csv;charset=utf-8' }));
+      const a = document.createElement('a'); a.href = url; a.download = data.filename; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      setExp(null);
+      setMsg({ ok: true, text: `Archivo listo: ${data.count} envío${data.count !== 1 ? 's' : ''}. Súbelo en Click-N-Ship → Import Batch of Labels (sin abrirlo en Excel).` });
+    } catch (e) { setMsg({ ok: false, text: e.message || 'No se pudo armar el archivo.' }); }
+    finally { setBusy(false); }
+  };
+  const onFile = async e => {
+    const f = e.target.files && e.target.files[0]; e.target.value = '';
+    if (!f) return;
+    setMsg(null);
+    try {
+      const rows = cnsTrackingRows(await f.text());
+      const byId = new Map(orders.map(o => [String(o.id), o]));
+      const matches = [], unmatched = [], conflicts = [];
+      const seen = new Set();
+      for (const r of rows) {
+        const o = byId.get(r.ref);
+        if (!o) { unmatched.push(r.ref || '(sin referencia)'); continue; }
+        if (seen.has(r.ref)) continue;
+        if (!/^\d{20,34}$/.test(r.tracking)) { conflicts.push(`#${o.numero || o.id}: tracking "${r.tracking.slice(0, 30)}" no válido${/e\+/i.test(r.tracking) ? ' (el archivo pasó por Excel; usa el original)' : ''}`); continue; }
+        const cur = String(o.tracking || '').replace(/\s+/g, '');
+        if (cur === r.tracking) continue;
+        if (cur) { conflicts.push(`#${o.numero || o.id}: ya tiene otro tracking (${cur})`); continue; }
+        seen.add(r.ref);
+        matches.push({ order: o, tracking: r.tracking });
+      }
+      if (!matches.length && !conflicts.length) { setMsg({ ok: false, text: unmatched.length ? `Ninguna fila coincide con un pedido del panel (${unmatched.length} sin match).` : 'No hay trackings nuevos en ese archivo.' }); return; }
+      setImp({ matches, unmatched, conflicts, markSent: true });
+    } catch (err) { setMsg({ ok: false, text: err.message || 'No se pudo leer el archivo.' }); }
+  };
+  const doImport = () => {
+    imp.matches.forEach(m => onImported(m.order, m.tracking, imp.markSent));
+    setMsg({ ok: true, text: `Trackings pegados en ${imp.matches.length} pedido${imp.matches.length !== 1 ? 's' : ''}.` });
+    setImp(null);
+  };
+
+  const btn = { padding: '10px 20px', background: '#F3EFF5', color: '#5B4A63', borderRadius: 99, fontWeight: 700, fontSize: 13, border: 'none', cursor: busy ? 'default' : 'pointer', opacity: busy ? .7 : 1 };
+  const inp = { width: 64, padding: '6px 8px', border: '1.5px solid #e4e4e4', borderRadius: 8, fontSize: 13 };
+  const nSel = exp ? exp.orders.filter(o => exp.sel[o.id]).length : 0;
+  const pkgOk = exp && ['weightOz', 'lengthIn', 'widthIn', 'heightIn'].every(k => Number(exp.pkg[k]) > 0);
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button onClick={openExport} disabled={busy} style={btn}>{busy && !exp ? 'Leyendo…' : '⬇ Exportar para Click-N-Ship'}</button>
+        <button onClick={() => fileRef.current && fileRef.current.click()} disabled={busy} style={btn}>⬆ Importar trackings</button>
+        <label htmlFor="cnsImportFile" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0,0,0,0)' }}>Archivo CSV de Click-N-Ship</label>
+        <input id="cnsImportFile" ref={fileRef} type="file" accept=".csv,text/csv" onChange={onFile} style={{ display: 'none' }} />
+      </div>
+      {msg && (
+        <div role={msg.ok ? 'status' : 'alert'} aria-live={msg.ok ? 'polite' : 'assertive'}
+          style={{ marginTop: 8, fontSize: 12, color: msg.ok ? '#166534' : '#DC2626', maxWidth: 320 }}>{msg.text}</div>
+      )}
+
+      {exp && (
+        <Modal onClose={() => !busy && setExp(null)} label="Exportar envíos para Click-N-Ship" boxStyle={{ maxWidth: 520, maxHeight: '88vh', overflowY: 'auto' }}>
+          <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 6 }}>Exportar para Click-N-Ship</div>
+          <div style={{ fontSize: 12, color: '#7A6880', marginBottom: 12 }}>Pedidos a EE.UU. sin guía ni tracking. Ground Advantage, con el correo y teléfono de cada clienta para los avisos de USPS.</div>
+          <div style={{ border: '1px solid #eee', borderRadius: 10, marginBottom: 14 }}>
+            {exp.orders.map(o => {
+              const blocked = o.issues.some(i => i !== 'sin piezas cargadas');
+              return (
+                <label key={o.id} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '8px 12px', borderBottom: '1px solid #f3f3f3', fontSize: 13, opacity: blocked ? .6 : 1, cursor: blocked ? 'default' : 'pointer' }}>
+                  <input type="checkbox" disabled={blocked} checked={!!exp.sel[o.id]} onChange={e => setExp(x => ({ ...x, sel: { ...x.sel, [o.id]: e.target.checked } }))} />
+                  <span>
+                    <b>{o.numero ? '#' + o.numero + ' · ' : ''}{o.cliente}</b> — {[o.ciudad, o.estado].filter(Boolean).join(', ')}
+                    {o.issues.length > 0 && <div style={{ fontSize: 11, color: blocked ? '#DC2626' : '#B45309' }}>{o.issues.join(' · ')}{blocked ? ' — corrígelo con ✎ Editar dirección' : ''}</div>}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 16, fontSize: 12, color: '#5B4A63' }}>
+            {[['weightOz', 'Peso (oz)'], ['lengthIn', 'Largo (in)'], ['widthIn', 'Ancho (in)'], ['heightIn', 'Alto (in)']].map(([k, l]) => (
+              <label key={k} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>{l}
+                <input type="number" min="0" step="0.1" value={exp.pkg[k]} onChange={e => setExp(x => ({ ...x, pkg: { ...x.pkg, [k]: e.target.value === '' ? '' : Number(e.target.value) } }))} style={inp} />
+              </label>
+            ))}
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>Seguro ($)
+              <input type="number" min="0" step="1" value={exp.insured} onChange={e => setExp(x => ({ ...x, insured: e.target.value === '' ? '' : Number(e.target.value) }))} style={inp} />
+            </label>
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button onClick={() => setExp(null)} disabled={busy} style={{ ...btn, background: 'white', border: '1.5px solid #e4e4e4' }}>Cancelar</button>
+            <button onClick={doExport} disabled={busy || !nSel || !pkgOk}
+              style={{ ...btn, background: 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', opacity: busy || !nSel || !pkgOk ? .5 : 1 }}>
+              {busy ? 'Armando…' : `Descargar archivo (${nSel})`}
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {imp && (
+        <Modal onClose={() => setImp(null)} label="Importar trackings de Click-N-Ship" boxStyle={{ maxWidth: 520, maxHeight: '88vh', overflowY: 'auto' }}>
+          <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 10 }}>Importar trackings</div>
+          {imp.matches.length > 0 && (
+            <div style={{ fontSize: 13, marginBottom: 12 }}>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>{imp.matches.length} pedido{imp.matches.length !== 1 ? 's' : ''} recibirá{imp.matches.length !== 1 ? 'n' : ''} su tracking:</div>
+              {imp.matches.map(m => (
+                <div key={m.order.id} style={{ padding: '4px 0', borderBottom: '1px solid #f3f3f3' }}>
+                  {m.order.numero ? '#' + m.order.numero + ' · ' : ''}{[m.order.cliente && m.order.cliente.nombre, m.order.cliente && m.order.cliente.apellido].filter(Boolean).join(' ')} → <span style={{ fontFamily: 'monospace' }}>{m.tracking}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {imp.conflicts.length > 0 && (
+            <div style={{ fontSize: 12, color: '#B45309', marginBottom: 10 }}>No se tocan:<br />{imp.conflicts.map((c, i) => <div key={i}>• {c}</div>)}</div>
+          )}
+          {imp.unmatched.length > 0 && (
+            <div style={{ fontSize: 12, color: '#7A6880', marginBottom: 10 }}>{imp.unmatched.length} fila{imp.unmatched.length !== 1 ? 's' : ''} sin pedido en el panel (guías hechas fuera del panel): {imp.unmatched.slice(0, 10).join(', ')}{imp.unmatched.length > 10 ? '…' : ''}</div>
+          )}
+          {imp.matches.length > 0 && (
+            <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, marginBottom: 16 }}>
+              <input type="checkbox" checked={imp.markSent} onChange={e => setImp(x => ({ ...x, markSent: e.target.checked }))} />
+              Marcar como Enviado (sale el correo de envío a cada clienta)
+            </label>
+          )}
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button onClick={() => setImp(null)} style={{ ...btn, background: 'white', border: '1.5px solid #e4e4e4' }}>{imp.matches.length ? 'Cancelar' : 'Cerrar'}</button>
+            {imp.matches.length > 0 && (
+              <button onClick={doImport} style={{ ...btn, background: 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white' }}>Pegar {imp.matches.length} tracking{imp.matches.length !== 1 ? 's' : ''}</button>
+            )}
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 // Nombre completo del cliente: los pedidos de Lovers guardan nombre y apellido por separado
 // (la tarjeta solo mostraba el nombre); los de la tienda traen el nombre completo en `nombre`
 // y el apellido vacío — no se repite si el apellido ya está dentro del nombre.
@@ -5780,6 +5970,12 @@ function App() {
                 <div style={{ fontWeight: 800, fontSize: 18, color: '#1A1118' }}>Pedidos</div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                   <PickupTodayButton token={session.token} />
+                  <ClickNShipTools token={session.token} orders={orders} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
+                    onImported={(ord, tracking, markSent) => {
+                      const patch = { tracking, carrier: 'USPS', ...(markSent && ord.estado !== 'Entregado' ? { estado: 'Enviado' } : {}) };
+                      setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, ...patch } : x));
+                      updateOrderRemote(ord.id, patch);
+                    }} />
                   <button onClick={() => setShowOrderModal(true)}
                     style={{ padding: '10px 20px', background: 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', borderRadius: 99, fontWeight: 700, fontSize: 13, border: 'none', cursor: 'pointer', boxShadow: '0 4px 12px rgba(232,80,138,.3)' }}>
                     + Nuevo pedido
