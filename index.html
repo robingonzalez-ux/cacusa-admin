@@ -110,6 +110,22 @@ const DEFAULT_TEXTS = {
   instagram: '@cacusabytaitus',
   perks: ['Hecho a mano', 'Envío express', '5–10 días hábiles', 'Empaque especial para regalo']
 };
+// Campaña de temporada (Navidad) — contrato compartido con la tienda (config.campaign).
+// Mismos defaults que usa el sitio cuando la llave no existe. Base: USPS 2026 Ground Advantage
+// "ship-by" 17 dic para llegar antes de Navidad; personalizar toma 5–10 días hábiles;
+// Servientrega Ecuador 1–3 días. banner vacío = frase automática del sitio.
+const DEFAULT_CAMPAIGN = {
+  enabled: true,
+  endsAt: '2026-12-26',
+  title: 'Regalos de Navidad',
+  title_en: 'Christmas gifts',
+  banner: '',
+  banner_en: '',
+  deadlinePersonalEc: '2026-12-08',
+  deadlinePersonalUs: '2026-12-03',
+  deadlineStockEc: '2026-12-18',
+  deadlineStockUs: '2026-12-14'
+};
 const DEFAULT_HOME = {
   storyLabel: 'Nuestra historia',
   storyTitle: 'Artesanos del corazón',
@@ -4836,7 +4852,7 @@ function CouponsTab({ token }) {
 }
 
 // ── Settings Tab ────────────────────────────────────────────────────────────
-function SettingsTab({ categories, setCategories, materials, setMaterials, shipping, setShipping, texts, setTexts, products, setProducts, setDirty }) {
+function SettingsTab({ categories, setCategories, materials, setMaterials, shipping, setShipping, texts, setTexts, campaign, setCampaign, products, setProducts, setDirty }) {
   const setShip = (k, v) => { setShipping(s => ({ ...s, [k]: v === '' ? '' : Number(v) })); setDirty(true); };
   const uspsPkg = shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage;
   const setUspsPkg = (k, v) => { setShipping(s => ({ ...s, uspsDefaultPackage: { ...(s.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage), [k]: v === '' ? '' : Number(v) } })); setDirty(true); };
@@ -4845,6 +4861,8 @@ function SettingsTab({ categories, setCategories, materials, setMaterials, shipp
     setProducts(prev => prev.map(p => p.category === oldName ? { ...p, category: newName } : p));
   };
   const setText = (k, v) => { setTexts(t => ({ ...t, [k]: v })); setDirty(true); };
+  const camp = { ...DEFAULT_CAMPAIGN, ...(campaign || {}) };
+  const setCamp = (k, v) => { setCampaign(c => ({ ...DEFAULT_CAMPAIGN, ...(c || {}), [k]: v })); setDirty(true); };
   const inp = { padding: '10px 13px', border: '1.5px solid #e4e4e4', borderRadius: 10, fontSize: 14, outline: 'none', width: '100%', boxSizing: 'border-box' };
   const lbl = { display: 'block', fontSize: 11, fontWeight: 600, color: '#777', letterSpacing: '.11em', textTransform: 'uppercase', marginBottom: 5 };
 
@@ -4935,6 +4953,60 @@ function SettingsTab({ categories, setCategories, materials, setMaterials, shipp
             <div>
               <label style={lbl}>Alto (in)</label>
               <input type="number" min="1" step="0.5" value={uspsPkg.heightIn} onChange={e => setUspsPkg('heightIn', e.target.value)} placeholder="2" style={inp} />
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style={{ background: 'white', borderRadius: 16, padding: '20px 22px', boxShadow: '0 1px 6px rgba(0,0,0,.06)', marginBottom: 16 }}>
+        <div style={{ fontWeight: 800, fontSize: 15, color: '#1A1118', marginBottom: 4 }}>✦ Campaña de temporada (Navidad)</div>
+        <div style={{ fontSize: 12, color: '#7A6B85', marginBottom: 16 }}>Banner y fechas límite de pedido para recibir antes de Navidad. Se muestra en la tienda mientras esté activa y hasta la fecha de fin.</div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, fontWeight: 600, color: '#1A1118', marginBottom: 16, cursor: 'pointer' }}>
+          <input type="checkbox" checked={camp.enabled !== false} onChange={e => setCamp('enabled', e.target.checked)} />
+          Campaña activa
+        </label>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
+          <div>
+            <label style={lbl}>Título (ES)</label>
+            <input value={camp.title || ''} onChange={e => setCamp('title', e.target.value)} placeholder={DEFAULT_CAMPAIGN.title} style={inp} />
+          </div>
+          <div>
+            <label style={lbl}>Título (EN)</label>
+            <input value={camp.title_en || ''} onChange={e => setCamp('title_en', e.target.value)} placeholder={DEFAULT_CAMPAIGN.title_en} style={inp} />
+          </div>
+          <div style={{ gridColumn: 'span 2' }}>
+            <label style={lbl}>Banner (ES) — opcional</label>
+            <input value={camp.banner || ''} onChange={e => setCamp('banner', e.target.value)} placeholder='Vacío = texto automático: "Pide antes del {fecha} para recibir antes de Navidad"' style={inp} />
+          </div>
+          <div style={{ gridColumn: 'span 2' }}>
+            <label style={lbl}>Banner (EN) — opcional</label>
+            <input value={camp.banner_en || ''} onChange={e => setCamp('banner_en', e.target.value)} placeholder="Vacío = texto automático en inglés con la fecha límite" style={inp} />
+          </div>
+          <div>
+            <label style={lbl}>Fin de la campaña</label>
+            <input type="date" value={camp.endsAt || ''} onChange={e => setCamp('endsAt', e.target.value)} style={inp} />
+          </div>
+        </div>
+        <div style={{ borderTop: '1px solid #F0EAF3', marginTop: 4, paddingTop: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#1A1118', marginBottom: 2 }}>Fechas límite para pedir</div>
+          <div style={{ fontSize: 12, color: '#7A6B85', marginBottom: 14 }}>Defaults calculados desde el corte de USPS Ground Advantage (enviar hasta el 17 dic), 5–10 días hábiles de personalización y 1–3 días de Servientrega en Ecuador.</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
+            <div>
+              <label style={lbl}>Personalizada EE.UU.</label>
+              <input type="date" value={camp.deadlinePersonalUs || ''} onChange={e => setCamp('deadlinePersonalUs', e.target.value)} style={inp} />
+            </div>
+            <div>
+              <label style={lbl}>Personalizada Ecuador</label>
+              <input type="date" value={camp.deadlinePersonalEc || ''} onChange={e => setCamp('deadlinePersonalEc', e.target.value)} style={inp} />
+            </div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+            <div>
+              <label style={lbl}>Pieza en stock EE.UU.</label>
+              <input type="date" value={camp.deadlineStockUs || ''} onChange={e => setCamp('deadlineStockUs', e.target.value)} style={inp} />
+            </div>
+            <div>
+              <label style={lbl}>Pieza en stock Ecuador</label>
+              <input type="date" value={camp.deadlineStockEc || ''} onChange={e => setCamp('deadlineStockEc', e.target.value)} style={inp} />
             </div>
           </div>
         </div>
@@ -5375,6 +5447,7 @@ function App() {
   const [materials, setMaterials]     = useState(DEFAULT_MATERIALS);
   const [shipping, setShipping]       = useState(DEFAULT_SHIPPING);
   const [texts, setTexts]             = useState(DEFAULT_TEXTS);
+  const [campaign, setCampaign]       = useState(DEFAULT_CAMPAIGN);
   const [home, setHome]               = useState(DEFAULT_HOME);
   const [lovers, setLovers]           = useState(DEFAULT_LOVERS);
   const [pages, setPages]             = useState(DEFAULT_PAGES);
@@ -5529,6 +5602,9 @@ function App() {
         if (cfg.shipping && typeof cfg.shipping === 'object') setShipping({ ...DEFAULT_SHIPPING, ...cfg.shipping });
         const mergedTexts = (cfg.texts && typeof cfg.texts === 'object') ? { ...DEFAULT_TEXTS, ...cfg.texts } : DEFAULT_TEXTS;
         setTexts(mergedTexts);
+        // Campaña: se mezcla con los defaults y se conservan campos desconocidos (contrato con la tienda)
+        setCampaign((cfg.campaign && typeof cfg.campaign === 'object' && !Array.isArray(cfg.campaign))
+          ? { ...DEFAULT_CAMPAIGN, ...cfg.campaign } : DEFAULT_CAMPAIGN);
         const h = (cfg.home && typeof cfg.home === 'object') ? cfg.home : {};
         const mergedHome = {
           ...DEFAULT_HOME, ...h,
@@ -5646,6 +5722,7 @@ function App() {
         config: {
           whatsapp: whatsappNum, categories, materials, shipping,
           texts, texts_en, home, home_en, lovers, lovers_en, pages, pages_en,
+          campaign,
           translations: enRef.current.translations || undefined
         },
         products: prodsOut,
@@ -6181,6 +6258,7 @@ function App() {
             materials={materials} setMaterials={setMaterials}
             shipping={shipping} setShipping={setShipping}
             texts={texts} setTexts={setTexts}
+            campaign={campaign} setCampaign={setCampaign}
             products={products} setProducts={setProducts}
             setDirty={setDirty}
           />
