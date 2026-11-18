@@ -2065,8 +2065,203 @@ function orderCiudad(c) {
   return pais && ciudad.toLowerCase().endsWith(', ' + pais.toLowerCase()) ? ciudad.slice(0, -(pais.length + 2)).trim() : ciudad;
 }
 
-function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrackingChange, onCarrierChange, onClienteUpdate, onLabelGenerated }) {
+// ── Agregar pieza con foto (18 nov) ──────────────────────────────────────────
+// Al armar un pedido (sobre todo las cajas de Lovers, que nacen sin piezas) se toma una
+// foto de la pieza, el Worker le pregunta a Claude cuál del catálogo es (/product/identify)
+// y la persona elige la correcta. Solo en cajas de Lovers y pedidos manuales del panel
+// (misma regla que orderAllowsPieceLoad() en admin-worker.js).
+const PANEL_USERS = ['tita.jaramillo', 'robin.gonzalez'];
+function orderAllowsPieceLoad(o) {
+  return !!o && (o.pago === 'Lovers' || !!o.lote || PANEL_USERS.includes(o.createdBy));
+}
+function productImageUrl(p) {
+  const u = (p && (p.imageUrl || (Array.isArray(p.images) ? p.images[0] : ''))) || '';
+  return typeof u === 'string' && /^https:\/\//.test(u) ? u : '';
+}
+// Reduce la foto a 1024px por el lado largo, JPEG 0.82 → base64 sin "data:".
+function photoToJpegBase64(file, maxPx = 1024, quality = 0.82) {
+  return new Promise((resolve, reject) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    const timer = setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {}
+      reject(new Error('La foto tardó demasiado o no se pudo leer. Intenta de nuevo (JPG o PNG).')); }, 20000);
+    img.onerror = () => { clearTimeout(timer); try { URL.revokeObjectURL(url); } catch (_) {}
+      reject(new Error('No se pudo leer la foto. Si es HEIC, tómala o guárdala como JPG.')); };
+    img.onload = () => {
+      clearTimeout(timer);
+      try {
+        let w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+        if (w > maxPx || h > maxPx) {
+          if (w >= h) { h = Math.round(h * maxPx / w); w = maxPx; }
+          else        { w = Math.round(w * maxPx / h); h = maxPx; }
+        }
+        const cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        const ctx2 = cv.getContext('2d');
+        ctx2.fillStyle = '#fff'; ctx2.fillRect(0, 0, w, h); // PNG con transparencia → fondo blanco
+        ctx2.drawImage(img, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+        const dataUrl = cv.toDataURL('image/jpeg', quality);
+        resolve({ base64: dataUrl.split(',')[1], dataUrl });
+      } catch (e) { reject(new Error('No se pudo procesar la foto.')); }
+    };
+    img.src = url;
+  });
+}
+function pieceErrMsg(e) {
+  if (e && e.status === 503) return 'Falta configurar la IA en el Worker (ANTHROPIC_API_KEY).';
+  if (e && e.status === 429) return (e.message && /límite/i.test(e.message)) ? e.message : 'Se alcanzó el límite de identificaciones por foto de hoy. Busca la pieza a mano.';
+  if (e && e.status === 401) return 'La sesión expiró. Vuelve a iniciar sesión.';
+  return (e && e.message) || 'Error de red. Intenta de nuevo.';
+}
+
+function AddPieceModal({ order, token, photo, products, categories, onRetake, onClose, onAdded }) {
+  const [cat, setCat]         = React.useState('Todas');
+  const [busy, setBusy]       = React.useState(false);
+  const [adding, setAdding]   = React.useState(null); // id que se está agregando
+  const [errMsg, setErrMsg]   = React.useState('');
+  const [matches, setMatches] = React.useState(null); // null = todavía no se identificó
+  const [manual, setManual]   = React.useState(false);
+  const [query, setQuery]     = React.useState('');
+  React.useEffect(() => { setMatches(null); setErrMsg(''); }, [photo && photo.base64]);
+  const cats = ['Todas', ...((categories && categories.length) ? categories : DEFAULT_CATEGORIES)];
+
+  const identify = async () => {
+    if (!photo || busy) return;
+    setBusy(true); setErrMsg(''); setMatches(null);
+    try {
+      const res = await apiCall('product/identify', { token, image: photo.base64, mediaType: 'image/jpeg', category: cat === 'Todas' ? '' : cat });
+      setMatches(Array.isArray(res.matches) ? res.matches : []);
+    } catch (e) { setErrMsg(pieceErrMsg(e)); }
+    setBusy(false);
+  };
+  const pick = async (pid, name) => {
+    if (adding) return;
+    setAdding(String(pid)); setErrMsg('');
+    try {
+      const res = await apiCall('order/update', { token, id: order.id, patch: { addProductIds: [String(pid)] } });
+      onAdded((res.order && res.order.productos) || null, name);
+    } catch (e) { setErrMsg(pieceErrMsg(e)); setAdding(null); }
+  };
+  const q = query.trim().toLowerCase();
+  const manualList = q
+    ? (products || []).filter(p => String(p.name || '').toLowerCase().includes(q) || String(p.id) === q).slice(0, 30)
+    : [];
+  const thumb = { width: 56, height: 56, borderRadius: 10, objectFit: 'cover', background: '#F3EFF5', flexShrink: 0 };
+  const optBtn = { display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', padding: 8, background: '#FAF7FB', border: '1.5px solid #EDE3F1', borderRadius: 12, cursor: 'pointer', fontFamily: 'inherit' };
+
+  return (
+    <Modal onClose={onClose} labelledBy={`addPieceTitle-${order.id}`} boxStyle={{ maxWidth: 440, maxHeight: '90vh', overflowY: 'auto', padding: 20 }} overlayStyle={{ padding: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <div id={`addPieceTitle-${order.id}`} style={{ fontWeight: 800, fontSize: 17, color: '#1A1118' }}>📷 Agregar pieza con foto</div>
+        <button type="button" onClick={onClose} aria-label="Cerrar" style={{ width: 32, height: 32, borderRadius: '50%', background: '#F9F5F7', color: '#7A6880', border: 'none', cursor: 'pointer', fontSize: 16 }}>✕</button>
+      </div>
+
+      {photo && (
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12 }}>
+          <img src={photo.dataUrl} alt="Foto de la pieza a identificar" style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 12, border: '1px solid #EDE3F1' }} />
+          <button type="button" onClick={onRetake}
+            style={{ fontSize: 12, fontWeight: 700, color: '#7A5F8A', background: '#F3EFF5', border: 'none', borderRadius: 8, padding: '7px 10px', cursor: 'pointer' }}>
+            🔄 Tomar otra foto
+          </button>
+        </div>
+      )}
+
+      <div style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63', marginBottom: 6 }} id={`addPieceCats-${order.id}`}>Categoría</div>
+      <div role="group" aria-labelledby={`addPieceCats-${order.id}`} style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
+        {cats.map(c => (
+          <button type="button" key={c} onClick={() => setCat(c)} aria-pressed={cat === c}
+            style={{ fontSize: 12, fontWeight: 700, padding: '5px 10px', borderRadius: 99, cursor: 'pointer', border: cat === c ? '1.5px solid #E8508A' : '1.5px solid #EDE3F1', background: cat === c ? '#FCE8F3' : 'white', color: cat === c ? '#C0336E' : '#5B4A63' }}>
+            {c}
+          </button>
+        ))}
+      </div>
+      <div style={{ fontSize: 11, color: '#7A6880', marginBottom: 10 }}>💡 Elegir la categoría hace la búsqueda más rápida y barata.</div>
+
+      <button type="button" onClick={identify} disabled={!photo || busy}
+        style={{ width: '100%', padding: '10px', background: busy ? '#C9B8D3' : 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 13, cursor: busy ? 'default' : 'pointer' }}>
+        {busy ? 'Identificando…' : '✨ Identificar'}
+      </button>
+      <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#7A6880', minHeight: 4, marginTop: 6 }}>
+        {busy ? 'Comparando con el catálogo, puede tardar unos segundos…' : (matches && !matches.length ? 'No se encontró una pieza parecida. Prueba otra foto u otra categoría, o búscala a mano.' : '')}
+      </div>
+      {errMsg && <div role="alert" aria-live="assertive" style={{ fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderRadius: 8, padding: '8px 10px', marginTop: 6 }}>{errMsg}</div>}
+
+      {matches && matches.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63' }}>Toca la pieza correcta:</div>
+          {matches.map(m => (
+            <button type="button" key={m.id} onClick={() => pick(m.id, m.name)} disabled={!!adding} style={{ ...optBtn, opacity: adding && adding !== String(m.id) ? 0.5 : 1 }}>
+              {m.imageUrl ? <img src={m.imageUrl} alt="" style={thumb} /> : <div style={thumb} />}
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: 'block', fontWeight: 700, fontSize: 13, color: '#1A1118' }}>{m.name}</span>
+                <span style={{ display: 'block', fontSize: 11, color: '#7A6880' }}>{m.category}{m.reason ? ' · ' + m.reason : ''}</span>
+              </span>
+              <span style={{ fontWeight: 800, fontSize: 13, color: '#C0336E', flexShrink: 0 }}>{adding === String(m.id) ? '…' : Math.round((Number(m.confidence) || 0) * 100) + '%'}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div style={{ borderTop: '1px solid #EDE8EA', marginTop: 14, paddingTop: 10 }}>
+        {!manual ? (
+          <button type="button" onClick={() => setManual(true)}
+            style={{ fontSize: 12, fontWeight: 700, color: '#7A5F8A', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+            🔍 Ninguna es / buscar a mano
+          </button>
+        ) : (
+          <div>
+            <label htmlFor={`addPieceSearch-${order.id}`} style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63', display: 'block', marginBottom: 6 }}>Buscar en el catálogo</label>
+            <input id={`addPieceSearch-${order.id}`} value={query} onChange={e => setQuery(e.target.value)} placeholder="Nombre de la pieza…"
+              style={{ width: '100%', boxSizing: 'border-box', padding: '8px 10px', border: '1.5px solid #EDE3F1', borderRadius: 8, fontSize: 13, outline: 'none', fontFamily: 'inherit' }} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+              {q && !manualList.length && <div style={{ fontSize: 12, color: '#7A6880' }}>Sin resultados.</div>}
+              {manualList.map(p => (
+                <button type="button" key={p.id} onClick={() => pick(p.id, p.name)} disabled={!!adding} style={{ ...optBtn, padding: 6, opacity: adding && adding !== String(p.id) ? 0.5 : 1 }}>
+                  {productImageUrl(p) ? <img src={productImageUrl(p)} alt="" style={{ ...thumb, width: 40, height: 40 }} /> : <div style={{ ...thumb, width: 40, height: 40 }} />}
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: '#1A1118' }}>
+                    {p.name}<span style={{ fontSize: 11, color: '#7A6880' }}> · {p.category}{p.available === false ? ' · agotado' : ''}</span>
+                  </span>
+                  {adding === String(p.id) && <span style={{ fontWeight: 800, color: '#C0336E' }}>…</span>}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+function OrderCard({ order, token, uspsDefault, products, categories, onStatusChange, onDelete, onTrackingChange, onCarrierChange, onClienteUpdate, onLabelGenerated, onProductsChange }) {
   const [showLabelModal, setShowLabelModal] = React.useState(false);
+  // ── Agregar pieza con foto ──
+  const canLoadPieces = orderAllowsPieceLoad(order);
+  const pieceInputRef = React.useRef(null);
+  const [piecePhoto, setPiecePhoto]   = React.useState(null); // { base64, dataUrl }
+  const [pieceOpen, setPieceOpen]     = React.useState(false);
+  const [pieceMsg, setPieceMsg]       = React.useState('');
+  const [pieceErr, setPieceErr]       = React.useState('');
+  const [removing, setRemoving]       = React.useState(null);
+  React.useEffect(() => { if (!pieceMsg) return; const t = setTimeout(() => setPieceMsg(''), 5000); return () => clearTimeout(t); }, [pieceMsg]);
+  const handlePieceFile = async e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    setPieceErr('');
+    try { setPiecePhoto(await photoToJpegBase64(file)); setPieceOpen(true); }
+    catch (er) { setPieceErr(er.message); }
+  };
+  const removePiece = async (i, p) => {
+    if (removing != null) return;
+    if (!window.confirm('¿Quitar "' + (p.name || 'esta pieza') + '" del pedido?')) return;
+    setRemoving(i); setPieceErr('');
+    try {
+      const res = await apiCall('order/update', { token, id: order.id, patch: { removeProductIndex: i } });
+      if (res.order && Array.isArray(res.order.productos)) onProductsChange && onProductsChange(order, res.order.productos);
+      setPieceMsg('Pieza quitada del pedido.');
+    } catch (er) { setPieceErr(pieceErrMsg(er)); }
+    setRemoving(null);
+  };
   // País: `pais`, o lo que va después de la última coma de la ciudad ("Miami, US") — los
   // pedidos Zelle/WhatsApp de la tienda lo guardaban así (12 oct). Misma regla que
   // orderCountryParts() en cacusa-admin.
@@ -2333,15 +2528,52 @@ function OrderCard({ order, token, uspsDefault, onStatusChange, onDelete, onTrac
       </div>
       <div style={{ background: '#FAF7FB', borderRadius: 10, padding: '10px 12px' }}>
         {(order.productos || []).map((p, i) => (
-          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: '#1A1118', padding: '2px 0' }}>
-            <span>{p.name}{p.personalization ? <span style={{ color: '#E8508A' }}> "{p.personalization}"</span> : null}</span>
-            <span style={{ fontWeight: 700 }}>${p.price}</span>
+          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, fontSize: 13, color: '#1A1118', padding: '2px 0' }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+              {p.addedBy && productImageUrl(p) && <img src={productImageUrl(p)} alt="" style={{ width: 24, height: 24, borderRadius: 6, objectFit: 'cover', flexShrink: 0 }} />}
+              <span>{p.name}{p.personalization ? <span style={{ color: '#E8508A' }}> "{p.personalization}"</span> : null}</span>
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+              <span style={{ fontWeight: 700 }}>${p.price}</span>
+              {p.addedBy && canLoadPieces && (
+                <button type="button" onClick={() => removePiece(i, p)} disabled={removing != null}
+                  aria-label={'Quitar ' + (p.name || 'pieza') + ' del pedido'} title="Quitar pieza"
+                  style={{ width: 22, height: 22, borderRadius: '50%', border: 'none', background: '#FEE2E2', color: '#DC2626', fontSize: 11, cursor: 'pointer', lineHeight: 1 }}>
+                  {removing === i ? '…' : '✕'}
+                </button>
+              )}
+            </span>
           </div>
         ))}
+        {canLoadPieces && !(order.productos || []).length && (
+          <div style={{ fontSize: 12, color: '#7A6880', fontStyle: 'italic', padding: '2px 0' }}>Todavía sin piezas cargadas.</div>
+        )}
         <div style={{ borderTop: '1px solid #EDE8EA', marginTop: 6, paddingTop: 6, display: 'flex', justifyContent: 'space-between', fontWeight: 800, fontSize: 14, color: '#1A1118' }}>
           <span>Total</span><span style={{ color: '#E8508A' }}>${order.total}</span>
         </div>
+        {canLoadPieces && (
+          <>
+            <button type="button" onClick={() => pieceInputRef.current && pieceInputRef.current.click()}
+              style={{ marginTop: 8, width: '100%', padding: '8px', background: '#F3EFF5', color: '#7A5F8A', border: '1.5px dashed #C9B8D3', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+              📷 Agregar pieza con foto
+            </button>
+            <input ref={pieceInputRef} type="file" accept="image/*" capture="environment" aria-label="Foto de la pieza"
+              style={{ display: 'none' }} onChange={handlePieceFile} />
+            <div role="status" aria-live="polite" style={{ fontSize: 11, color: '#15803D', marginTop: pieceMsg ? 4 : 0 }}>{pieceMsg}</div>
+            {pieceErr && <div role="alert" aria-live="assertive" style={{ fontSize: 11, color: '#DC2626', marginTop: 4 }}>{pieceErr}</div>}
+          </>
+        )}
       </div>
+      {pieceOpen && (
+        <AddPieceModal order={order} token={token} photo={piecePhoto} products={products} categories={categories}
+          onRetake={() => pieceInputRef.current && pieceInputRef.current.click()}
+          onClose={() => { setPieceOpen(false); setPiecePhoto(null); }}
+          onAdded={(productos, name) => {
+            if (Array.isArray(productos)) onProductsChange && onProductsChange(order, productos);
+            setPieceOpen(false); setPiecePhoto(null);
+            setPieceMsg('✓ Agregada: ' + (name || 'pieza'));
+          }} />
+      )}
       {order.lote && <div style={{ display: 'inline-block', fontSize: 11, fontWeight: 700, color: '#C0336E', background: '#FCE8F3', borderRadius: 99, padding: '2px 10px', width: 'fit-content' }}>♡ Lote Lovers {order.lote} · sale del 15 al 21</div>}
       {order.notas && <div style={{ fontSize: 12, color: '#7A6880', fontStyle: 'italic' }}>📝 {order.notas}</div>}
 
@@ -6142,6 +6374,8 @@ function App() {
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 14 }}>
                             {grupo.map(o => (
                               <OrderCard key={o.id} order={o} token={session.token} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
+                                products={products} categories={categories}
+                                onProductsChange={(ord, productos) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, productos } : x)); }}
                                 onStatusChange={(ord, newState) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, estado: newState } : x)); updateOrderRemote(ord.id, { estado: newState }); }}
                                 onDelete={ord => { setOrders(prev => prev.filter(x => x.id !== ord.id)); deleteOrderRemote(ord.id); }}
                                 onTrackingChange={(ord, tracking) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, tracking } : x)); updateOrderRemote(ord.id, { tracking }); }}
@@ -6212,6 +6446,8 @@ function App() {
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 14 }}>
                               {grupo.map(o => (
                                 <OrderCard key={o.id} order={o} token={session.token} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
+                                  products={products} categories={categories}
+                                  onProductsChange={(ord, productos) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, productos } : x)); }}
                                   onStatusChange={(ord, newState) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, estado: newState } : x)); updateOrderRemote(ord.id, { estado: newState }); }}
                                   onDelete={ord => { setOrders(prev => prev.filter(x => x.id !== ord.id)); deleteOrderRemote(ord.id); }}
                                   onTrackingChange={(ord, tracking) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, tracking } : x)); updateOrderRemote(ord.id, { tracking }); }}
