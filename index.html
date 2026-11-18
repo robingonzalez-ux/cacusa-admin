@@ -126,6 +126,20 @@ const DEFAULT_CAMPAIGN = {
   deadlineStockEc: '2026-12-18',
   deadlineStockUs: '2026-12-14'
 };
+// Problemas de fechas de la campaña que el sitio no puede mostrar bien; [] si todo está bien.
+// Una fecha vacía (input date borrado) el sitio la descarta y usa el default sin avisar, y una
+// fecha límite posterior al fin de la campaña nunca se llega a mostrar.
+function campaignDateProblems(c) {
+  const camp = { ...DEFAULT_CAMPAIGN, ...(c || {}) };
+  if (camp.enabled === false) return []; // apagada: el sitio no muestra ninguna fecha
+  const names = { endsAt: 'Fin de la campaña', deadlinePersonalUs: 'Personalizada EE.UU.', deadlinePersonalEc: 'Personalizada Ecuador', deadlineStockUs: 'Pieza en stock EE.UU.', deadlineStockEc: 'Pieza en stock Ecuador' };
+  const iso = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
+  return Object.keys(names).map(k => {
+    if (!iso(camp[k])) return names[k] + ': está vacía';
+    if (k !== 'endsAt' && iso(camp.endsAt) && camp[k] > camp.endsAt) return names[k] + ': cae después del fin de la campaña (' + camp.endsAt + ')';
+    return null;
+  }).filter(Boolean);
+}
 const DEFAULT_HOME = {
   storyLabel: 'Nuestra historia',
   storyTitle: 'Artesanos del corazón',
@@ -4959,7 +4973,7 @@ function SettingsTab({ categories, setCategories, materials, setMaterials, shipp
       </div>
       <div style={{ background: 'white', borderRadius: 16, padding: '20px 22px', boxShadow: '0 1px 6px rgba(0,0,0,.06)', marginBottom: 16 }}>
         <div style={{ fontWeight: 800, fontSize: 15, color: '#1A1118', marginBottom: 4 }}>✦ Campaña de temporada (Navidad)</div>
-        <div style={{ fontSize: 12, color: '#7A6B85', marginBottom: 16 }}>Banner y fechas límite de pedido para recibir antes de Navidad. Se muestra en la tienda mientras esté activa y hasta la fecha de fin.</div>
+        <div style={{ fontSize: 12, color: '#7A6B85', marginBottom: 16 }}>Banner y fechas límite de pedido para recibir antes de Navidad. Se muestra en la tienda, el home y la guía de regalos mientras esté activa y hasta la fecha de fin. Si el banner lleva {fecha} y no se sabe el país de la visitante, se ponen las 2 fechas: "14 de diciembre (EE.UU.) o hasta el 18 de diciembre (Ecuador)".</div>
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, fontWeight: 600, color: '#1A1118', marginBottom: 16, cursor: 'pointer' }}>
           <input type="checkbox" checked={camp.enabled !== false} onChange={e => setCamp('enabled', e.target.checked)} />
           Campaña activa
@@ -4975,7 +4989,7 @@ function SettingsTab({ categories, setCategories, materials, setMaterials, shipp
           </div>
           <div style={{ gridColumn: 'span 2' }}>
             <label style={lbl}>Banner (ES) — opcional</label>
-            <input value={camp.banner || ''} onChange={e => setCamp('banner', e.target.value)} placeholder='Vacío = texto automático: "Pide antes del {fecha} para recibir antes de Navidad"' style={inp} />
+            <input value={camp.banner || ''} onChange={e => setCamp('banner', e.target.value)} placeholder='Vacío = texto automático: "Regalos de Navidad · pide hasta el {fecha} para recibirlos a tiempo"' style={inp} />
           </div>
           <div style={{ gridColumn: 'span 2' }}>
             <label style={lbl}>Banner (EN) — opcional</label>
@@ -5671,6 +5685,11 @@ function App() {
   };
 
   const publish = async () => {
+    const campProblems = campaignDateProblems(campaign);
+    if (campProblems.length) {
+      alert('Campaña de temporada (Ajustes): corrige estas fechas antes de publicar — el sitio no las mostraría como están en el panel.\n\n' + campProblems.join('\n'));
+      return;
+    }
     setSyncing(true); setSyncMsg('☁️ Guardando de forma segura…');
     try {
       // ── Traducción automática al inglés ──
