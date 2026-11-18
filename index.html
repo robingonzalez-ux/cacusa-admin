@@ -956,7 +956,51 @@ function LoginScreen({ onLogin }) {
 }
 
 // ── Product Card ───────────────────────────────────────────────────────────
-function ProductCard({ p, onEdit, onDelete, onToggle, onMoveUp, onMoveDown, canUp, canDown }) {
+// ── Stock (18 nov) — vive en el Worker (KV), no en data/products.json: se guarda al
+// instante con /stock/set, sin pasar por "Publicar". Sin dato = 1 unidad (decisión del usuario).
+const STOCK_DEFAULT = 1;
+function stockOf(stock, id) {
+  const v = stock && stock[String(id)];
+  return Number.isInteger(v) ? v : STOCK_DEFAULT;
+}
+function StockBadge({ qty, style }) {
+  if (qty > 2) return null;
+  const out = qty <= 0;
+  return <span style={{ background: out ? '#DC2626' : '#F59E0B', color: 'white', fontSize: 9, fontWeight: 800, padding: '3px 8px', borderRadius: 99, ...style }}>{out ? 'Agotado (stock 0)' : `Quedan ${qty}`}</span>;
+}
+function StockEditor({ productId, qty, onSave }) {
+  const [draft, setDraft] = React.useState(String(qty));
+  const [state, setState] = React.useState(''); // '' | 'saving' | 'ok' | mensaje de error
+  React.useEffect(() => { setDraft(String(qty)); }, [qty]);
+  const commit = async () => {
+    const t = draft.trim();
+    if (t === String(qty)) return;
+    const n = Number(t);
+    if (t === '' || !Number.isInteger(n) || n < 0 || n > 9999) { setState('Entero de 0 a 9999'); setDraft(String(qty)); return; }
+    setState('saving');
+    try { await onSave(productId, n); setState('ok'); setTimeout(() => setState(s => s === 'ok' ? '' : s), 2000); }
+    catch (e) { setState(e.message || 'No se guardó'); setDraft(String(qty)); }
+  };
+  const inputId = `stock-${productId}`;
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <label htmlFor={inputId} style={{ fontSize: 11, fontWeight: 700, color: '#5B4A63' }}>Stock</label>
+        <input id={inputId} type="number" inputMode="numeric" min={0} max={9999} step={1} value={draft}
+          onChange={e => setDraft(e.target.value)} onBlur={commit}
+          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur(); } }}
+          aria-describedby={`${inputId}-hint`}
+          style={{ width: 64, padding: '4px 6px', border: '1.5px solid #E5DDEA', borderRadius: 6, fontSize: 12, outline: 'none' }} />
+        <span role="status" aria-live="polite" style={{ fontSize: 10, color: state === 'ok' ? '#15803D' : state === 'saving' ? '#7A6880' : '#DC2626' }}>
+          {state === 'saving' ? 'Guardando…' : state === 'ok' ? '✓ Guardado' : state}
+        </span>
+      </div>
+      <div id={`${inputId}-hint`} style={{ fontSize: 9, color: '#7A6880', marginTop: 2 }}>Por defecto 1 unidad; súbelo si tienes más.</div>
+    </div>
+  );
+}
+
+function ProductCard({ p, onEdit, onDelete, onToggle, onMoveUp, onMoveDown, canUp, canDown, stockQty, onStockSave }) {
   const active = p.available !== false;
   return (
     <div style={{ background: 'white', borderRadius: 18, overflow: 'hidden', boxShadow: '0 2px 14px rgba(0,0,0,.07)', opacity: active ? 1 : .52, transition: 'all .25s', display: 'flex', flexDirection: 'column', animation: 'fadeIn .3s ease' }}>
@@ -966,6 +1010,7 @@ function ProductCard({ p, onEdit, onDelete, onToggle, onMoveUp, onMoveDown, canU
           : <Illustration type={p.img} color={p.color} />}
         {p.tag && <span style={{ position: 'absolute', top: 9, left: 9, background: '#E85D8A', color: 'white', fontSize: 9, fontWeight: 700, padding: '3px 9px', borderRadius: 99, letterSpacing: '.1em', textTransform: 'uppercase' }}>{p.tag}</span>}
         <span style={{ position: 'absolute', top: 9, right: 9, background: active ? '#D1FAE5' : '#FEE2E2', color: active ? '#065F46' : '#DC2626', fontSize: 9, fontWeight: 700, padding: '3px 9px', borderRadius: 99 }}>{active ? 'ACTIVO' : 'INACTIVO'}</span>
+        {stockQty != null && <StockBadge qty={stockQty} style={{ position: 'absolute', bottom: 8, left: 9 }} />}
         <div style={{ position: 'absolute', bottom: 6, right: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
           <button onClick={e => { e.stopPropagation(); onMoveUp(p); }} disabled={!canUp}
             style={{ width: 20, height: 18, background: 'rgba(0,0,0,.4)', color: 'white', borderRadius: 4, fontSize: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: canUp ? 1 : .3, border: 'none', cursor: canUp ? 'pointer' : 'default' }}>▲</button>
@@ -981,6 +1026,7 @@ function ProductCard({ p, onEdit, onDelete, onToggle, onMoveUp, onMoveDown, canU
           <span style={{ fontWeight: 800, color: '#C9A84C', fontSize: 15 }}>${p.price}</span>
           {p.oldPrice && <span style={{ fontSize: 12, color: '#707070', textDecoration: 'line-through' }}>${p.oldPrice}</span>}
         </div>
+        {onStockSave && stockQty != null && <StockEditor productId={p.id} qty={stockQty} onSave={onStockSave} />}
         <div style={{ display: 'flex', gap: 5, marginTop: 4 }}>
           <button onClick={() => onToggle(p)} style={{ flex: 1, padding: '5px 0', background: active ? '#FEE2E2' : '#D1FAE5', color: active ? '#DC2626' : '#065F46', borderRadius: 8, fontSize: 11, fontWeight: 600, border: 'none', cursor: 'pointer' }}>
             {active ? 'Pausar' : 'Activar'}
@@ -2114,7 +2160,7 @@ function pieceErrMsg(e) {
   return (e && e.message) || 'Error de red. Intenta de nuevo.';
 }
 
-function AddPieceModal({ order, token, photo, products, categories, onRetake, onClose, onAdded }) {
+function AddPieceModal({ order, token, photo, products, categories, stock, onRetake, onClose, onAdded }) {
   const [cat, setCat]         = React.useState('Todas');
   const [busy, setBusy]       = React.useState(false);
   const [adding, setAdding]   = React.useState(null); // id que se está agregando
@@ -2134,8 +2180,16 @@ function AddPieceModal({ order, token, photo, products, categories, onRetake, on
     } catch (e) { setErrMsg(pieceErrMsg(e)); }
     setBusy(false);
   };
+  const qtyOf = pid => (stock ? stockOf(stock, pid) : null);
+  const stockNote = pid => {
+    const n = qtyOf(pid);
+    if (n == null) return null;
+    return <span style={{ display: 'block', fontSize: 11, fontWeight: 700, color: n <= 0 ? '#DC2626' : n <= 2 ? '#B45309' : '#15803D' }}>{n <= 0 ? '⚠️ Stock 0 (agotado)' : 'Stock: ' + n}</span>;
+  };
   const pick = async (pid, name) => {
     if (adding) return;
+    // Sin stock en el sistema pero la pieza está en la mano: se deja cargar, con confirmación.
+    if (qtyOf(pid) === 0 && !window.confirm('"' + (name || 'Esta pieza') + '" figura con stock 0. ¿La tienes en la mano y quieres agregarla igual? (quedará marcada como vendida sin stock)')) return;
     setAdding(String(pid)); setErrMsg('');
     try {
       const res = await apiCall('order/update', { token, id: order.id, patch: { addProductIds: [String(pid)] } });
@@ -2195,6 +2249,7 @@ function AddPieceModal({ order, token, photo, products, categories, onRetake, on
               <span style={{ flex: 1, minWidth: 0 }}>
                 <span style={{ display: 'block', fontWeight: 700, fontSize: 13, color: '#1A1118' }}>{m.name}</span>
                 <span style={{ display: 'block', fontSize: 11, color: '#7A6880' }}>{m.category}{m.reason ? ' · ' + m.reason : ''}</span>
+                {stockNote(m.id)}
               </span>
               <span style={{ fontWeight: 800, fontSize: 13, color: '#C0336E', flexShrink: 0 }}>{adding === String(m.id) ? '…' : Math.round((Number(m.confidence) || 0) * 100) + '%'}</span>
             </button>
@@ -2219,7 +2274,8 @@ function AddPieceModal({ order, token, photo, products, categories, onRetake, on
                 <button type="button" key={p.id} onClick={() => pick(p.id, p.name)} disabled={!!adding} style={{ ...optBtn, padding: 6, opacity: adding && adding !== String(p.id) ? 0.5 : 1 }}>
                   {productImageUrl(p) ? <img src={productImageUrl(p)} alt="" style={{ ...thumb, width: 40, height: 40 }} /> : <div style={{ ...thumb, width: 40, height: 40 }} />}
                   <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: '#1A1118' }}>
-                    {p.name}<span style={{ fontSize: 11, color: '#7A6880' }}> · {p.category}{p.available === false ? ' · agotado' : ''}</span>
+                    {p.name}<span style={{ fontSize: 11, color: '#7A6880' }}> · {p.category}{p.available === false ? ' · pausado' : ''}</span>
+                    {stockNote(p.id)}
                   </span>
                   {adding === String(p.id) && <span style={{ fontWeight: 800, color: '#C0336E' }}>…</span>}
                 </button>
@@ -2232,7 +2288,7 @@ function AddPieceModal({ order, token, photo, products, categories, onRetake, on
   );
 }
 
-function OrderCard({ order, token, uspsDefault, products, categories, onStatusChange, onDelete, onTrackingChange, onCarrierChange, onClienteUpdate, onLabelGenerated, onProductsChange }) {
+function OrderCard({ order, token, uspsDefault, products, categories, stock, onStockRefresh, onStatusChange, onDelete, onTrackingChange, onCarrierChange, onClienteUpdate, onLabelGenerated, onProductsChange }) {
   const [showLabelModal, setShowLabelModal] = React.useState(false);
   // ── Agregar pieza con foto ──
   const canLoadPieces = orderAllowsPieceLoad(order);
@@ -2259,6 +2315,7 @@ function OrderCard({ order, token, uspsDefault, products, categories, onStatusCh
       const res = await apiCall('order/update', { token, id: order.id, patch: { removeProductIndex: i } });
       if (res.order && Array.isArray(res.order.productos)) onProductsChange && onProductsChange(order, res.order.productos);
       setPieceMsg('Pieza quitada del pedido.');
+      onStockRefresh && onStockRefresh();
     } catch (er) { setPieceErr(pieceErrMsg(er)); }
     setRemoving(null);
   };
@@ -2565,13 +2622,14 @@ function OrderCard({ order, token, uspsDefault, products, categories, onStatusCh
         )}
       </div>
       {pieceOpen && (
-        <AddPieceModal order={order} token={token} photo={piecePhoto} products={products} categories={categories}
+        <AddPieceModal order={order} token={token} photo={piecePhoto} products={products} categories={categories} stock={stock}
           onRetake={() => pieceInputRef.current && pieceInputRef.current.click()}
           onClose={() => { setPieceOpen(false); setPiecePhoto(null); }}
           onAdded={(productos, name) => {
             if (Array.isArray(productos)) onProductsChange && onProductsChange(order, productos);
             setPieceOpen(false); setPiecePhoto(null);
             setPieceMsg('✓ Agregada: ' + (name || 'pieza'));
+            onStockRefresh && onStockRefresh();
           }} />
       )}
       {order.lote && <div style={{ display: 'inline-block', fontSize: 11, fontWeight: 700, color: '#C0336E', background: '#FCE8F3', borderRadius: 99, padding: '2px 10px', width: 'fit-content' }}>♡ Lote Lovers {order.lote} · sale del 15 al 21</div>}
@@ -5699,6 +5757,7 @@ function App() {
   const [pages, setPages]             = useState(DEFAULT_PAGES);
   const [orders, setOrders]           = useState([]);
   const [ordersSha, setOrdersSha]     = useState(null);
+  const [stock, setStock]             = useState(null); // {id: n} — null = todavía sin cargar
   const [loading, setLoading]         = useState(false);
   const [syncing, setSyncing]         = useState(false);
   const [syncMsg, setSyncMsg]         = useState('');
@@ -5713,6 +5772,7 @@ function App() {
   const [showPwd, setShowPwd]         = useState(false);
   const [showMenu, setShowMenu]       = useState(false);
   const [activeTab, setActiveTab]     = useState('products');
+  React.useEffect(() => { if (session && (activeTab === 'products' || activeTab === 'orders')) loadStock(); }, [activeTab]);
   const [loversCount, setLoversCount] = useState(0);
   const [showOrderModal, setShowOrderModal] = useState(false);
   const [ordersView, setOrdersView]         = useState('active');
@@ -5776,6 +5836,7 @@ function App() {
     if (session) {
       try { sessionStorage.setItem('cacusa_session', JSON.stringify(session)); } catch (_) {}
       loadData();
+      loadStock();
       // Badge de suscriptoras de Lovers — requiere el token de sesión real, así que se
       // carga recién acá (post-login), no en el useEffect de montaje.
       (async () => {
@@ -6020,6 +6081,17 @@ function App() {
   // auditoría de concurrencia, antes esto podía perder pedidos nuevos en silencio).
   // 22 oct (auditoría): si un cambio de pedido no se guarda, se avisa (antes solo console.warn y la
   // pantalla mostraba el cambio como si estuviera guardado).
+  // Stock (18 nov): se lee del Worker (/stock/list) al entrar y al abrir Productos/Pedidos.
+  const loadStock = async () => {
+    try { const r = await apiCall('stock/list', { token: session.token }); if (r && r.stock) setStock(r.stock); }
+    catch (e) { if (e && e.status === 401) sessionExpired(); else console.warn('stock/list:', e && e.message); }
+  };
+  const saveStock = async (id, qty) => {
+    try {
+      await apiCall('stock/set', { token: session.token, id: String(id), qty });
+      setStock(prev => ({ ...(prev || {}), [String(id)]: qty }));
+    } catch (e) { if (e && e.status === 401) sessionExpired(); throw e; }
+  };
   const updateOrderRemote = (id, patch) => {
     apiOrderUpdate(session.token, id, patch).catch(e => {
       console.warn('order update:', e);
@@ -6258,6 +6330,8 @@ function App() {
                       onMoveDown={p => moveProd(p, 'down')}
                       canUp={globalIdx > 0}
                       canDown={globalIdx < products.length - 1}
+                      stockQty={stock ? stockOf(stock, p.id) : null}
+                      onStockSave={stock ? saveStock : null}
                     />
                   );
                 })}
@@ -6374,9 +6448,9 @@ function App() {
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 14 }}>
                             {grupo.map(o => (
                               <OrderCard key={o.id} order={o} token={session.token} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
-                                products={products} categories={categories}
+                                products={products} categories={categories} stock={stock} onStockRefresh={loadStock}
                                 onProductsChange={(ord, productos) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, productos } : x)); }}
-                                onStatusChange={(ord, newState) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, estado: newState } : x)); updateOrderRemote(ord.id, { estado: newState }); }}
+                                onStatusChange={(ord, newState) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, estado: newState } : x)); updateOrderRemote(ord.id, { estado: newState }); if (newState === 'Cancelado') setTimeout(loadStock, 1500); }}
                                 onDelete={ord => { setOrders(prev => prev.filter(x => x.id !== ord.id)); deleteOrderRemote(ord.id); }}
                                 onTrackingChange={(ord, tracking) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, tracking } : x)); updateOrderRemote(ord.id, { tracking }); }}
                                 onCarrierChange={(ord, carrier) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, carrier } : x)); updateOrderRemote(ord.id, { carrier }); }}
@@ -6446,9 +6520,9 @@ function App() {
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 14 }}>
                               {grupo.map(o => (
                                 <OrderCard key={o.id} order={o} token={session.token} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
-                                  products={products} categories={categories}
+                                  products={products} categories={categories} stock={stock} onStockRefresh={loadStock}
                                   onProductsChange={(ord, productos) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, productos } : x)); }}
-                                  onStatusChange={(ord, newState) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, estado: newState } : x)); updateOrderRemote(ord.id, { estado: newState }); }}
+                                  onStatusChange={(ord, newState) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, estado: newState } : x)); updateOrderRemote(ord.id, { estado: newState }); if (newState === 'Cancelado') setTimeout(loadStock, 1500); }}
                                   onDelete={ord => { setOrders(prev => prev.filter(x => x.id !== ord.id)); deleteOrderRemote(ord.id); }}
                                   onTrackingChange={(ord, tracking) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, tracking } : x)); updateOrderRemote(ord.id, { tracking }); }}
                                   onCarrierChange={(ord, carrier) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, carrier } : x)); updateOrderRemote(ord.id, { carrier }); }}
