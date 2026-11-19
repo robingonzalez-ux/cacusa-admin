@@ -2171,6 +2171,8 @@ function pieceErrMsg(e) {
   return (e && e.message) || 'Error de red. Intenta de nuevo.';
 }
 
+// @@recog-begin — tools/build-catalog-refs.mjs extrae este bloque tal cual (JS puro, sin JSX)
+// para calcular las referencias precalculadas con EXACTAMENTE el mismo código. No meter JSX acá.
 // ── Reconocimiento por foto EN EL NAVEGADOR (19 nov) — gratis, sin API de pago ──────────
 // MobileNet v2 (TF.js, modelo en /models/mobilenet_v2/, ~14 MB) convierte cada foto en un
 // vector de 1280 números ("huella visual", capa previa a la clasificación). Se compara la
@@ -2309,38 +2311,60 @@ function embDbPut(db, key, val) {
   });
 }
 const _embMem = new Map(); // misma sesión, sin volver a IndexedDB
-// Calcula (o lee de la caché) la huella de cada producto disponible con foto.
-// onProgress(hechos, total). Devuelve { items: [{p, emb, color}], failed, computed }.
+// Calcula (o lee de la caché) la huella de cada producto disponible con foto, y junta sus
+// referencias de entrenamiento: las precalculadas (solo si la foto actual es la misma con la
+// que se generaron; si cambió o el producto es nuevo, se ignoran) o, si no hay, AUG_LIVE_N
+// variantes calculadas acá (guardadas en IndexedDB junto con la huella).
+// onProgress(hechos, total). Devuelve { items: [{p, emb, color, aug}], failed, computed, trained }.
 async function prepareCatalogEmbeddings(products, onProgress) {
   const list = (products || []).filter(p => p && p.available !== false && productImageUrl(p));
   const eng = await loadRecognitionModel();
   const db = await embDb();
-  const items = []; let failed = 0, computed = 0, done = 0;
+  const st = await loadStaticRefs(); // null = sin referencias precalculadas (igual que antes)
+  const items = []; let failed = 0, computed = 0, done = 0, trained = 0;
   for (const p of list) {
-    const url = productImageUrl(p), key = EMB_VERSION + '|' + url;
+    const id = String(p.id), urls = productImageUrls(p), url = urls[0], key = EMB_VERSION + '|' + url;
+    const sMain = st && st.get(id + '|' + url);
     let rec = _embMem.get(key) || await embDbGet(db, key);
-    if (!rec || !rec.emb || rec.emb.length !== EMB_DIM) {
+    const okRec = !!(rec && rec.emb && rec.emb.length === EMB_DIM);
+    if (!okRec && sMain && sMain.color) rec = { emb: sMain.base, color: sMain.color, fromStatic: true }; // sin bajar la foto
+    const needLive = !!st && !sMain && !(okRec && rec.augV === AUG_VERSION && Array.isArray(rec.aug));
+    if ((!okRec && !(rec && rec.fromStatic)) || needLive) {
       try {
         const img = await loadCatalogImg(url);
-        rec = { emb: embedCanvas(eng, squareCrop(img, 1, 224)), color: colorDescriptor(img), at: Date.now() };
+        rec = okRec ? { ...rec } : { emb: embedCanvas(eng, squareCrop(img, 1, 224)), color: colorDescriptor(img), at: Date.now() };
+        if (needLive) { rec.aug = augmentEmbeddings(eng, img, url, AUG_LIVE_N); rec.augV = AUG_VERSION; }
         computed++;
         await embDbPut(db, key, rec);
-      } catch (e) { rec = null; failed++; if (failed <= 3) console.warn('reconocimiento: foto del catálogo no utilizable', url, e && e.message); }
+      } catch (e) { if (!okRec) { rec = null; failed++; if (failed <= 3) console.warn('reconocimiento: foto del catálogo no utilizable', url, e && e.message); } }
     }
-    if (rec) { _embMem.set(key, rec); items.push({ p, emb: rec.emb, color: rec.color }); }
+    if (rec) {
+      if (!rec.fromStatic) _embMem.set(key, rec);
+      const aug = [];
+      if (st) {
+        for (const u of urls) { const s = st.get(id + '|' + u); if (s) { if (u !== url) aug.push(s.base); aug.push(...s.aug); } }
+        if (!sMain && rec.augV === AUG_VERSION && Array.isArray(rec.aug)) aug.push(...rec.aug);
+      }
+      if (aug.length) trained++;
+      items.push({ p, emb: rec.emb, color: rec.color, aug });
+    }
     done++;
     if (onProgress) onProgress(done, list.length);
     if (computed && computed % 4 === 0) await new Promise(r => setTimeout(r, 0)); // deja respirar la pantalla
   }
-  return { items, failed, computed, total: list.length };
+  return { items, failed, computed, trained, total: list.length };
 }
-// Huella de la foto del taller: promedio de 3 recortes centrados (100 %, 80 %, 60 %).
+// Huella "tipo foto del taller": promedio de 3 recortes centrados (100 %, 80 %, 60 %). La usan
+// la foto a identificar y las variantes de entrenamiento (así se comparan en igualdad).
+function embedMultiCrop(eng, img) {
+  const acc = new Float32Array(EMB_DIM);
+  for (const f of [1, 0.8, 0.6]) { const v = embedCanvas(eng, squareCrop(img, f, 224)); for (let i = 0; i < EMB_DIM; i++) acc[i] += v[i]; }
+  return l2norm(acc);
+}
 async function embedQueryPhoto(dataUrl) {
   const eng = await loadRecognitionModel();
   const img = await loadImg(dataUrl, false);
-  const acc = new Float32Array(EMB_DIM);
-  for (const f of [1, 0.8, 0.6]) { const v = embedCanvas(eng, squareCrop(img, f, 224)); for (let i = 0; i < EMB_DIM; i++) acc[i] += v[i]; }
-  return { emb: l2norm(acc), color: colorDescriptor(img) };
+  return { emb: embedMultiCrop(eng, img), color: colorDescriptor(img) };
 }
 // Referencias aprendidas: int8 en base64, escalado por el máximo absoluto (el coseno no
 // depende de la escala) → al leerlas se vuelven a normalizar.
@@ -2359,8 +2383,144 @@ function dequantizeEmb(b64) {
     return l2norm(Float32Array.from(new Int8Array(u.buffer)));
   } catch (_) { return null; }
 }
+// ── "Entrenamiento" con el catálogo (19 nov) ──
+// MobileNet no se re-entrena (no hace falta y en el navegador sería lento): se le enseñan
+// VARIANTES de cada foto del catálogo que imitan una foto del taller (recorte, giro, mesa de
+// fondo, luz cálida/fría, brillo, contraste, desenfoque leve, espejo). Cada variante es una
+// "referencia" más del producto. tools/build-catalog-refs.mjs las precalcula para todo el
+// catálogo en models/catalog-refs-v1.bin (+ .json); los productos nuevos o con foto cambiada
+// calculan AUG_LIVE_N variantes acá mismo, con la MISMA función y la misma semilla.
+const AUG_VERSION = 'aug-v1';
+const AUG_LIVE_N = 4;
+const REFS_INDEX_URL = 'models/catalog-refs-v1.json';
+function mulberry32(a) {
+  return function () {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function strHash(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+// Semilla de la variante k de una foto: depende solo de la URL → mismas variantes en la
+// herramienta y en el panel.
+function augSeed(url, k) { return (strHash(String(url)) + Math.imul(k + 1, 2654435761)) >>> 0; }
+const AUG_TABLES = ['#ECE6DC', '#F4F1EC', '#D9DCDF', '#C9B39A', '#E8DFE6', '#BFC3C7', '#FAFAFA', '#A68A6D', '#3A3A3C', '#DCD3C4'];
+function augmentPhoto(img, seed, size = 320) {
+  const R = mulberry32(seed), rnd = (a, b) => a + (b - a) * R();
+  const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
+  const cv = document.createElement('canvas'); cv.width = size; cv.height = size;
+  const ctx = cv.getContext('2d');
+  // Mesa: color liso + textura leve (puntitos claros/oscuros).
+  ctx.fillStyle = AUG_TABLES[Math.floor(R() * AUG_TABLES.length)]; ctx.fillRect(0, 0, size, size);
+  for (let i = 0; i < 260; i++) {
+    ctx.fillStyle = R() < 0.5 ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.06)';
+    ctx.fillRect(R() * size, R() * size, 1 + R() * 3, 1 + R() * 3);
+  }
+  // Recorte del 60–95 % del lado corto, con el centro un poco corrido.
+  const side = Math.min(W, H) * rnd(0.6, 0.95);
+  const sx = Math.max(0, Math.min(W - side, (W - side) / 2 + rnd(-0.5, 0.5) * (W - side + side * 0.15)));
+  const sy = Math.max(0, Math.min(H - side, (H - side) / 2 + rnd(-0.5, 0.5) * (H - side + side * 0.15)));
+  const T = 256, tile = document.createElement('canvas'); tile.width = T; tile.height = T;
+  const tctx = tile.getContext('2d');
+  tctx.drawImage(img, sx, sy, side, side, 0, 0, T, T);
+  if (R() < 0.6) { // bordes suaves: la foto "se funde" con la mesa
+    const g = tctx.createRadialGradient(T / 2, T / 2, T * rnd(0.3, 0.4), T / 2, T / 2, T * 0.52);
+    g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+    tctx.globalCompositeOperation = 'destination-in'; tctx.fillStyle = g; tctx.fillRect(0, 0, T, T);
+  }
+  // Sobre la mesa: escala 62–100 %, giro ±15°, espejo, leve perspectiva (inclinación/aspecto).
+  const dst = size * rnd(0.62, 1.0);
+  ctx.save();
+  ctx.translate(size / 2 + rnd(-0.08, 0.08) * size, size / 2 + rnd(-0.08, 0.08) * size);
+  ctx.rotate(rnd(-15, 15) * Math.PI / 180);
+  ctx.transform(1, rnd(-0.06, 0.06), rnd(-0.06, 0.06), 1, 0, 0);
+  ctx.scale((R() < 0.5 ? -1 : 1) * rnd(0.92, 1.08), rnd(0.92, 1.08));
+  ctx.drawImage(tile, -dst / 2, -dst / 2, dst, dst);
+  ctx.restore();
+  // Luz: brillo, contraste, saturación y temperatura (cálida/fría), píxel a píxel (igual en
+  // todos los navegadores; ctx.filter no existe en Safari).
+  const br = rnd(0.78, 1.22), co = rnd(0.8, 1.2), sa = rnd(0.7, 1.3), te = rnd(-1, 1);
+  const rM = 1 + te * 0.1, gM = 1 + te * 0.02, bM = 1 - te * 0.1;
+  const im = ctx.getImageData(0, 0, size, size), d = im.data;
+  for (let i = 0; i < d.length; i += 4) {
+    let r = d[i] * br, g = d[i + 1] * br, b = d[i + 2] * br;
+    r = (r - 128) * co + 128; g = (g - 128) * co + 128; b = (b - 128) * co + 128;
+    const y = 0.299 * r + 0.587 * g + 0.114 * b;
+    d[i] = (y + (r - y) * sa) * rM; d[i + 1] = (y + (g - y) * sa) * gM; d[i + 2] = (y + (b - y) * sa) * bM;
+  }
+  ctx.putImageData(im, 0, 0);
+  if (R() < 0.35) { // desenfoque leve: achicar y volver a agrandar
+    const k = Math.round(size * rnd(0.45, 0.75)), t = document.createElement('canvas'); t.width = k; t.height = k;
+    t.getContext('2d').drawImage(cv, 0, 0, k, k);
+    ctx.drawImage(t, 0, 0, size, size);
+  }
+  return cv;
+}
+function augmentEmbeddings(eng, img, url, n) {
+  const out = [];
+  for (let k = 0; k < n; k++) out.push(embedMultiCrop(eng, augmentPhoto(img, augSeed(url, k))));
+  return out;
+}
+// Referencias precalculadas (models/catalog-refs-v1.json + .bin, ver tools/build-catalog-refs.mjs).
+// El índice (chico) se pide una vez por sesión con revalidación; el .bin (~2 MB) se guarda en
+// IndexedDB y solo se vuelve a bajar si cambió su hash. Sin conexión se usa la copia guardada.
+// Devuelve Map "id|url" → { base, color, aug: [Float32Array] } o null si no hay.
+let _staticRefsPromise = null;
+function loadStaticRefs() {
+  if (_staticRefsPromise) return _staticRefsPromise;
+  _staticRefsPromise = (async () => {
+    const db = await embDb();
+    const cached = await embDbGet(db, 'static-refs'); // { idx, buf }
+    let idx = null, buf = null;
+    try {
+      const res = await fetch(REFS_INDEX_URL, { cache: 'no-cache' });
+      if (res.ok) idx = await res.json();
+    } catch (e) { console.warn('referencias precalculadas: sin índice', e && e.message); }
+    if (idx && cached && cached.idx && cached.idx.binSha256 === idx.binSha256 && cached.buf instanceof ArrayBuffer) buf = cached.buf;
+    else if (idx) {
+      try {
+        const r = await fetch(new URL(idx.bin, new URL(REFS_INDEX_URL, location.href)).href + '?h=' + String(idx.binSha256).slice(0, 12));
+        if (r.ok) buf = await r.arrayBuffer();
+      } catch (e) { console.warn('referencias precalculadas: sin .bin', e && e.message); }
+      if (buf && buf.byteLength === idx.binBytes) await embDbPut(db, 'static-refs', { idx, buf });
+      else buf = null;
+    }
+    if (!buf && cached && cached.idx && cached.buf instanceof ArrayBuffer) { idx = cached.idx; buf = cached.buf; } // sin conexión
+    if (!idx || !buf || idx.model !== EMB_VERSION || idx.dim !== EMB_DIM || buf.byteLength !== idx.binBytes) return null;
+    const i8 = new Int8Array(buf), nVec = i8.length / EMB_DIM;
+    const vec = k => l2norm(Float32Array.from(i8.subarray(k * EMB_DIM, (k + 1) * EMB_DIM)));
+    const map = new Map();
+    for (const [id, list] of Object.entries(idx.products || {})) {
+      for (const e of (Array.isArray(list) ? list : [])) {
+        const n = Math.max(0, e.n | 0);
+        if (!e || typeof e.url !== 'string' || e.offset < 0 || e.offset + 1 + n > nVec) continue;
+        const aug = []; for (let k = 0; k < n; k++) aug.push(vec(e.offset + 1 + k));
+        map.set(String(id) + '|' + e.url, { base: vec(e.offset), color: Array.isArray(e.color) && e.color.length === 27 ? Float32Array.from(e.color) : null, aug });
+      }
+    }
+    return map;
+  })().catch(e => { console.warn('referencias precalculadas:', e && e.message); return null; });
+  return _staticRefsPromise;
+}
+// Todas las fotos https de un producto (la principal primero).
+function productImageUrls(p) {
+  const out = [], main = productImageUrl(p);
+  if (main) out.push(main);
+  for (const u of (p && Array.isArray(p.images) ? p.images : [])) if (typeof u === 'string' && /^https:\/\//.test(u) && !out.includes(u)) out.push(u);
+  return out;
+}
 // Puntaje "amigable" 0–100 a partir del puntaje combinado (calibrado con fotos de prueba).
 function friendlyPct(score) { return Math.round(Math.max(0, Math.min(1, (score - 0.35) / 0.55)) * 100); }
+// Similitud de un producto = la mejor entre su foto del catálogo, sus referencias aprendidas
+// (fotos reales confirmadas) y sus referencias de entrenamiento menos AUG_MARGIN (son
+// variantes sintéticas: se les pide un poco más para ganar; medido con
+// tools/eval-catalog-refs.mjs, rinde mejor que el máximo puro o el promedio de las 2 mejores).
+const AUG_MARGIN = 0.03;
 function rankCatalog(query, items, refs, category, topN = 5) {
   const catLc = category && category !== 'Todas' ? String(category).toLowerCase() : '';
   const out = [];
@@ -2368,12 +2528,15 @@ function rankCatalog(query, items, refs, category, topN = 5) {
     if (catLc && String(it.p.category || '').toLowerCase() !== catLc) continue;
     let emb = dot(query.emb, it.emb);
     for (const r of (refs && refs[String(it.p.id)]) || []) emb = Math.max(emb, dot(query.emb, r));
+    for (const r of it.aug || []) emb = Math.max(emb, dot(query.emb, r) - AUG_MARGIN);
     const score = EMB_W * emb + COLOR_W * colorSim(query.color, it.color);
     out.push({ p: it.p, score, emb });
   }
   out.sort((a, b) => b.score - a.score);
   return out.slice(0, topN);
 }
+
+// @@recog-end
 
 function AddPieceModal({ order, token, photo, products, categories, stock, onRetake, onClose, onAdded }) {
   const [cat, setCat]         = React.useState('Todas');
@@ -2479,7 +2642,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
       </div>
       <div style={{ fontSize: 11, color: '#7A6880', marginBottom: 6 }}>💡 Elegir la categoría ayuda a acertar.</div>
       <div style={{ fontSize: 11, color: '#7A6880', marginBottom: 10 }} aria-live="polite">
-        {prep.phase === 'model' && 'Cargando el reconocimiento (la primera vez descarga ~14 MB)…'}
+        {prep.phase === 'model' && 'Cargando el reconocimiento (la primera vez descarga ~16 MB)…'}
         {prep.phase === 'catalog' && `Preparando el catálogo… ${prep.done}/${prep.total}`}
         {prep.phase === 'ready' && (prep.failed ? `✓ Catálogo listo · ${prep.failed} pieza${prep.failed === 1 ? '' : 's'} sin foto utilizable` : '✓ Catálogo listo')}
       </div>

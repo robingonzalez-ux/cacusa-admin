@@ -1,0 +1,8 @@
+{
+  "name": "cacusa-admin-tools",
+  "private": true,
+  "description": "Herramientas locales del panel (referencias de entrenamiento del reconocimiento por foto). No se publican ni corren en el navegador.",
+  "dependencies": {
+    "playwright": "1.63.0"
+  }
+}
