@@ -2113,8 +2113,8 @@ function orderCiudad(c) {
 
 // ── Agregar pieza con foto (18 nov) ──────────────────────────────────────────
 // Al armar un pedido (sobre todo las cajas de Lovers, que nacen sin piezas) se toma una
-// foto de la pieza, el Worker le pregunta a Claude cuál del catálogo es (/product/identify)
-// y la persona elige la correcta. Solo en cajas de Lovers y pedidos manuales del panel
+// foto de la pieza, el panel la compara con el catálogo EN EL NAVEGADOR (MobileNet v2, gratis,
+// ver "Reconocimiento por foto" más abajo) y la persona elige la correcta. Solo en cajas de Lovers y pedidos manuales del panel
 // (misma regla que orderAllowsPieceLoad() en admin-worker.js).
 const PANEL_USERS = ['tita.jaramillo', 'robin.gonzalez'];
 function orderAllowsPieceLoad(o) {
@@ -2154,10 +2154,212 @@ function photoToJpegBase64(file, maxPx = 1024, quality = 0.82) {
   });
 }
 function pieceErrMsg(e) {
-  if (e && e.status === 503) return 'Falta configurar la IA en el Worker (ANTHROPIC_API_KEY).';
-  if (e && e.status === 429) return (e.message && /límite/i.test(e.message)) ? e.message : 'Se alcanzó el límite de identificaciones por foto de hoy. Busca la pieza a mano.';
   if (e && e.status === 401) return 'La sesión expiró. Vuelve a iniciar sesión.';
   return (e && e.message) || 'Error de red. Intenta de nuevo.';
+}
+
+// ── Reconocimiento por foto EN EL NAVEGADOR (19 nov) — gratis, sin API de pago ──────────
+// MobileNet v2 (TF.js, modelo en /models/mobilenet_v2/, ~14 MB) convierte cada foto en un
+// vector de 1280 números ("huella visual", capa previa a la clasificación). Se compara la
+// foto del taller con las fotos del catálogo (y con las fotos reales ya confirmadas antes,
+// "referencias aprendidas" que guarda el Worker en /identify/refs) por similitud coseno,
+// más un poco de similitud de color. Todo se carga recién al abrir el modal de la foto.
+// Las huellas del catálogo se guardan en IndexedDB (por URL de la foto + versión del
+// modelo): la primera vez tarda, después solo calcula las fotos nuevas.
+const TFJS_URL = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js';
+const TFJS_SRI = 'sha384-vE8hbVJ4lezako5rlvE7bY0BVzWlFhZncPlckrqNwcUQpVtgbENTgZ8TBbnPjZre';
+const MNV2_URL = 'models/mobilenet_v2/model.json';
+const MNV2_IDB = 'indexeddb://cacusa-mobilenet-v2-v1';
+const MNV2_NODE = 'module_apply_default/MobilenetV2/Logits/AvgPool'; // [1,1,1,1280]
+const EMB_DIM = 1280;           // = IDENTIFY_REF_DIM en admin-worker.js
+const EMB_VERSION = 'mnv2-224-avgpool-v1';
+const EMB_W = 0.85, COLOR_W = 0.15;
+let _tfPromise = null, _modelPromise = null;
+function loadTfjs() {
+  if (window.tf && window.tf.loadGraphModel) return Promise.resolve(window.tf);
+  if (_tfPromise) return _tfPromise;
+  // tf.min.js hace `try { regeneratorRuntime = r } catch { Function("r", "regeneratorRuntime = r")(r) }`:
+  // en modo estricto la asignación falla si la variable global no existe y cae en Function(),
+  // que el CSP del panel bloquea (sin 'unsafe-eval', a propósito). Declararla antes evita el eval.
+  if (!('regeneratorRuntime' in window)) window.regeneratorRuntime = undefined;
+  _tfPromise = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = TFJS_URL; s.integrity = TFJS_SRI; s.crossOrigin = 'anonymous'; s.async = true;
+    s.onload = () => (window.tf ? resolve(window.tf) : reject(new Error('TF.js no se inicializó')));
+    s.onerror = () => { _tfPromise = null; reject(new Error('No se pudo descargar el motor de reconocimiento (revisa la conexión).')); };
+    document.head.appendChild(s);
+  });
+  return _tfPromise;
+}
+function loadRecognitionModel() {
+  if (_modelPromise) return _modelPromise;
+  _modelPromise = (async () => {
+    const tf = await loadTfjs();
+    try { await tf.ready(); } catch (_) {}
+    let model = null;
+    // 1ro desde IndexedDB (sin volver a bajar 14 MB); si no está, desde el sitio y se guarda.
+    try { model = await tf.loadGraphModel(MNV2_IDB); } catch (_) { model = null; }
+    if (!model) {
+      model = await tf.loadGraphModel(MNV2_URL);
+      try { await model.save(MNV2_IDB); } catch (e) { console.warn('no se pudo guardar el modelo en IndexedDB:', e && e.message); }
+    }
+    return { tf, model };
+  })();
+  _modelPromise.catch(() => { _modelPromise = null; });
+  return _modelPromise;
+}
+// Recorta un cuadrado centrado (frac = fracción del lado corto) y lo lleva a size×size.
+function squareCrop(img, frac, size) {
+  const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+  const side = Math.min(w, h) * frac;
+  const cv = document.createElement('canvas'); cv.width = size; cv.height = size;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, size, size);
+  ctx.drawImage(img, (w - side) / 2, (h - side) / 2, side, side, 0, 0, size, size);
+  return cv;
+}
+function l2norm(v) {
+  let s = 0; for (let i = 0; i < v.length; i++) s += v[i] * v[i];
+  const n = Math.sqrt(s) || 1; const out = new Float32Array(v.length);
+  for (let i = 0; i < v.length; i++) out[i] = v[i] / n;
+  return out;
+}
+function dot(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }
+// El modelo espera RGB en [0,1], 224×224.
+function embedCanvas(eng, canvas) {
+  const { tf, model } = eng;
+  const out = tf.tidy(() => {
+    const x = tf.browser.fromPixels(canvas).toFloat().div(255).expandDims(0);
+    return model.execute(x, MNV2_NODE).reshape([EMB_DIM]);
+  });
+  const v = out.dataSync(); out.dispose();
+  return l2norm(v);
+}
+// Huella de color: histograma HSV de la zona central (8 tonos × 3 saturaciones + 3 grises).
+function colorDescriptor(img) {
+  const cv = squareCrop(img, 0.6, 48);
+  const d = cv.getContext('2d').getImageData(0, 0, 48, 48).data;
+  const h = new Float32Array(27); let n = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i] / 255, g = d[i + 1] / 255, b = d[i + 2] / 255;
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), c = mx - mn;
+    const s = mx ? c / mx : 0;
+    if (s < 0.15 || mx < 0.12) { h[24 + Math.min(2, Math.floor(mx * 3))] += 1; n++; continue; }
+    let hue = c === 0 ? 0 : mx === r ? ((g - b) / c) % 6 : mx === g ? (b - r) / c + 2 : (r - g) / c + 4;
+    hue = (hue * 60 + 360) % 360;
+    h[Math.floor(hue / 45) * 3 + Math.min(2, Math.floor((s - 0.15) / 0.29))] += 1; n++;
+  }
+  for (let i = 0; i < 27; i++) h[i] /= (n || 1);
+  return h;
+}
+function colorSim(a, b) { if (!a || !b) return 0; let s = 0; for (let i = 0; i < a.length; i++) s += Math.min(a[i], b[i]); return s; }
+function loadImg(src, cors) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    if (cors) img.crossOrigin = 'anonymous';
+    const t = setTimeout(() => reject(new Error('timeout')), 20000);
+    img.onload = () => { clearTimeout(t); resolve(img); };
+    img.onerror = () => { clearTimeout(t); reject(new Error('img')); };
+    img.src = src;
+  });
+}
+// Una foto del catálogo con CORS (GitHub Pages manda Access-Control-Allow-Origin: *). Si el
+// navegador ya la tenía en caché sin CORS, se reintenta con un parámetro para esquivarla.
+async function loadCatalogImg(url) {
+  try { return await loadImg(url, true); }
+  catch (_) { return await loadImg(url + (url.includes('?') ? '&' : '?') + 'cors=1', true); }
+}
+// ── IndexedDB (caché de huellas del catálogo) ──
+const EMB_DB = 'cacusa-identify', EMB_STORE = 'emb';
+function embDb() {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(EMB_DB, 1);
+      req.onupgradeneeded = () => { req.result.createObjectStore(EMB_STORE); };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch (_) { resolve(null); }
+  });
+}
+function embDbGet(db, key) {
+  return new Promise((resolve) => {
+    if (!db) return resolve(null);
+    try { const r = db.transaction(EMB_STORE, 'readonly').objectStore(EMB_STORE).get(key); r.onsuccess = () => resolve(r.result || null); r.onerror = () => resolve(null); }
+    catch (_) { resolve(null); }
+  });
+}
+function embDbPut(db, key, val) {
+  return new Promise((resolve) => {
+    if (!db) return resolve();
+    try { const tx = db.transaction(EMB_STORE, 'readwrite'); tx.objectStore(EMB_STORE).put(val, key); tx.oncomplete = () => resolve(); tx.onerror = () => resolve(); }
+    catch (_) { resolve(); }
+  });
+}
+const _embMem = new Map(); // misma sesión, sin volver a IndexedDB
+// Calcula (o lee de la caché) la huella de cada producto disponible con foto.
+// onProgress(hechos, total). Devuelve { items: [{p, emb, color}], failed, computed }.
+async function prepareCatalogEmbeddings(products, onProgress) {
+  const list = (products || []).filter(p => p && p.available !== false && productImageUrl(p));
+  const eng = await loadRecognitionModel();
+  const db = await embDb();
+  const items = []; let failed = 0, computed = 0, done = 0;
+  for (const p of list) {
+    const url = productImageUrl(p), key = EMB_VERSION + '|' + url;
+    let rec = _embMem.get(key) || await embDbGet(db, key);
+    if (!rec || !rec.emb || rec.emb.length !== EMB_DIM) {
+      try {
+        const img = await loadCatalogImg(url);
+        rec = { emb: embedCanvas(eng, squareCrop(img, 1, 224)), color: colorDescriptor(img), at: Date.now() };
+        computed++;
+        await embDbPut(db, key, rec);
+      } catch (e) { rec = null; failed++; if (failed <= 3) console.warn('reconocimiento: foto del catálogo no utilizable', url, e && e.message); }
+    }
+    if (rec) { _embMem.set(key, rec); items.push({ p, emb: rec.emb, color: rec.color }); }
+    done++;
+    if (onProgress) onProgress(done, list.length);
+    if (computed && computed % 4 === 0) await new Promise(r => setTimeout(r, 0)); // deja respirar la pantalla
+  }
+  return { items, failed, computed, total: list.length };
+}
+// Huella de la foto del taller: promedio de 3 recortes centrados (100 %, 80 %, 60 %).
+async function embedQueryPhoto(dataUrl) {
+  const eng = await loadRecognitionModel();
+  const img = await loadImg(dataUrl, false);
+  const acc = new Float32Array(EMB_DIM);
+  for (const f of [1, 0.8, 0.6]) { const v = embedCanvas(eng, squareCrop(img, f, 224)); for (let i = 0; i < EMB_DIM; i++) acc[i] += v[i]; }
+  return { emb: l2norm(acc), color: colorDescriptor(img) };
+}
+// Referencias aprendidas: int8 en base64, escalado por el máximo absoluto (el coseno no
+// depende de la escala) → al leerlas se vuelven a normalizar.
+function quantizeEmb(v) {
+  let mx = 0; for (let i = 0; i < v.length; i++) mx = Math.max(mx, Math.abs(v[i]));
+  const q = new Int8Array(v.length), k = mx ? 127 / mx : 0;
+  for (let i = 0; i < v.length; i++) q[i] = Math.max(-127, Math.min(127, Math.round(v[i] * k)));
+  let bin = ''; const u = new Uint8Array(q.buffer);
+  for (let i = 0; i < u.length; i++) bin += String.fromCharCode(u[i]);
+  return btoa(bin);
+}
+function dequantizeEmb(b64) {
+  try {
+    const bin = atob(b64); if (bin.length !== EMB_DIM) return null;
+    const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    return l2norm(Float32Array.from(new Int8Array(u.buffer)));
+  } catch (_) { return null; }
+}
+// Puntaje "amigable" 0–100 a partir del puntaje combinado (calibrado con fotos de prueba).
+function friendlyPct(score) { return Math.round(Math.max(0, Math.min(1, (score - 0.35) / 0.55)) * 100); }
+function rankCatalog(query, items, refs, category, topN = 5) {
+  const catLc = category && category !== 'Todas' ? String(category).toLowerCase() : '';
+  const out = [];
+  for (const it of items) {
+    if (catLc && String(it.p.category || '').toLowerCase() !== catLc) continue;
+    let emb = dot(query.emb, it.emb);
+    for (const r of (refs && refs[String(it.p.id)]) || []) emb = Math.max(emb, dot(query.emb, r));
+    const score = EMB_W * emb + COLOR_W * colorSim(query.color, it.color);
+    out.push({ p: it.p, score, emb });
+  }
+  out.sort((a, b) => b.score - a.score);
+  return out.slice(0, topN);
 }
 
 function AddPieceModal({ order, token, photo, products, categories, stock, onRetake, onClose, onAdded }) {
@@ -2168,15 +2370,43 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
   const [matches, setMatches] = React.useState(null); // null = todavía no se identificó
   const [manual, setManual]   = React.useState(false);
   const [query, setQuery]     = React.useState('');
-  React.useEffect(() => { setMatches(null); setErrMsg(''); }, [photo && photo.base64]);
+  const [prep, setPrep]       = React.useState({ phase: 'model', done: 0, total: 0, failed: 0 });
+  const prepRef  = React.useRef(null);  // promesa: catálogo con huellas listo
+  const refsRef  = React.useRef({});    // referencias aprendidas {id: [Float32Array]}
+  const queryRef = React.useRef(null);  // huella de la foto actual {emb, color, src}
+  React.useEffect(() => { setMatches(null); setErrMsg(''); }, [photo && photo.dataUrl]);
   const cats = ['Todas', ...((categories && categories.length) ? categories : DEFAULT_CATEGORIES)];
+
+  // Al abrir: carga el modelo y prepara las huellas del catálogo (caché en IndexedDB).
+  React.useEffect(() => {
+    let alive = true;
+    prepRef.current = (async () => {
+      await loadRecognitionModel();
+      const res = await prepareCatalogEmbeddings(products, (d, t) => { if (alive) setPrep(s => ({ ...s, phase: 'catalog', done: d, total: t })); });
+      if (alive) setPrep({ phase: 'ready', done: res.total, total: res.total, failed: res.failed });
+      return res;
+    })();
+    prepRef.current.catch(e => { if (alive) setPrep({ phase: 'error', error: (e && e.message) || 'No se pudo preparar el reconocimiento.' }); });
+    apiCall('identify/refs', { token }).then(r => {
+      const out = {};
+      for (const [id, list] of Object.entries((r && r.refs) || {})) {
+        const v = (Array.isArray(list) ? list : []).map(dequantizeEmb).filter(Boolean);
+        if (v.length) out[id] = v;
+      }
+      refsRef.current = out;
+    }).catch(e => console.warn('identify/refs:', e && e.message));
+    return () => { alive = false; };
+  }, []);
 
   const identify = async () => {
     if (!photo || busy) return;
     setBusy(true); setErrMsg(''); setMatches(null);
     try {
-      const res = await apiCall('product/identify', { token, image: photo.base64, mediaType: 'image/jpeg', category: cat === 'Todas' ? '' : cat });
-      setMatches(Array.isArray(res.matches) ? res.matches : []);
+      const catalog = await prepRef.current;
+      let q = queryRef.current;
+      if (!q || q.src !== photo.dataUrl) { q = { ...(await embedQueryPhoto(photo.dataUrl)), src: photo.dataUrl }; queryRef.current = q; }
+      const ranked = rankCatalog(q, catalog.items, refsRef.current, cat, 5);
+      setMatches(ranked.map(r => ({ id: String(r.p.id), name: r.p.name, category: r.p.category, imageUrl: productImageUrl(r.p), pct: friendlyPct(r.score) })));
     } catch (e) { setErrMsg(pieceErrMsg(e)); }
     setBusy(false);
   };
@@ -2193,6 +2423,11 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
     setAdding(String(pid)); setErrMsg('');
     try {
       const res = await apiCall('order/update', { token, id: order.id, patch: { addProductIds: [String(pid)] } });
+      // Aprende de esta foto (la próxima vez la reconoce mejor). Sin esperar ni bloquear.
+      const q = queryRef.current;
+      if (q && photo && q.src === photo.dataUrl) {
+        apiCall('identify/ref/add', { token, id: String(pid), vector: quantizeEmb(q.emb) }).catch(e => console.warn('identify/ref/add:', e && e.message));
+      }
       onAdded((res.order && res.order.productos) || null, name);
     } catch (e) { setErrMsg(pieceErrMsg(e)); setAdding(null); }
   };
@@ -2229,14 +2464,20 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
           </button>
         ))}
       </div>
-      <div style={{ fontSize: 11, color: '#7A6880', marginBottom: 10 }}>💡 Elegir la categoría hace la búsqueda más rápida y barata.</div>
+      <div style={{ fontSize: 11, color: '#7A6880', marginBottom: 6 }}>💡 Elegir la categoría ayuda a acertar.</div>
+      <div style={{ fontSize: 11, color: '#7A6880', marginBottom: 10 }} aria-live="polite">
+        {prep.phase === 'model' && 'Cargando el reconocimiento (la primera vez descarga ~14 MB)…'}
+        {prep.phase === 'catalog' && `Preparando el catálogo… ${prep.done}/${prep.total}`}
+        {prep.phase === 'ready' && (prep.failed ? `✓ Catálogo listo · ${prep.failed} pieza${prep.failed === 1 ? '' : 's'} sin foto utilizable` : '✓ Catálogo listo')}
+      </div>
+      {prep.phase === 'error' && <div role="alert" style={{ fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderRadius: 8, padding: '8px 10px', marginBottom: 8 }}>{prep.error} Puedes buscar la pieza a mano.</div>}
 
       <button type="button" onClick={identify} disabled={!photo || busy}
         style={{ width: '100%', padding: '10px', background: busy ? '#C9B8D3' : 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 13, cursor: busy ? 'default' : 'pointer' }}>
         {busy ? 'Identificando…' : '✨ Identificar'}
       </button>
       <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#7A6880', minHeight: 4, marginTop: 6 }}>
-        {busy ? 'Comparando con el catálogo, puede tardar unos segundos…' : (matches && !matches.length ? 'No se encontró una pieza parecida. Prueba otra foto u otra categoría, o búscala a mano.' : '')}
+        {busy ? (prep.phase === 'ready' ? 'Comparando con el catálogo…' : 'Esperando a que el catálogo esté listo…') : (matches && !matches.length ? 'No se encontró una pieza parecida. Prueba otra foto u otra categoría, o búscala a mano.' : '')}
       </div>
       {errMsg && <div role="alert" aria-live="assertive" style={{ fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderRadius: 8, padding: '8px 10px', marginTop: 6 }}>{errMsg}</div>}
 
@@ -2248,10 +2489,10 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
               {m.imageUrl ? <img src={m.imageUrl} alt="" style={thumb} /> : <div style={thumb} />}
               <span style={{ flex: 1, minWidth: 0 }}>
                 <span style={{ display: 'block', fontWeight: 700, fontSize: 13, color: '#1A1118' }}>{m.name}</span>
-                <span style={{ display: 'block', fontSize: 11, color: '#7A6880' }}>{m.category}{m.reason ? ' · ' + m.reason : ''}</span>
+                <span style={{ display: 'block', fontSize: 11, color: '#7A6880' }}>{m.category}</span>
                 {stockNote(m.id)}
               </span>
-              <span style={{ fontWeight: 800, fontSize: 13, color: '#C0336E', flexShrink: 0 }}>{adding === String(m.id) ? '…' : Math.round((Number(m.confidence) || 0) * 100) + '%'}</span>
+              <span style={{ fontWeight: 800, fontSize: 13, color: '#C0336E', flexShrink: 0 }}>{adding === String(m.id) ? '…' : m.pct + '%'}</span>
             </button>
           ))}
         </div>
