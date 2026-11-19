@@ -640,15 +640,21 @@ function PushSection({ token }) {
 
 // ── Modal accesible compartido — role=dialog, trap de foco, cierre con Escape,
 // foco inicial y retorno de foco al elemento que lo abrió (ver auditoría a11y) ──
+// Modales apilados (p. ej. "Registrar fotos" abierto desde el modal de un producto): Escape y el
+// atrapado del foco los maneja solo el de arriba.
+const _modalStack = [];
 function Modal({ onClose, label, labelledBy, overlayStyle, boxStyle, closeOnOverlayClick = true, children }) {
   const boxRef = useRef(null);
   useEffect(() => {
     const box = boxRef.current;
     if (!box) return;
+    const me = {};
+    _modalStack.push(me);
     const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
     const prevFocused = document.activeElement;
     const getFocusable = () => Array.from(box.querySelectorAll(FOCUSABLE)).filter(el => el.offsetParent !== null);
     function onKeydown(e) {
+      if (_modalStack[_modalStack.length - 1] !== me) return;
       if (e.key === 'Escape') { onClose(); return; }
       if (e.key !== 'Tab') return;
       const items = getFocusable();
@@ -662,6 +668,7 @@ function Modal({ onClose, label, labelledBy, overlayStyle, boxStyle, closeOnOver
     if (items.length) items[0].focus();
     return () => {
       document.removeEventListener('keydown', onKeydown);
+      const i = _modalStack.indexOf(me); if (i > -1) _modalStack.splice(i, 1);
       if (prevFocused && prevFocused.focus) prevFocused.focus();
     };
   }, []);
@@ -1082,7 +1089,55 @@ async function copyText(text) {
   }
 }
 
-function ProductCard({ p, onEdit, onDelete, onToggle, onMoveUp, onMoveDown, canUp, canDown, stockQty, onStockSave }) {
+// ── Fotos reales aprendidas por pieza (19 nov) ──
+// Cuántas referencias guarda el Worker por producto (/identify/refs, máx. 10: el Worker descarta
+// la más vieja). Un solo pedido por sesión, compartido por la lista de productos, "Registrar
+// fotos", el modal del producto y "Agregar pieza"; cada foto que se guarda actualiza el número.
+const REFS_PER_PRODUCT = 10;
+const _refStore = { counts: null, promise: null, subs: new Set() };
+function _refNotify() { _refStore.subs.forEach(f => { try { f(); } catch (_) {} }); }
+function loadRefCounts(token, force) {
+  if (_refStore.promise && !force) return _refStore.promise;
+  _refStore.promise = apiCall('identify/refs', { token }).then(r => {
+    const out = {};
+    for (const [id, list] of Object.entries((r && r.refs) || {})) out[String(id)] = Array.isArray(list) ? list.length : 0;
+    _refStore.counts = out; _refStore.error = ''; _refNotify();
+    return { counts: out, refs: (r && r.refs) || {} };
+  }).catch(e => { _refStore.promise = null; _refStore.error = pieceErrMsg(e); if (!_refStore.counts) _refStore.counts = null; _refNotify(); throw e; });
+  return _refStore.promise;
+}
+function setRefCount(id, n) { _refStore.counts = { ...(_refStore.counts || {}), [String(id)]: n }; _refNotify(); }
+function refCountOf(id) { return (_refStore.counts && _refStore.counts[String(id)]) || 0; }
+function useRefCounts(token) {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    const f = () => bump(x => x + 1);
+    _refStore.subs.add(f);
+    return () => { _refStore.subs.delete(f); };
+  }, []);
+  useEffect(() => {
+    if (token && !_refStore.counts && !_refStore.promise) loadRefCounts(token).catch(() => {});
+  }, [token]);
+  return _refStore.counts; // null = todavía sin cargar
+}
+// Guarda una foto de la joya como referencia, sin bloquear la pantalla. Fuente: un archivo de
+// la cámara o el dataUrl de una foto ya tomada. Nunca se usan los cuadros del escáner QR (esos
+// muestran la etiqueta, no la joya). Devuelve una promesa con el nuevo total de la pieza.
+async function teachPieceFromPhoto(token, pid, src) {
+  const dataUrl = src && src.dataUrl ? src.dataUrl : (await photoToJpegBase64(src, 640, 0.8)).dataUrl;
+  const q = await embedQueryPhoto(dataUrl);
+  const r = await apiCall('identify/ref/add', { token, id: String(pid), vector: quantizeEmb(q.emb) });
+  const n = r && Number.isInteger(r.count) ? r.count : Math.min(REFS_PER_PRODUCT, refCountOf(pid) + 1);
+  setRefCount(pid, n);
+  return n;
+}
+function RefBadge({ n, style }) {
+  if (n == null) return null;
+  return <span data-refs={n} title={n + ' foto' + (n === 1 ? '' : 's') + ' real' + (n === 1 ? '' : 'es') + ' aprendida' + (n === 1 ? '' : 's') + ' por el identificador'}
+    style={{ fontSize: 10, fontWeight: 800, color: n ? '#15803D' : '#B45309', background: n ? '#DCFCE7' : '#FEF3C7', padding: '2px 7px', borderRadius: 99, whiteSpace: 'nowrap', ...style }}>◇ {n} foto{n === 1 ? '' : 's'}</span>;
+}
+
+function ProductCard({ p, onEdit, onDelete, onToggle, onMoveUp, onMoveDown, canUp, canDown, stockQty, onStockSave, refN }) {
   const active = p.available !== false;
   return (
     <div style={{ background: 'white', borderRadius: 18, overflow: 'hidden', boxShadow: '0 2px 14px rgba(0,0,0,.07)', opacity: active ? 1 : .52, transition: 'all .25s', display: 'flex', flexDirection: 'column', animation: 'fadeIn .3s ease' }}>
@@ -1103,7 +1158,7 @@ function ProductCard({ p, onEdit, onDelete, onToggle, onMoveUp, onMoveDown, canU
       <div style={{ padding: '12px 14px', flex: 1, display: 'flex', flexDirection: 'column', gap: 5 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
           <div style={{ fontSize: 10, fontWeight: 700, color: '#E85D8A', textTransform: 'uppercase', letterSpacing: '.1em' }}>{p.category}</div>
-          <SkuChip sku={p.sku} />
+          <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}><RefBadge n={refN} /><SkuChip sku={p.sku} /></span>
         </div>
         <div style={{ fontSize: 14, fontWeight: 700, color: '#1a1a1a', lineHeight: 1.3, flex: 1 }}>{p.name}</div>
         {p.personalized && <div style={{ fontSize: 10, color: '#9B5DE5', fontWeight: 600 }}>✦ Personalizable</div>}
@@ -1174,7 +1229,8 @@ function ImageEditor({ imgSrc, focalX, focalY, zoom, onChange }) {
 }
 
 // ── Product Modal ──────────────────────────────────────────────────────────
-function ProductModal({ product, onSave, onClose, token, categories, materials, fbSurcharges = {}, fbMarkets = {}, allProducts = [], skuSeq = {} }) {
+function ProductModal({ product, onSave, onClose, token, categories, materials, fbSurcharges = {}, fbMarkets = {}, allProducts = [], skuSeq = {}, onEnroll }) {
+  const refCountsPM = useRefCounts(token);
   const cats = (categories && categories.length) ? categories : DEFAULT_CATEGORIES;
   const mats = (materials && materials.length) ? materials : DEFAULT_MATERIALS;
   const isNew = !product?.id;
@@ -1450,6 +1506,16 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
               </>
             ) : (
               <span data-testid="pmSkuPreview" style={{ fontSize: 12, color: '#7A6880' }}>Se asigna al guardar: <b style={{ fontFamily: 'ui-monospace, Menlo, monospace', color: '#5B3F8A' }}>{skuPreview}</b></span>
+            )}
+            {!isNew && onEnroll && (
+              <span style={{ flexBasis: '100%', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 2 }}>
+                <button type="button" onClick={() => onEnroll(product)}
+                  style={{ fontSize: 12, fontWeight: 700, padding: '6px 12px', borderRadius: 99, border: 'none', background: 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', cursor: 'pointer' }}>
+                  📷 Registrar fotos de esta pieza
+                </button>
+                <RefBadge n={refCountsPM ? (refCountsPM[String(product.id)] || 0) : null} />
+                {(product.available === false || !productImageUrl(product)) && <span style={{ fontSize: 11, color: '#92400E' }}>Pausada o sin foto: el identificador no la compara hasta que esté activa con foto.</span>}
+              </span>
             )}
             {skuCatMoved && (
               <span role="note" style={{ flexBasis: '100%', fontSize: 11, color: '#92400E' }}>
@@ -2421,45 +2487,56 @@ function embDbPut(db, key, val) {
 }
 const _embMem = new Map(); // misma sesión, sin volver a IndexedDB
 // Calcula (o lee de la caché) la huella de cada producto disponible con foto, y junta sus
-// referencias de entrenamiento: las precalculadas (solo si la foto actual es la misma con la
-// que se generaron; si cambió o el producto es nuevo, se ignoran) o, si no hay, AUG_LIVE_N
-// variantes calculadas acá (guardadas en IndexedDB junto con la huella).
+// referencias de entrenamiento POR CADA FOTO del producto (imageUrl + images[]): para cada URL
+// se usan las precalculadas solo si existen para ESA misma URL (models/catalog-refs-v1.*; si la
+// foto cambió o es nueva no hay entrada y se ignoran), y si no, AUG_LIVE_N variantes calculadas
+// acá con la misma función y semilla, guardadas en IndexedDB por URL (clave EMB_VERSION|url: una
+// foto nueva o cambiada siempre se recalcula sola; las que no cambiaron no se vuelven a bajar).
+// Las fotos de galería además suman su huella base como referencia.
 // onProgress(hechos, total). Devuelve { items: [{p, emb, color, aug}], failed, computed, trained }.
 async function prepareCatalogEmbeddings(products, onProgress) {
   const list = (products || []).filter(p => p && p.available !== false && productImageUrl(p));
   const eng = await loadRecognitionModel();
   const db = await embDb();
-  const st = await loadStaticRefs(); // null = sin referencias precalculadas (igual que antes)
+  const st = await loadStaticRefs(); // null = sin referencias precalculadas (sin variantes)
   const items = []; let failed = 0, computed = 0, done = 0, trained = 0;
   for (const p of list) {
-    const id = String(p.id), urls = productImageUrls(p), url = urls[0], key = EMB_VERSION + '|' + url;
-    const sMain = st && st.get(id + '|' + url);
-    let rec = _embMem.get(key) || await embDbGet(db, key);
-    const okRec = !!(rec && rec.emb && rec.emb.length === EMB_DIM);
-    if (!okRec && sMain && sMain.color) rec = { emb: sMain.base, color: sMain.color, fromStatic: true }; // sin bajar la foto
-    const needLive = !!st && !sMain && !(okRec && rec.augV === AUG_VERSION && Array.isArray(rec.aug));
-    if ((!okRec && !(rec && rec.fromStatic)) || needLive) {
-      try {
-        const img = await loadCatalogImg(url);
-        rec = okRec ? { ...rec } : { emb: embedCanvas(eng, squareCrop(img, 1, 224)), color: colorDescriptor(img), at: Date.now() };
-        if (needLive) { rec.aug = augmentEmbeddings(eng, img, url, AUG_LIVE_N); rec.augV = AUG_VERSION; }
-        computed++;
-        await embDbPut(db, key, rec);
-      } catch (e) { if (!okRec) { rec = null; failed++; if (failed <= 3) console.warn('reconocimiento: foto del catálogo no utilizable', url, e && e.message); } }
-    }
-    if (rec) {
-      if (!rec.fromStatic) _embMem.set(key, rec);
-      const aug = [];
-      if (st) {
-        for (const u of urls) { const s = st.get(id + '|' + u); if (s) { if (u !== url) aug.push(s.base); aug.push(...s.aug); } }
-        if (!sMain && rec.augV === AUG_VERSION && Array.isArray(rec.aug)) aug.push(...rec.aug);
+    const id = String(p.id), urls = productImageUrls(p);
+    let main = null; const aug = [];
+    for (let k = 0; k < urls.length; k++) {
+      const url = urls[k], key = EMB_VERSION + '|' + url;
+      const sRef = st && st.get(id + '|' + url);
+      let rec = _embMem.get(key) || await embDbGet(db, key);
+      const okRec = !!(rec && rec.emb && rec.emb.length === EMB_DIM);
+      if (!okRec && sRef && sRef.color) rec = { emb: sRef.base, color: sRef.color, fromStatic: true }; // sin bajar la foto
+      const needLive = !!st && !sRef && !(okRec && rec.augV === AUG_VERSION && Array.isArray(rec.aug));
+      if ((!okRec && !(rec && rec.fromStatic)) || needLive) {
+        try {
+          const img = await loadCatalogImg(url);
+          rec = okRec ? { ...rec } : { emb: embedCanvas(eng, squareCrop(img, 1, 224)), color: colorDescriptor(img), at: Date.now() };
+          if (needLive) { rec.aug = augmentEmbeddings(eng, img, url, AUG_LIVE_N); rec.augV = AUG_VERSION; }
+          computed++;
+          await embDbPut(db, key, rec);
+        } catch (e) {
+          if (!okRec) { rec = null; console.warn('reconocimiento: foto del catálogo no utilizable', url, e && e.message); }
+        }
       }
+      if (!rec) continue;
+      if (!rec.fromStatic) _embMem.set(key, rec);
+      if (!main) main = rec; else aug.push(rec.emb);
+      if (st) {
+        if (sRef) aug.push(...sRef.aug);
+        else if (rec.augV === AUG_VERSION && Array.isArray(rec.aug)) aug.push(...rec.aug);
+      }
+      if (computed && computed % 4 === 0) await new Promise(r => setTimeout(r, 0)); // deja respirar la pantalla
+    }
+    if (!main) failed++;
+    else {
       if (aug.length) trained++;
-      items.push({ p, emb: rec.emb, color: rec.color, aug });
+      items.push({ p, emb: main.emb, color: main.color, aug });
     }
     done++;
     if (onProgress) onProgress(done, list.length);
-    if (computed && computed % 4 === 0) await new Promise(r => setTimeout(r, 0)); // deja respirar la pantalla
   }
   return { items, failed, computed, trained, total: list.length };
 }
@@ -3035,12 +3112,13 @@ function LabelPrintView({ view, onBack, onClose }) {
 // (/identify/ref/add, máx. IDENTIFY_REFS_PER_PRODUCT = 10 por pieza). Mismo cálculo de huella
 // que "Identificar" (embedQueryPhoto). Pensado para pasar muchas piezas seguidas.
 const ENROLL_MAX_REFS = 10;
-function EnrollPhotosModal({ products, token, onClose }) {
-  const [counts, setCounts]     = useState(null); // {id: n}
-  const [loadErr, setLoadErr]   = useState('');
+// onlyId: abierto desde el modal de un producto → solo esa pieza (sin lista ni "siguiente").
+function EnrollPhotosModal({ products, token, onClose, onlyId = null }) {
+  const counts = useRefCounts(token); // {id: n} compartido (null = cargando)
+  const loadErr = counts ? '' : (_refStore.error || '');
   const [onlyMissing, setOnly]  = useState(true);
   const [q, setQ]               = useState('');
-  const [curId, setCurId]       = useState(null);
+  const [curId, setCurId]       = useState(onlyId != null ? String(onlyId) : null);
   const [scan, setScan]         = useState(false);
   const [busy, setBusy]         = useState(false);
   const [status, setStatus]     = useState('');
@@ -3048,21 +3126,14 @@ function EnrollPhotosModal({ products, token, onClose }) {
   const [shots, setShots]       = useState([]); // miniaturas guardadas de la pieza actual
   const [doneCount, setDone]    = useState(0);  // piezas con fotos nuevas en esta sesión
   const fileRef = useRef(null);
-  const loadCounts = () => {
-    setLoadErr('');
-    apiCall('identify/refs', { token }).then(r => {
-      const out = {};
-      for (const [id, list] of Object.entries((r && r.refs) || {})) out[String(id)] = Array.isArray(list) ? list.length : 0;
-      setCounts(out);
-    }).catch(e => { setCounts({}); setLoadErr(pieceErrMsg(e)); });
-  };
-  useEffect(loadCounts, []);
+  const loadCounts = () => { loadRefCounts(token, true).catch(() => {}); };
   // Precarga el reconocimiento en segundo plano (la 1ra foto no espera tanto).
   useEffect(() => { loadRecognitionModel().catch(() => {}); }, []);
   const all = (products || []).filter(p => p && p.available !== false && productImageUrl(p))
     .sort((a, b) => String(a.category || '').localeCompare(String(b.category || ''), 'es') || normalizeSku(a.sku).localeCompare(normalizeSku(b.sku), 'es', { numeric: true }));
   const cnt = p => (counts && counts[String(p.id)]) || 0;
   const missingN = counts ? all.filter(p => !cnt(p)).length : null;
+  const withN = counts ? all.length - missingN : null;
   const list = all.filter(p => (!onlyMissing || !cnt(p)) && productMatchesSearch(p, q));
   const cur = curId != null ? (products || []).find(p => String(p.id) === String(curId)) : null;
   const openProduct = p => { setCurId(p ? String(p.id) : null); setShots([]); setErr(''); setStatus(''); setScan(false); };
@@ -3098,7 +3169,7 @@ function EnrollPhotosModal({ products, token, onClose }) {
         const r = await apiCall('identify/ref/add', { token, id: String(cur.id), vector: quantizeEmb(q2.emb) });
         saved++;
         const n = r && Number.isInteger(r.count) ? r.count : cnt(cur) + 1;
-        setCounts(c => ({ ...(c || {}), [String(cur.id)]: n }));
+        setRefCount(cur.id, n);
         setShots(s => [...s, ph.dataUrl]);
       }
       if (saved && !shots.length) setDone(d => d + 1);
@@ -3114,13 +3185,21 @@ function EnrollPhotosModal({ products, token, onClose }) {
   return (
     <Modal onClose={onClose} labelledBy="enrollTitle" boxStyle={{ maxWidth: 480, maxHeight: '92vh', overflowY: 'auto', padding: 20 }} overlayStyle={{ padding: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-        <div id="enrollTitle" style={{ fontWeight: 800, fontSize: 17, color: '#1A1118' }}>📸 Registrar fotos de piezas</div>
+        <div id="enrollTitle" style={{ fontWeight: 800, fontSize: 17, color: '#1A1118' }}>📸 Registrar fotos {onlyId != null ? 'de esta pieza' : 'de piezas'}</div>
         <button type="button" onClick={onClose} aria-label="Cerrar" style={{ width: 32, height: 32, borderRadius: '50%', background: '#F9F5F7', color: '#7A6880', border: 'none', cursor: 'pointer', fontSize: 16 }}>✕</button>
       </div>
+      {withN != null && onlyId == null && (
+        <div data-testid="enrollSummary" style={{ background: '#F1EAFB', borderRadius: 10, padding: '8px 12px', marginBottom: 8 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: '#5B3F8A' }}>◇ {withN} de {all.length} piezas con fotos reales</div>
+          <div aria-hidden="true" style={{ height: 6, background: 'white', borderRadius: 99, marginTop: 6, overflow: 'hidden' }}>
+            <div style={{ width: (all.length ? Math.round(withN / all.length * 100) : 0) + '%', height: '100%', background: 'linear-gradient(90deg,#E8508A,#9B5DE5)' }} />
+          </div>
+        </div>
+      )}
       <div style={{ fontSize: 12, color: '#7A6880', marginBottom: 10 }}>
         Toma 1 a 3 fotos de cada pieza real, como la fotografías al armar un pedido (sobre la mesa, con tu luz). Es lo que más mejora "Identificar por foto".
-        {missingN != null && <> <b style={{ color: missingN ? '#B45309' : '#15803D' }}>{missingN} pieza{missingN === 1 ? '' : 's'} sin fotos</b> de {all.length}.</>}
-        {doneCount > 0 && <> · {doneCount} registrada{doneCount === 1 ? '' : 's'} en esta sesión.</>}
+        {missingN != null && onlyId == null && <> <b style={{ color: missingN ? '#B45309' : '#15803D' }}>{missingN} pieza{missingN === 1 ? '' : 's'} sin fotos</b> de {all.length}.</>}
+        {doneCount > 0 && onlyId == null && <> · {doneCount} registrada{doneCount === 1 ? '' : 's'} en esta sesión.</>}
       </div>
       {loadErr && <div role="alert" style={{ fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderRadius: 8, padding: '6px 10px', marginBottom: 8 }}>No se pudieron leer las fotos registradas: {loadErr} <button type="button" onClick={loadCounts} style={{ border: 'none', background: 'none', color: '#7C3AED', fontWeight: 700, cursor: 'pointer' }}>Reintentar</button></div>}
 
@@ -3143,10 +3222,14 @@ function EnrollPhotosModal({ products, token, onClose }) {
           <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#15803D', marginTop: 6, minHeight: 4 }}>{status}</div>
           {err && <div role="alert" style={{ fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderRadius: 8, padding: '6px 10px', marginTop: 6 }}>{err}</div>}
           {shots.length > 0 && <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>{shots.map((s, i) => <img key={i} src={s} alt={'Foto registrada ' + (i + 1)} style={thumb} />)}</div>}
+          {onlyId != null ? (
+            <button type="button" onClick={onClose} disabled={busy} style={{ ...bigBtn, marginTop: 12, background: '#1A1118', color: 'white', fontSize: 13 }}>Listo</button>
+          ) : (
           <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
             <button type="button" onClick={() => openProduct(null)} style={{ ...bigBtn, flex: 1, background: '#F3EFF5', color: '#5B3F8A', fontSize: 13 }}>← Lista</button>
             <button type="button" onClick={nextMissing} disabled={busy} style={{ ...bigBtn, flex: 2, background: '#1A1118', color: 'white', fontSize: 13 }}>Siguiente pieza sin fotos →</button>
           </div>
+          )}
         </div>
       ) : scan ? (
         <div>
@@ -3180,9 +3263,7 @@ function EnrollPhotosModal({ products, token, onClose }) {
                     <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#1A1118', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
                     <span style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 11, color: '#7A6880' }}><SkuChip sku={p.sku} />{p.category}</span>
                   </span>
-                  <span style={{ fontWeight: 800, fontSize: 12, color: cnt(p) ? '#15803D' : '#B45309', background: cnt(p) ? '#DCFCE7' : '#FEF3C7', borderRadius: 99, padding: '3px 9px', flexShrink: 0 }}>
-                    {cnt(p)} foto{cnt(p) === 1 ? '' : 's'}
-                  </span>
+                  <RefBadge n={cnt(p)} style={{ fontSize: 12, padding: '3px 9px', flexShrink: 0 }} />
                 </button>
               ))}
             </div>
@@ -3197,7 +3278,12 @@ const srOnlyStyle = { position: 'absolute', width: 1, height: 1, padding: 0, mar
 // ── Agregar pieza a un pedido (18–19 nov) ──
 // 3 caminos: escanear la etiqueta QR, escribir el código (AN001) o identificar por foto
 // (MobileNet, ver arriba). El código resuelve la pieza directo → confirmar (con stock) → agregar.
-function AddPieceModal({ order, token, photo, products, categories, stock, onRetake, onClose, onAdded }) {
+// Después de agregar por QR, código o búsqueda: paso "Enseñar al identificador" (foto de la joya,
+// se guarda en segundo plano con onTeach). Con foto de la joya (modo foto), aprende de esa foto.
+function AddPieceModal({ order, token, photo, products, categories, stock, onRetake, onClose, onAdded, onTeach }) {
+  const refCounts = useRefCounts(token);
+  const [teachP, setTeachP]   = React.useState(null); // pieza recién agregada → paso "Enseñar"
+  const teachRef = React.useRef(null);
   const [mode, setMode]       = React.useState(photo ? 'photo' : 'choose'); // choose | scan | type | photo
   const [cat, setCat]         = React.useState('Todas');
   const [busy, setBusy]       = React.useState(false);
@@ -3230,7 +3316,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
       return res;
     })();
     prepRef.current.catch(e => { if (alive) setPrep({ phase: 'error', error: (e && e.message) || 'No se pudo preparar el reconocimiento.' }); });
-    apiCall('identify/refs', { token }).then(r => {
+    loadRefCounts(token, true).then(r => {
       const out = {};
       for (const [id, list] of Object.entries((r && r.refs) || {})) {
         const v = (Array.isArray(list) ? list : []).map(dequantizeEmb).filter(Boolean);
@@ -3266,13 +3352,33 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
     setAdding(String(pid)); setErrMsg('');
     try {
       const res = await apiCall('order/update', { token, id: order.id, patch: { addProductIds: [String(pid)] } });
-      // Aprende de esta foto (la próxima vez la reconoce mejor). Sin esperar ni bloquear.
-      const q = queryRef.current;
-      if (mode === 'photo' && q && photo && q.src === photo.dataUrl) {
-        apiCall('identify/ref/add', { token, id: String(pid), vector: quantizeEmb(q.emb) }).catch(e => console.warn('identify/ref/add:', e && e.message));
+      const productos = (res.order && res.order.productos) || null;
+      // Con la foto de la joya (modo foto): aprende de esa foto (la próxima vez la reconoce
+      // mejor), sin esperar ni bloquear. Si se eligió a mano sin "Identificar", igual se usa.
+      if (mode === 'photo' && photo && !confirmP) {
+        const q = queryRef.current;
+        if (q && q.src === photo.dataUrl) {
+          apiCall('identify/ref/add', { token, id: String(pid), vector: quantizeEmb(q.emb) })
+            .then(r => { if (r && Number.isInteger(r.count)) setRefCount(pid, r.count); })
+            .catch(e => console.warn('identify/ref/add:', e && e.message));
+        } else if (onTeach) onTeach(pid, name, { dataUrl: photo.dataUrl });
+        onAdded(productos, name);
+        return;
       }
-      onAdded((res.order && res.order.productos) || null, name);
+      // Por QR, código o búsqueda: el pedido ya quedó actualizado; queda el paso opcional de
+      // enseñar al identificador con una foto de la joya (la cámara del QR ve la etiqueta, no
+      // la joya: esos cuadros nunca se usan para aprender).
+      onAdded(productos, name, { keepOpen: true });
+      setTeachP((products || []).find(p => String(p.id) === String(pid)) || { id: pid, name });
+      setConfirmP(null); setAdding(null); setManual(false); setQuery('');
     } catch (e) { setErrMsg(pieceErrMsg(e)); setAdding(null); }
+  };
+  const onTeachFile = e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file || !teachP) return;
+    if (onTeach) onTeach(teachP.id, teachP.name, file);
+    onClose();
   };
   // Código escaneado o escrito → pieza (o mensaje claro si no existe).
   const resolveCode = raw => {
@@ -3298,7 +3404,48 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
         <button type="button" onClick={onClose} aria-label="Cerrar" style={{ width: 32, height: 32, borderRadius: '50%', background: '#F9F5F7', color: '#7A6880', border: 'none', cursor: 'pointer', fontSize: 16 }}>✕</button>
       </div>
 
-      {confirmP ? (
+      {teachP ? (() => {
+        const n = refCounts ? (refCounts[String(teachP.id)] || 0) : null;
+        const few = n == null || n < 3;
+        return (
+          <div data-testid="teachStep">
+            <div role="status" style={{ fontSize: 13, fontWeight: 700, color: '#15803D', marginBottom: 10 }}>✓ Agregada al pedido</div>
+            <div style={{ fontSize: 14, fontWeight: 800, color: '#1A1118', marginBottom: 6 }}>Enseñar al identificador</div>
+            <div style={{ ...optBtn, cursor: 'default' }}>
+              {productImageUrl(teachP) ? <img src={productImageUrl(teachP)} alt="" style={thumb} /> : <div style={thumb} />}
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <SkuChip sku={normalizeSku(teachP.sku)} />
+                <span style={{ display: 'block', fontWeight: 700, fontSize: 13, color: '#1A1118', marginTop: 3 }}>{teachP.name}</span>
+                <span data-testid="teachCount" style={{ display: 'block', fontSize: 11, fontWeight: 700, color: n ? '#15803D' : '#B45309' }}>
+                  {n == null ? 'Leyendo fotos aprendidas…' : `Esta pieza tiene ${n}/${REFS_PER_PRODUCT} fotos aprendidas`}
+                </span>
+              </span>
+            </div>
+            {few ? (
+              <>
+                <button type="button" onClick={() => teachRef.current && teachRef.current.click()}
+                  style={{ marginTop: 10, width: '100%', padding: '11px 12px', background: 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', border: 'none', borderRadius: 14, fontWeight: 700, fontSize: 13, lineHeight: 1.35, cursor: 'pointer' }}>
+                  📷 Toma una foto de la joya para que el identificador la reconozca mejor
+                </button>
+                <button type="button" onClick={onClose} style={{ ...backBtn, marginTop: 8, width: '100%' }}>Ahora no</button>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize: 12, color: '#7A6880', marginTop: 8 }}>
+                  Ya tiene varias fotos aprendidas.{' '}
+                  <button type="button" onClick={() => teachRef.current && teachRef.current.click()}
+                    style={{ background: 'none', border: 'none', padding: 0, color: '#7C3AED', fontWeight: 700, fontSize: 12, cursor: 'pointer', textDecoration: 'underline' }}>
+                    📷 Toma una foto de la joya para que el identificador la reconozca mejor
+                  </button>
+                  {n >= REFS_PER_PRODUCT ? ' (reemplaza la más vieja)' : ' (opcional)'}
+                </div>
+                <button type="button" onClick={onClose} style={{ marginTop: 10, width: '100%', padding: 10, background: '#1A1118', color: 'white', border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>Ahora no</button>
+              </>
+            )}
+            <input ref={teachRef} type="file" accept="image/*" capture="environment" aria-label="Foto de la joya para enseñar al identificador" style={{ display: 'none' }} onChange={onTeachFile} />
+          </div>
+        );
+      })() : confirmP ? (
         <div>
           <div style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63', marginBottom: 6 }}>¿Es esta la pieza?</div>
           <div data-testid="pieceConfirm" style={{ ...optBtn, cursor: 'default', alignItems: 'flex-start' }}>
@@ -3403,7 +3550,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
       <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#B45309', marginTop: codeMsg ? 8 : 0 }}>{codeMsg}</div>
       {errMsg && <div role="alert" aria-live="assertive" style={{ fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderRadius: 8, padding: '8px 10px', marginTop: 6 }}>{errMsg}</div>}
 
-      <div style={{ borderTop: '1px solid #EDE8EA', marginTop: 14, paddingTop: 10 }}>
+      {!teachP && <div style={{ borderTop: '1px solid #EDE8EA', marginTop: 14, paddingTop: 10 }}>
         {!manual ? (
           <button type="button" onClick={() => setManual(true)}
             style={{ fontSize: 12, fontWeight: 700, color: '#7A5F8A', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
@@ -3429,7 +3576,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
             </div>
           </div>
         )}
-      </div>
+      </div>}
     </Modal>
   );
 }
@@ -3444,6 +3591,16 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
   const [pieceMsg, setPieceMsg]       = React.useState('');
   const [pieceErr, setPieceErr]       = React.useState('');
   const [removing, setRemoving]       = React.useState(null);
+  const [teachMsg, setTeachMsg]       = React.useState(null); // { text, warn }
+  React.useEffect(() => { if (!teachMsg || teachMsg.busy) return; const t = setTimeout(() => setTeachMsg(null), teachMsg.warn ? 9000 : 5000); return () => clearTimeout(t); }, [teachMsg]);
+  // Foto de la joya para el identificador, en segundo plano: el pedido ya quedó guardado; si
+  // esto falla solo se avisa con discreción.
+  const teachPiece = (pid, name, src) => {
+    setTeachMsg({ text: '◇ Enseñando "' + (name || 'la pieza') + '" al identificador…', busy: true });
+    teachPieceFromPhoto(token, pid, src)
+      .then(n => setTeachMsg({ text: '◇ El identificador aprendió "' + (name || 'la pieza') + '" (' + n + '/' + REFS_PER_PRODUCT + ' fotos)' }))
+      .catch(e => setTeachMsg({ text: 'No se pudo guardar la foto para el identificador (' + pieceErrMsg(e) + '). La pieza sí quedó en el pedido.', warn: true }));
+  };
   React.useEffect(() => { if (!pieceMsg) return; const t = setTimeout(() => setPieceMsg(''), 5000); return () => clearTimeout(t); }, [pieceMsg]);
   const handlePieceFile = async e => {
     const file = e.target.files && e.target.files[0];
@@ -3777,13 +3934,15 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
         <AddPieceModal order={order} token={token} photo={piecePhoto} products={products} categories={categories} stock={stock}
           onRetake={() => pieceInputRef.current && pieceInputRef.current.click()}
           onClose={() => { setPieceOpen(false); setPiecePhoto(null); }}
-          onAdded={(productos, name) => {
+          onAdded={(productos, name, opts) => {
             if (Array.isArray(productos)) onProductsChange && onProductsChange(order, productos);
-            setPieceOpen(false); setPiecePhoto(null);
+            if (!(opts && opts.keepOpen)) { setPieceOpen(false); setPiecePhoto(null); }
             setPieceMsg('✓ Agregada: ' + (name || 'pieza'));
             onStockRefresh && onStockRefresh();
-          }} />
+          }}
+          onTeach={teachPiece} />
       )}
+      {teachMsg && <div role="status" aria-live="polite" style={{ fontSize: 11, color: teachMsg.warn ? '#92400E' : '#5B3F8A', background: teachMsg.warn ? '#FEF3C7' : '#F1EAFB', borderRadius: 8, padding: '4px 8px' }}>{teachMsg.text}</div>}
       {order.lote && <div style={{ display: 'inline-block', fontSize: 11, fontWeight: 700, color: '#C0336E', background: '#FCE8F3', borderRadius: 99, padding: '2px 10px', width: 'fit-content' }}>♡ Lote Lovers {order.lote} · sale del 15 al 21</div>}
       {loversMissingPieces(order) > 0 && estado !== 'Cancelado' && (
         <div role="status" style={{ fontSize: 12, fontWeight: 600, color: '#92400E', background: '#FEF3C7', borderRadius: 8, padding: '6px 10px' }}>
@@ -6990,6 +7149,8 @@ function App() {
   const [skuSeq, setSkuSeq]                 = useState({}); // config.skuSeq: último número entregado por prefijo
   const [showLabels, setShowLabels]         = useState(false);
   const [showEnroll, setShowEnroll]         = useState(false);
+  const [enrollOnly, setEnrollOnly]         = useState(null); // id: "Registrar fotos" de una sola pieza
+  const refCounts = useRefCounts(session && session.token);
   const [tiktokExportBusy, setTiktokExportBusy] = useState(false);
   const [tiktokExportMsg, setTiktokExportMsg]   = useState('');
   const [tiktokMeta, setTiktokMeta]             = useState(null);
@@ -7503,13 +7664,19 @@ function App() {
                 style={{ padding: '10px 16px', background: 'white', color: '#5B3F8A', border: '1.5px solid #D9C9EE', borderRadius: 99, fontWeight: 700, fontSize: 13, whiteSpace: 'nowrap', cursor: 'pointer' }}>
                 🏷️ Etiquetas
               </button>
-              <button onClick={() => setShowEnroll(true)}
+              {refCounts && (() => {
+                const pool = products.filter(p => p.available !== false && productImageUrl(p));
+                const withN = pool.filter(p => refCounts[String(p.id)]).length;
+                return <button type="button" data-testid="refsSummary" onClick={() => { setEnrollOnly(null); setShowEnroll(true); }}
+                  style={{ padding: '6px 12px', background: '#F1EAFB', color: '#5B3F8A', border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 12, whiteSpace: 'nowrap', cursor: 'pointer' }}>◇ {withN} de {pool.length} piezas con fotos reales</button>;
+              })()}
+              <button onClick={() => { setEnrollOnly(null); setShowEnroll(true); }}
                 style={{ padding: '10px 16px', background: 'white', color: '#5B3F8A', border: '1.5px solid #D9C9EE', borderRadius: 99, fontWeight: 700, fontSize: 13, whiteSpace: 'nowrap', cursor: 'pointer' }}>
                 📸 Registrar fotos
               </button>
             </div>
             {showLabels && <LabelsModal products={products} categories={categories} stock={stock} onClose={() => setShowLabels(false)} />}
-            {showEnroll && <EnrollPhotosModal products={products} token={session.token} onClose={() => setShowEnroll(false)} />}
+            {showEnroll && !enrollOnly && <EnrollPhotosModal products={products} token={session.token} onClose={() => setShowEnroll(false)} />}
 
             {/* TikTok Shop: carga masiva */}
             <div style={{ background: '#FAF7FB', borderRadius: 12, padding: '12px 14px', marginBottom: 16 }}>
@@ -7568,6 +7735,7 @@ function App() {
                       canDown={globalIdx < products.length - 1}
                       stockQty={stock ? stockOf(stock, p.id) : null}
                       onStockSave={stock ? saveStock : null}
+                      refN={refCounts ? (refCounts[String(p.id)] || 0) : null}
                     />
                   );
                 })}
@@ -7838,7 +8006,9 @@ function App() {
             .then(res => setOrders(prev => [res.order || o, ...prev]))
             .catch(e => { console.warn('order manual:', e); setSyncMsg('❌ No se pudo guardar el pedido: ' + e.message); });
         }} />}
-        {showModal && <ProductModal product={editProduct} token={session.token} categories={categories} materials={materials} fbSurcharges={fbSurcharges} fbMarkets={fbMarkets} allProducts={products} skuSeq={skuSeq} onSave={saveProduct} onClose={() => { setShowModal(false); setEditProd(null); }} />}
+        {showModal && <ProductModal product={editProduct} token={session.token} categories={categories} materials={materials} fbSurcharges={fbSurcharges} fbMarkets={fbMarkets} allProducts={products} skuSeq={skuSeq} onSave={saveProduct} onClose={() => { setShowModal(false); setEditProd(null); }}
+          onEnroll={p => { setEnrollOnly(String(p.id)); setShowEnroll(true); }} />}
+        {showEnroll && enrollOnly && <EnrollPhotosModal products={products} token={session.token} onlyId={enrollOnly} onClose={() => { setShowEnroll(false); setEnrollOnly(null); }} />}
 
         {delConfirm && (
           <div style={{ position: 'fixed', inset: 0, background: 'rgba(26,17,36,.65)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
