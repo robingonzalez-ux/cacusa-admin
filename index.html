@@ -2120,6 +2120,19 @@ const PANEL_USERS = ['tita.jaramillo', 'robin.gonzalez'];
 function orderAllowsPieceLoad(o) {
   return !!o && (o.pago === 'Lovers' || !!o.lote || PANEL_USERS.includes(o.createdBy));
 }
+// Caja de Lovers sin sus 2 joyas cargadas (19 nov): no se deja marcar Enviado, generar la guía
+// ni pegar el tracking hasta cargarlas, así el inventario siempre se descuenta.
+const LOVERS_PIECES_REQUIRED = 2;
+function isLoversBox(o) { return !!o && (o.pago === 'Lovers' || !!o.lote); }
+function loversMissingPieces(o) {
+  if (!isLoversBox(o)) return 0;
+  const n = (o.productos || []).filter(p => p && p.id).length;
+  return Math.max(0, LOVERS_PIECES_REQUIRED - n);
+}
+function loversBlockMsg(o) {
+  const n = loversMissingPieces(o);
+  return n ? `Esta caja de Lovers no tiene sus ${LOVERS_PIECES_REQUIRED} joyas cargadas (falta${n === 1 ? '' : 'n'} ${n}). Cárgalas con "📷 Agregar pieza con foto" para descontarlas del inventario.` : '';
+}
 function productImageUrl(p) {
   const u = (p && (p.imageUrl || (Array.isArray(p.images) ? p.images[0] : ''))) || '';
   return typeof u === 'string' && /^https:\/\//.test(u) ? u : '';
@@ -2580,7 +2593,12 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
 
   // 22 oct (auditoría): el tracking se guarda al salir del campo o con Enter (antes, con cada tecla:
   // un pedido "Enviado" podía mandar el correo de envío con el número a medias). El escaneo guarda directo.
-  const commitTracking      = v => { const t = String(v || '').trim(); if (t !== String(order.tracking || '').trim()) onTrackingChange && onTrackingChange(order, t); };
+  const commitTracking      = v => {
+    const t = String(v || '').trim();
+    if (t === String(order.tracking || '').trim()) return;
+    if (t && loversMissingPieces(order)) { window.alert(loversBlockMsg(order)); setTrackVal(order.tracking || ''); return; }
+    onTrackingChange && onTrackingChange(order, t);
+  };
   const handleTrackChange   = v => { setTrackVal(v); commitTracking(v); };
   const handleCarrierChange = v => { setCarrierVal(v); onCarrierChange  && onCarrierChange(order, v); };
 
@@ -2874,6 +2892,11 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
           }} />
       )}
       {order.lote && <div style={{ display: 'inline-block', fontSize: 11, fontWeight: 700, color: '#C0336E', background: '#FCE8F3', borderRadius: 99, padding: '2px 10px', width: 'fit-content' }}>♡ Lote Lovers {order.lote} · sale del 15 al 21</div>}
+      {loversMissingPieces(order) > 0 && estado !== 'Cancelado' && (
+        <div role="status" style={{ fontSize: 12, fontWeight: 600, color: '#92400E', background: '#FEF3C7', borderRadius: 8, padding: '6px 10px' }}>
+          Faltan {loversMissingPieces(order)} de {LOVERS_PIECES_REQUIRED} joyas por cargar antes de enviar.
+        </div>
+      )}
       {order.notas && <div style={{ fontSize: 12, color: '#7A6880', fontStyle: 'italic' }}>📝 {order.notas}</div>}
 
       {/* ── Tracking ── */}
@@ -2915,7 +2938,7 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
         </select>
         {trackVal && <div style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>Tracking y transportista se incluyen en el mensaje WA al notificar estado "Enviado".</div>}
         {isUsOrder && !order.tracking && (
-          <button onClick={() => setShowLabelModal(true)}
+          <button onClick={() => { if (loversMissingPieces(order)) { window.alert(loversBlockMsg(order)); return; } setShowLabelModal(true); }}
             style={{ marginTop: 8, width: '100%', padding: '8px', background: '#3B82F6', color: 'white', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
             📦 Envío USPS (cotizar / generar)
           </button>
@@ -2975,7 +2998,7 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
 
       <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
         {estado !== 'Entregado' && estado !== 'Cancelado' && (
-          <button onClick={() => onStatusChange(order, nextState)}
+          <button onClick={() => { if ((nextState === 'Enviado' || nextState === 'Entregado') && loversMissingPieces(order)) { window.alert(loversBlockMsg(order)); return; } onStatusChange(order, nextState); }}
             style={{ flex: 1, padding: '8px', background: STATE_COLORS[nextState] || '#E8508A', color: 'white', borderRadius: 99, fontSize: 12, fontWeight: 700, border: 'none', cursor: 'pointer' }}>
             → {nextState}
           </button>
@@ -6615,7 +6638,9 @@ function App() {
                   <PickupTodayButton token={session.token} />
                   <ClickNShipTools token={session.token} orders={orders} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
                     onImported={(ord, tracking, markSent) => {
-                      const patch = { tracking, carrier: 'USPS', ...(markSent && ord.estado !== 'Entregado' ? { estado: 'Enviado' } : {}) };
+                      const missing = loversMissingPieces(ord);
+                      const patch = { tracking, carrier: 'USPS', ...(markSent && !missing && ord.estado !== 'Entregado' ? { estado: 'Enviado' } : {}) };
+                      if (missing) setSyncMsg('⚠️ ' + loversBlockMsg(ord) + ' Se pegó el tracking pero quedó sin marcar Enviado.');
                       setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, ...patch } : x));
                       updateOrderRemote(ord.id, patch);
                     }} />
