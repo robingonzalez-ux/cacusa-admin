@@ -968,7 +968,7 @@ function StockBadge({ qty, style }) {
   const out = qty <= 0;
   return <span style={{ background: out ? '#DC2626' : '#F59E0B', color: 'white', fontSize: 9, fontWeight: 800, padding: '3px 8px', borderRadius: 99, ...style }}>{out ? 'Agotado (stock 0)' : `Quedan ${qty}`}</span>;
 }
-function StockEditor({ productId, qty, onSave }) {
+function StockEditor({ productId, sku, qty, onSave }) {
   const [draft, setDraft] = React.useState(String(qty));
   const [state, setState] = React.useState(''); // '' | 'saving' | 'ok' | mensaje de error
   React.useEffect(() => { setDraft(String(qty)); }, [qty]);
@@ -985,7 +985,7 @@ function StockEditor({ productId, qty, onSave }) {
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <label htmlFor={inputId} style={{ fontSize: 11, fontWeight: 700, color: '#5B4A63' }}>Stock</label>
+        <label htmlFor={inputId} style={{ fontSize: 11, fontWeight: 700, color: '#5B4A63' }}>Stock{sku ? <span style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontWeight: 800, color: '#5B3F8A' }}> · {sku}</span> : null}</label>
         <input id={inputId} type="number" inputMode="numeric" min={0} max={9999} step={1} value={draft}
           onChange={e => setDraft(e.target.value)} onBlur={commit}
           onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur(); } }}
@@ -998,6 +998,88 @@ function StockEditor({ productId, qty, onSave }) {
       <div id={`${inputId}-hint`} style={{ fontSize: 9, color: '#7A6880', marginTop: 2 }}>Por defecto 1 unidad; súbelo si tienes más.</div>
     </div>
   );
+}
+
+// ── Código de producto / SKU (19 nov) ──────────────────────────────────────────
+// Formato: 2 letras de la categoría + 3 dígitos (AN001). Vive en data/products.json (`sku`).
+// Prefijos fijos para las categorías conocidas; una categoría nueva usa las 2 primeras letras
+// de su nombre normalizado (sin tildes, en mayúsculas). Si esas 2 letras ya son de otra
+// categoría (fija o ya usada en el catálogo) se prueba 1ra letra + 3ra, 1ra + 4ta…, después
+// 1ra + A..Z y por último cualquier par libre. Una categoría nueva que ya tiene piezas con
+// código reusa el prefijo de esas piezas.
+// Los códigos son estables: si una pieza cambia de categoría conserva su código. Un número
+// nunca se reusa: se guarda el último número entregado por prefijo en config.skuSeq (así,
+// borrar la pieza más nueva no hace que la siguiente herede su código).
+const SKU_PREFIXES = { 'anillos': 'AN', 'aretes': 'AR', 'cadenas': 'CA', 'pulseras': 'PU', 'parejas': 'PA', 'hombres': 'HO', 'hand chain': 'HC', 'ear cuff': 'EC', 'juegos': 'JU' };
+const SKU_RE = /^[A-Z]{2}\d{3,}$/;
+function skuCatKey(s) { return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim().replace(/\s+/g, ' '); }
+function normalizeSku(s) { return String(s || '').trim().toUpperCase().replace(/[\s-]+/g, ''); }
+function skuPrefixFor(category, products) {
+  const k = skuCatKey(category);
+  if (SKU_PREFIXES[k]) return SKU_PREFIXES[k];
+  const fixed = Object.values(SKU_PREFIXES);
+  const same = (products || []).find(p => skuCatKey(p.category) === k && SKU_RE.test(normalizeSku(p.sku)) && !fixed.includes(normalizeSku(p.sku).slice(0, 2)));
+  if (same) return normalizeSku(same.sku).slice(0, 2);
+  const letters = k.toUpperCase().replace(/[^A-Z]/g, '');
+  const taken = new Set(fixed);
+  (products || []).forEach(p => { const s = normalizeSku(p.sku); if (SKU_RE.test(s) && skuCatKey(p.category) !== k) taken.add(s.slice(0, 2)); });
+  const AZ = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', first = letters[0] || 'X', cands = [];
+  if (letters.length >= 2) cands.push(letters.slice(0, 2));
+  for (let i = 2; i < letters.length; i++) cands.push(first + letters[i]);
+  for (const c of AZ) cands.push(first + c);
+  for (const a of AZ) for (const b of AZ) cands.push(a + b);
+  return cands.find(c => !taken.has(c)) || 'ZZ';
+}
+function skuMaxNumber(prefix, products, seq) {
+  let mx = Number.isInteger(seq && seq[prefix]) ? seq[prefix] : 0;
+  (products || []).forEach(p => { const s = normalizeSku(p.sku); if (SKU_RE.test(s) && s.slice(0, 2) === prefix) mx = Math.max(mx, parseInt(s.slice(2), 10)); });
+  return mx;
+}
+function formatSku(prefix, n) { return prefix + String(n).padStart(3, '0'); }
+// Próximo código libre para la categoría (sin reservarlo; solo para mostrarlo).
+function nextSkuFor(category, products, seq) {
+  const prefix = skuPrefixFor(category, products);
+  return formatSku(prefix, skuMaxNumber(prefix, products, seq) + 1);
+}
+// Asigna código a las piezas que no tienen (por id ascendente = la más antigua primero).
+// Devuelve { products, seq, assigned }: mismo orden, las que ya tienen código no se tocan.
+function assignMissingSkus(products, seq) {
+  const nextSeq = { ...(seq || {}) };
+  let list = (products || []).slice(), assigned = 0;
+  const missing = list.filter(p => !SKU_RE.test(normalizeSku(p.sku))).sort((a, b) => Number(a.id) - Number(b.id));
+  for (const m of missing) {
+    const prefix = skuPrefixFor(m.category, list);
+    const n = skuMaxNumber(prefix, list, nextSeq) + 1;
+    const sku = formatSku(prefix, n);
+    nextSeq[prefix] = n;
+    list = list.map(p => String(p.id) === String(m.id) ? { ...p, sku } : p);
+    assigned++;
+  }
+  return { products: list, seq: nextSeq, assigned };
+}
+function findBySku(products, code) {
+  const c = normalizeSku(code);
+  if (!c) return null;
+  return (products || []).find(p => normalizeSku(p.sku) === c) || null;
+}
+// Búsqueda de productos del panel: nombre, descripción, código (AN001 / an001 / "an 001") o id.
+function productMatchesSearch(p, q) {
+  const s = String(q || '').trim().toLowerCase();
+  if (!s) return true;
+  const code = normalizeSku(s);
+  return String(p.name || '').toLowerCase().includes(s) || String(p.description || '').toLowerCase().includes(s)
+    || (!!code && !!p.sku && normalizeSku(p.sku).includes(code)) || String(p.id) === s;
+}
+function SkuChip({ sku, style }) {
+  if (!sku) return null;
+  return <span data-sku={sku} style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 10, fontWeight: 800, color: '#5B3F8A', background: '#F1EAFB', padding: '2px 7px', borderRadius: 6, letterSpacing: '.04em', whiteSpace: 'nowrap', ...style }}>{sku}</span>;
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch (_) {
+    try { const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); const ok = document.execCommand('copy'); ta.remove(); return ok; }
+    catch (__) { return false; }
+  }
 }
 
 function ProductCard({ p, onEdit, onDelete, onToggle, onMoveUp, onMoveDown, canUp, canDown, stockQty, onStockSave }) {
@@ -1019,14 +1101,17 @@ function ProductCard({ p, onEdit, onDelete, onToggle, onMoveUp, onMoveDown, canU
         </div>
       </div>
       <div style={{ padding: '12px 14px', flex: 1, display: 'flex', flexDirection: 'column', gap: 5 }}>
-        <div style={{ fontSize: 10, fontWeight: 700, color: '#E85D8A', textTransform: 'uppercase', letterSpacing: '.1em' }}>{p.category}</div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: '#E85D8A', textTransform: 'uppercase', letterSpacing: '.1em' }}>{p.category}</div>
+          <SkuChip sku={p.sku} />
+        </div>
         <div style={{ fontSize: 14, fontWeight: 700, color: '#1a1a1a', lineHeight: 1.3, flex: 1 }}>{p.name}</div>
         {p.personalized && <div style={{ fontSize: 10, color: '#9B5DE5', fontWeight: 600 }}>✦ Personalizable</div>}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontWeight: 800, color: '#C9A84C', fontSize: 15 }}>${p.price}</span>
           {p.oldPrice && <span style={{ fontSize: 12, color: '#707070', textDecoration: 'line-through' }}>${p.oldPrice}</span>}
         </div>
-        {onStockSave && stockQty != null && <StockEditor productId={p.id} qty={stockQty} onSave={onStockSave} />}
+        {onStockSave && stockQty != null && <StockEditor productId={p.id} sku={p.sku} qty={stockQty} onSave={onStockSave} />}
         <div style={{ display: 'flex', gap: 5, marginTop: 4 }}>
           <button onClick={() => onToggle(p)} style={{ flex: 1, padding: '5px 0', background: active ? '#FEE2E2' : '#D1FAE5', color: active ? '#DC2626' : '#065F46', borderRadius: 8, fontSize: 11, fontWeight: 600, border: 'none', cursor: 'pointer' }}>
             {active ? 'Pausar' : 'Activar'}
@@ -1089,7 +1174,7 @@ function ImageEditor({ imgSrc, focalX, focalY, zoom, onChange }) {
 }
 
 // ── Product Modal ──────────────────────────────────────────────────────────
-function ProductModal({ product, onSave, onClose, token, categories, materials, fbSurcharges = {}, fbMarkets = {} }) {
+function ProductModal({ product, onSave, onClose, token, categories, materials, fbSurcharges = {}, fbMarkets = {}, allProducts = [], skuSeq = {} }) {
   const cats = (categories && categories.length) ? categories : DEFAULT_CATEGORIES;
   const mats = (materials && materials.length) ? materials : DEFAULT_MATERIALS;
   const isNew = !product?.id;
@@ -1127,6 +1212,10 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
   const [galleryMsg, setGalleryMsg] = useState('');
   const [reviews, setReviews] = useState(null);
   const [revLoading, setRevLoading] = useState(false);
+  const [skuCopied, setSkuCopied] = useState(false);
+  const skuNow = normalizeSku(form.sku);
+  const skuPreview = !skuNow ? nextSkuFor(form.category, allProducts, skuSeq) : '';
+  const skuCatMoved = !!skuNow && !!product && product.category !== form.category && skuPrefixFor(form.category, allProducts) !== skuNow.slice(0, 2);
 
   const uploadFile = async file => {
     if (!file) return;
@@ -1347,6 +1436,26 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
           <div style={{ gridColumn: 'span 2' }}>
             <label htmlFor="pmName" style={lbl}>Nombre del producto *</label>
             <input id="pmName" value={form.name} onChange={e => set('name', e.target.value)} placeholder="Ej: Collar con nombre personalizado" style={inp} />
+          </div>
+          <div style={{ gridColumn: 'span 2', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', background: '#F8F4FD', borderRadius: 10, padding: '8px 12px' }}>
+            <span style={{ ...lbl, marginBottom: 0 }}>Código</span>
+            {skuNow ? (
+              <>
+                <span data-testid="pmSku" style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontWeight: 800, fontSize: 16, color: '#5B3F8A', letterSpacing: '.05em' }}>{skuNow}</span>
+                <button type="button" onClick={async () => { if (await copyText(skuNow)) { setSkuCopied(true); setTimeout(() => setSkuCopied(false), 1800); } }}
+                  aria-label={'Copiar código ' + skuNow}
+                  style={{ fontSize: 11, fontWeight: 700, padding: '4px 10px', borderRadius: 99, border: '1.5px solid #D9C9EE', background: 'white', color: '#5B3F8A', cursor: 'pointer' }}>
+                  {skuCopied ? '✓ Copiado' : 'Copiar'}
+                </button>
+              </>
+            ) : (
+              <span data-testid="pmSkuPreview" style={{ fontSize: 12, color: '#7A6880' }}>Se asigna al guardar: <b style={{ fontFamily: 'ui-monospace, Menlo, monospace', color: '#5B3F8A' }}>{skuPreview}</b></span>
+            )}
+            {skuCatMoved && (
+              <span role="note" style={{ flexBasis: '100%', fontSize: 11, color: '#92400E' }}>
+                Cambiaste la categoría: el código {skuNow} se mantiene (los códigos no cambian, así las etiquetas ya impresas siguen sirviendo).
+              </span>
+            )}
           </div>
           <div>
             <label htmlFor="pmCategory" style={lbl}>Categoría</label>
@@ -2131,7 +2240,7 @@ function loversMissingPieces(o) {
 }
 function loversBlockMsg(o) {
   const n = loversMissingPieces(o);
-  return n ? `Esta caja de Lovers no tiene sus ${LOVERS_PIECES_REQUIRED} joyas cargadas (falta${n === 1 ? '' : 'n'} ${n}). Cárgalas con "📷 Agregar pieza con foto" para descontarlas del inventario.` : '';
+  return n ? `Esta caja de Lovers no tiene sus ${LOVERS_PIECES_REQUIRED} joyas cargadas (falta${n === 1 ? '' : 'n'} ${n}). Cárgalas con "+ Agregar pieza" (etiqueta QR, código o foto) para descontarlas del inventario.` : '';
 }
 function productImageUrl(p) {
   const u = (p && (p.imageUrl || (Array.isArray(p.images) ? p.images[0] : ''))) || '';
@@ -2538,7 +2647,558 @@ function rankCatalog(query, items, refs, category, topN = 5) {
 
 // @@recog-end
 
+// ── Librerías copiadas en /vendor (ver vendor/README.md) — se cargan recién al usarlas ──
+const VENDOR_LIBS = {
+  qrcode: { src: 'vendor/qrcode-generator-1.4.4.js', sri: 'sha384-8FWZA6BGMXhsfO+BLtrJK0We6gg5o1JyO8xQm6peWDEUs17ACA5ziE/NIAkl9z2k', global: 'qrcode', label: 'el generador de códigos QR' },
+  jsqr:   { src: 'vendor/jsqr-1.4.0.js', sri: 'sha384-b5Ya4Bq3qCyz39m2ISh+4DxjAIljdeFwK/BsXLuj9gugaNwAcj/ia15fxNZL9Nlx', global: 'jsQR', label: 'el lector de códigos QR' }
+};
+const _vendorPromises = {};
+function loadVendor(name) {
+  const v = VENDOR_LIBS[name];
+  if (typeof window[v.global] === 'function') return Promise.resolve(window[v.global]);
+  if (_vendorPromises[name]) return _vendorPromises[name];
+  _vendorPromises[name] = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = v.src; s.integrity = v.sri; s.async = true;
+    s.onload = () => (typeof window[v.global] === 'function' ? resolve(window[v.global]) : reject(new Error('No se pudo iniciar ' + v.label + '.')));
+    s.onerror = () => { delete _vendorPromises[name]; reject(new Error('No se pudo cargar ' + v.label + ' (revisa la conexión).')); };
+    document.head.appendChild(s);
+  });
+  return _vendorPromises[name];
+}
+
+// ── Lectura de etiquetas QR (19 nov) ──
+// BarcodeDetector nativo (Chrome Android, Safari macOS…) y, donde no existe (iPhone/iPad, Chrome
+// de escritorio en Linux/Windows), jsQR sobre cuadros del video o sobre la foto subida.
+// La etiqueta lleva solo el código ("AN001"); se acepta también texto con el código adentro.
+function extractSku(raw) {
+  const s = normalizeSku(raw);
+  const m = s.match(/[A-Z]{2}\d{3,}/);
+  return m ? m[0] : s;
+}
+let _nativeQrPromise = null, _qrDetector = null;
+function nativeQrSupported() {
+  if (_nativeQrPromise) return _nativeQrPromise;
+  _nativeQrPromise = (async () => {
+    if (!('BarcodeDetector' in window)) return false;
+    try {
+      const fm = await BarcodeDetector.getSupportedFormats();
+      if (!Array.isArray(fm) || !fm.includes('qr_code')) return false;
+      _qrDetector = new BarcodeDetector({ formats: ['qr_code'] });
+      return true;
+    } catch (_) { return false; }
+  })();
+  return _nativeQrPromise;
+}
+async function decodeQrNative(source) {
+  if (!_qrDetector) return null;
+  const r = await _qrDetector.detect(source);
+  return r && r.length ? String(r[0].rawValue || '') : null;
+}
+async function decodeQrJs(canvas) {
+  const jsQR = await loadVendor('jsqr');
+  const d = canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, canvas.width, canvas.height);
+  const r = jsQR(d.data, d.width, d.height, { inversionAttempts: 'attemptBoth' });
+  return r && r.data ? String(r.data) : null;
+}
+// Foto (archivo) de una etiqueta → texto del QR, o null.
+async function decodeQrFromFile(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await loadImg(url, false);
+    const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
+    const tries = [1280, 640];
+    if (await nativeQrSupported()) { try { const r = await decodeQrNative(img); if (r) return r; } catch (_) {} }
+    for (const max of tries) {
+      const k = Math.min(1, max / Math.max(W, H));
+      const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(W * k)); cv.height = Math.max(1, Math.round(H * k));
+      const ctx = cv.getContext('2d', { willReadFrequently: true });
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height);
+      ctx.drawImage(img, 0, 0, cv.width, cv.height);
+      const r = await decodeQrJs(cv);
+      if (r) return r;
+    }
+    return null;
+  } finally { try { URL.revokeObjectURL(url); } catch (_) {} }
+}
+// Vista de cámara en vivo que busca un QR; si no hay cámara (o no hay permiso) queda la opción
+// de subir una foto de la etiqueta. onCode(sku, textoCrudo) se llama una sola vez.
+function QrScanPanel({ onCode, idPrefix = 'qr' }) {
+  const videoRef = useRef(null), streamRef = useRef(null), fileRef = useRef(null), doneRef = useRef(false);
+  const [state, setState] = useState('starting'); // starting | live | nocam
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+  const stop = () => { const s = streamRef.current; if (s) s.getTracks().forEach(t => { try { t.stop(); } catch (_) {} }); streamRef.current = null; };
+  const found = raw => {
+    if (doneRef.current) return false;
+    const code = extractSku(raw);
+    if (!code) return false;
+    doneRef.current = true; stop();
+    onCode(code, raw);
+    return true;
+  };
+  useEffect(() => {
+    let alive = true, timer = null;
+    (async () => {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setState('nocam'); setMsg('Este navegador no permite usar la cámara aquí. Sube una foto de la etiqueta.'); return;
+      }
+      try {
+        const st = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+        if (!alive) { st.getTracks().forEach(t => t.stop()); return; }
+        streamRef.current = st;
+        const v = videoRef.current;
+        v.srcObject = st; v.muted = true; v.setAttribute('playsinline', '');
+        try { await v.play(); } catch (_) {}
+        const native = await nativeQrSupported();
+        if (!native) { try { await loadVendor('jsqr'); } catch (e) { setMsg(e.message); } }
+        if (!alive) return;
+        setState('live');
+        const cv = document.createElement('canvas');
+        const tick = async () => {
+          if (!alive || doneRef.current) return;
+          try {
+            if (v.readyState >= 2 && v.videoWidth) {
+              let raw = null;
+              if (native) raw = await decodeQrNative(v);
+              else {
+                const k = Math.min(1, 800 / Math.max(v.videoWidth, v.videoHeight));
+                cv.width = Math.round(v.videoWidth * k); cv.height = Math.round(v.videoHeight * k);
+                cv.getContext('2d', { willReadFrequently: true }).drawImage(v, 0, 0, cv.width, cv.height);
+                raw = await decodeQrJs(cv);
+              }
+              if (raw && found(raw)) return;
+            }
+          } catch (_) {}
+          timer = setTimeout(tick, 220);
+        };
+        tick();
+      } catch (e) {
+        if (!alive) return;
+        setState('nocam');
+        setMsg(e && e.name === 'NotAllowedError'
+          ? 'No se dio permiso para usar la cámara. Puedes subir una foto de la etiqueta.'
+          : 'No se pudo abrir la cámara. Puedes subir una foto de la etiqueta.');
+      }
+    })();
+    return () => { alive = false; clearTimeout(timer); stop(); };
+  }, []);
+  const onFile = async e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    setBusy(true); setMsg('Leyendo la etiqueta…');
+    try {
+      const raw = await decodeQrFromFile(file);
+      if (raw) { setMsg(''); found(raw); }
+      else setMsg('No se encontró un código QR en la foto. Que la etiqueta se vea entera y nítida, y prueba de nuevo.');
+    } catch (er) { setMsg((er && er.message) || 'No se pudo leer la foto.'); }
+    setBusy(false);
+  };
+  return (
+    <div>
+      <div style={{ position: 'relative', width: '100%', aspectRatio: '4 / 3', background: '#1A1118', borderRadius: 12, overflow: 'hidden', display: state === 'nocam' ? 'none' : 'block' }}>
+        <video ref={videoRef} playsInline muted aria-label="Vista de la cámara para leer la etiqueta" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+        <div aria-hidden="true" style={{ position: 'absolute', left: '50%', top: '50%', width: '56%', aspectRatio: '1 / 1', transform: 'translate(-50%,-50%)', border: '3px solid rgba(255,255,255,.85)', borderRadius: 14, boxShadow: '0 0 0 9999px rgba(0,0,0,.25)' }} />
+        <div style={{ position: 'absolute', bottom: 8, left: 0, right: 0, textAlign: 'center', color: 'white', fontSize: 12, fontWeight: 600, textShadow: '0 1px 3px rgba(0,0,0,.6)' }}>
+          {state === 'starting' ? 'Abriendo la cámara…' : 'Apunta al código QR de la etiqueta'}
+        </div>
+      </div>
+      <div role="status" aria-live="polite" style={{ fontSize: 12, color: state === 'nocam' ? '#92400E' : '#7A6880', marginTop: 6, minHeight: 4 }}>{msg}</div>
+      <button type="button" onClick={() => fileRef.current && fileRef.current.click()} disabled={busy}
+        style={{ marginTop: 6, width: '100%', padding: 9, background: '#F3EFF5', color: '#5B3F8A', border: '1.5px dashed #C9B8D3', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: busy ? 'wait' : 'pointer' }}>
+        {busy ? 'Leyendo…' : 'o sube una foto de la etiqueta'}
+      </button>
+      <input ref={fileRef} id={idPrefix + '-file'} type="file" accept="image/*" aria-label="Foto de la etiqueta" style={{ display: 'none' }} onChange={onFile} />
+    </div>
+  );
+}
+
+// ── Etiquetas con QR (19 nov) ──
+// Cada etiqueta: QR con el código (solo "AN001"), el código grande y el nombre corto. Vista de
+// impresión dentro del panel (window.print + @media print). Tamaños en milímetros reales.
+const LABEL_PRESETS = {
+  'a4-38x25':     { name: 'Hoja A4 · 38×25 mm', page: [210, 297], w: 38, h: 25, margin: 8 },
+  'letter-38x25': { name: 'Hoja Carta (Letter) · 38×25 mm', page: [215.9, 279.4], w: 38, h: 25, margin: 8 },
+  'a4-25x15':     { name: 'Hoja A4 · 25×15 mm (pequeñas)', page: [210, 297], w: 25, h: 15, margin: 8 },
+  'roll-25x15':   { name: 'Rollo de etiquetas 25×15 mm (una por página)', page: [25, 15], w: 25, h: 15, margin: 0 }
+};
+function labelGrid(preset) {
+  const cols = Math.max(1, Math.floor((preset.page[0] - 2 * preset.margin) / preset.w));
+  const rows = Math.max(1, Math.floor((preset.page[1] - 2 * preset.margin) / preset.h));
+  return { cols, rows, perPage: cols * rows };
+}
+function shortName(name, max) {
+  const s = String(name || '').replace(/\s+/g, ' ').trim();
+  return s.length > max ? s.slice(0, max - 1).trimEnd() + '…' : s;
+}
+function qrDataUrl(qrcode, text) {
+  const qr = qrcode(0, 'M');
+  qr.addData(String(text));
+  qr.make();
+  return qr.createDataURL(6, 12); // 2 módulos de margen blanco alrededor
+}
+function LabelsModal({ products, categories, stock, onClose }) {
+  const [scope, setScope]       = useState('all'); // all | category | selected
+  const [cat, setCat]           = useState((categories && categories[0]) || '');
+  const [sel, setSel]           = useState([]);
+  const [q, setQ]               = useState('');
+  const [presetKey, setPreset]  = useState('a4-38x25');
+  const [copies, setCopies]     = useState(1);
+  const [byStock, setByStock]   = useState(false);
+  const [withPaused, setPaused] = useState(false);
+  const [skip, setSkip]         = useState(0);
+  const [view, setView]         = useState(null); // { labels, preset }
+  const [busy, setBusy]         = useState(false);
+  const [err, setErr]           = useState('');
+  const preset = LABEL_PRESETS[presetKey];
+  const grid = labelGrid(preset);
+  const pool = (products || []).filter(p => withPaused || p.available !== false);
+  const chosen = scope === 'all' ? pool
+    : scope === 'category' ? pool.filter(p => p.category === cat)
+    : (products || []).filter(p => sel.includes(p.id));
+  const noSku = chosen.filter(p => !SKU_RE.test(normalizeSku(p.sku)));
+  const withSku = chosen.filter(p => SKU_RE.test(normalizeSku(p.sku)))
+    .sort((a, b) => normalizeSku(a.sku).localeCompare(normalizeSku(b.sku), 'es', { numeric: true }));
+  const nOf = p => byStock ? Math.max(0, stock ? stockOf(stock, p.id) : 1) : Math.max(1, Math.min(50, Number(copies) || 1));
+  const total = withSku.reduce((s, p) => s + nOf(p), 0);
+  const listQ = q.trim();
+  const pickList = (products || []).filter(p => productMatchesSearch(p, listQ)).slice(0, 200);
+  const toggle = id => setSel(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
+
+  const openView = async () => {
+    if (!total) return;
+    setBusy(true); setErr('');
+    try {
+      const qrcode = await loadVendor('qrcode');
+      const cache = {};
+      const labels = [];
+      for (const p of withSku) {
+        const sku = normalizeSku(p.sku);
+        cache[sku] = cache[sku] || qrDataUrl(qrcode, sku);
+        for (let i = 0; i < nOf(p); i++) labels.push({ sku, name: p.name, src: cache[sku], key: sku + '-' + i });
+      }
+      setView({ labels, presetKey, skip: preset.margin ? Math.max(0, Math.min(grid.perPage - 1, Number(skip) || 0)) : 0 });
+    } catch (e) { setErr((e && e.message) || 'No se pudieron generar los códigos QR.'); }
+    setBusy(false);
+  };
+
+  if (view) return <LabelPrintView view={view} onBack={() => setView(null)} onClose={onClose} />;
+
+  const lbl = { display: 'block', fontSize: 11, fontWeight: 700, color: '#5B4A63', marginBottom: 5 };
+  const inp = { padding: '8px 10px', border: '1.5px solid #E5DDEA', borderRadius: 8, fontSize: 13, outline: 'none', width: '100%', boxSizing: 'border-box', fontFamily: 'inherit', background: 'white' };
+  const pill = on => ({ fontSize: 12, fontWeight: 700, padding: '6px 12px', borderRadius: 99, cursor: 'pointer', border: on ? '1.5px solid #9B5DE5' : '1.5px solid #E5DDEA', background: on ? '#F1EAFB' : 'white', color: on ? '#5B3F8A' : '#5B4A63' });
+  return (
+    <Modal onClose={onClose} labelledBy="labelsTitle" boxStyle={{ maxWidth: 520, maxHeight: '90vh', overflowY: 'auto', padding: 22 }} overlayStyle={{ padding: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+        <div id="labelsTitle" style={{ fontWeight: 800, fontSize: 17, color: '#1A1118' }}>🏷️ Etiquetas con código QR</div>
+        <button type="button" onClick={onClose} aria-label="Cerrar" style={{ width: 32, height: 32, borderRadius: '50%', background: '#F9F5F7', color: '#7A6880', border: 'none', cursor: 'pointer', fontSize: 16 }}>✕</button>
+      </div>
+      <div style={lbl} id="labelsScope">¿Qué piezas?</div>
+      <div role="group" aria-labelledby="labelsScope" style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+        {[['all', 'Todas'], ['category', 'Una categoría'], ['selected', 'Elegir piezas']].map(([k, t]) => (
+          <button type="button" key={k} onClick={() => setScope(k)} aria-pressed={scope === k} style={pill(scope === k)}>{t}</button>
+        ))}
+      </div>
+      {scope === 'category' && (
+        <div style={{ marginBottom: 10 }}>
+          <label htmlFor="labelsCat" style={lbl}>Categoría</label>
+          <select id="labelsCat" value={cat} onChange={e => setCat(e.target.value)} style={inp}>
+            {(categories || []).map(c => <option key={c}>{c}</option>)}
+          </select>
+        </div>
+      )}
+      {scope === 'selected' && (
+        <div style={{ marginBottom: 10 }}>
+          <label htmlFor="labelsSearch" style={lbl}>Buscar (nombre o código) · {sel.length} elegida{sel.length === 1 ? '' : 's'}</label>
+          <input id="labelsSearch" value={q} onChange={e => setQ(e.target.value)} placeholder="Ej: AN001 o corazón" style={inp} />
+          <div style={{ maxHeight: 220, overflowY: 'auto', marginTop: 6, border: '1px solid #F0EAF3', borderRadius: 8 }}>
+            {pickList.map(p => (
+              <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', fontSize: 13, cursor: 'pointer', borderBottom: '1px solid #F7F3F9' }}>
+                <input type="checkbox" checked={sel.includes(p.id)} onChange={() => toggle(p.id)} />
+                <SkuChip sku={p.sku} />
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+      {scope !== 'selected' && (
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#5B4A63', marginBottom: 10 }}>
+          <input type="checkbox" checked={withPaused} onChange={e => setPaused(e.target.checked)} /> Incluir piezas pausadas
+        </label>
+      )}
+      <label htmlFor="labelsPreset" style={lbl}>Tamaño de etiqueta</label>
+      <select id="labelsPreset" value={presetKey} onChange={e => setPreset(e.target.value)} style={{ ...inp, marginBottom: 4 }}>
+        {Object.entries(LABEL_PRESETS).map(([k, v]) => <option key={k} value={k}>{v.name}</option>)}
+      </select>
+      <div style={{ fontSize: 11, color: '#7A6880', marginBottom: 10 }}>
+        {preset.margin ? `${grid.cols} × ${grid.rows} = ${grid.perPage} etiquetas por hoja (márgenes de ${preset.margin} mm).` : 'Una etiqueta por página: elige ese tamaño de papel en la impresora de etiquetas.'}
+        {' '}Imprime al 100 % (sin "ajustar a la página").
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+        <div>
+          <label htmlFor="labelsCopies" style={lbl}>Copias por pieza</label>
+          <input id="labelsCopies" type="number" min={1} max={50} value={copies} disabled={byStock} onChange={e => setCopies(e.target.value)} style={{ ...inp, opacity: byStock ? .5 : 1 }} />
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#5B4A63', marginTop: 4 }}>
+            <input type="checkbox" checked={byStock} onChange={e => setByStock(e.target.checked)} /> Una por unidad en stock
+          </label>
+        </div>
+        {!!preset.margin && (
+          <div>
+            <label htmlFor="labelsSkip" style={lbl}>Empezar en la posición</label>
+            <input id="labelsSkip" type="number" min={1} max={grid.perPage} value={Number(skip) + 1} onChange={e => setSkip(Math.max(0, (Number(e.target.value) || 1) - 1))} style={inp} />
+            <div style={{ fontSize: 10, color: '#7A6880', marginTop: 4 }}>Para reusar una hoja empezada.</div>
+          </div>
+        )}
+      </div>
+      {noSku.length > 0 && (
+        <div role="note" style={{ fontSize: 12, color: '#92400E', background: '#FEF3C7', borderRadius: 8, padding: '6px 10px', marginBottom: 8 }}>
+          {noSku.length} pieza{noSku.length === 1 ? '' : 's'} sin código todavía (se asigna al guardarla o al Publicar): no se imprime{noSku.length === 1 ? '' : 'n'}.
+        </div>
+      )}
+      {err && <div role="alert" style={{ fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderRadius: 8, padding: '6px 10px', marginBottom: 8 }}>{err}</div>}
+      <button type="button" onClick={openView} disabled={!total || busy}
+        style={{ width: '100%', padding: 11, background: !total || busy ? '#C9B8D3' : 'linear-gradient(135deg,#C0336E,#9B5DE5)', color: 'white', border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 14, cursor: !total || busy ? 'default' : 'pointer' }}>
+        {busy ? 'Generando…' : `Ver ${total} etiqueta${total === 1 ? '' : 's'} para imprimir`}
+      </button>
+    </Modal>
+  );
+}
+function LabelPrintView({ view, onBack, onClose }) {
+  const preset = LABEL_PRESETS[view.presetKey];
+  const grid = labelGrid(preset);
+  const [host] = useState(() => { const d = document.createElement('div'); d.id = 'labelPrintHost'; return d; });
+  useEffect(() => {
+    document.body.appendChild(host);
+    const onKey = e => { if (e.key === 'Escape') onBack(); };
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('keydown', onKey); host.remove(); };
+  }, []);
+  const cells = [...Array(view.skip).fill(null), ...view.labels];
+  const pages = [];
+  for (let i = 0; i < cells.length; i += grid.perPage) pages.push(cells.slice(i, i + grid.perPage));
+  const small = preset.h < 20;
+  const pad = small ? 0.8 : 1.5;
+  const qrMm = preset.h - 2 * pad;
+  const [pw, ph] = preset.page;
+  const css = `
+#labelPrintHost{position:fixed;inset:0;z-index:10000;background:#E9E4EC;overflow:auto;font-family:'DM Sans',system-ui,sans-serif}
+#labelPrintHost .lp-bar{position:sticky;top:0;z-index:1;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 14px;background:white;box-shadow:0 2px 10px rgba(0,0,0,.08)}
+#labelPrintHost .lp-pages{display:flex;flex-direction:column;align-items:center;gap:16px;padding:16px}
+#labelPrintHost .lp-page{width:${pw}mm;height:${ph}mm;padding:${preset.margin}mm;box-sizing:border-box;background:white;box-shadow:0 2px 12px rgba(0,0,0,.12);display:grid;grid-template-columns:repeat(${grid.cols},${preset.w}mm);grid-auto-rows:${preset.h}mm;align-content:start;overflow:hidden}
+#labelPrintHost .lp-label{width:${preset.w}mm;height:${preset.h}mm;box-sizing:border-box;padding:${pad}mm;display:flex;align-items:center;gap:${small ? 0.6 : 1.2}mm;overflow:hidden;outline:0.2mm dashed #DDD;color:#111}
+#labelPrintHost .lp-label img{width:${qrMm}mm;height:${qrMm}mm;image-rendering:pixelated;flex-shrink:0}
+#labelPrintHost .lp-txt{min-width:0;flex:1;display:flex;flex-direction:column;justify-content:center}
+#labelPrintHost .lp-sku{font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:${small ? 6.5 : 11}pt;letter-spacing:.02em;line-height:1.05}
+#labelPrintHost .lp-name{font-size:${small ? 4.2 : 6}pt;line-height:1.15;margin-top:${small ? 0.3 : 0.8}mm;overflow:hidden;display:-webkit-box;-webkit-line-clamp:${small ? 2 : 3};-webkit-box-orient:vertical;word-break:break-word}
+@media print{
+  @page{size:${pw}mm ${ph}mm;margin:0}
+  html,body{background:white!important}
+  body>*:not(#labelPrintHost){display:none!important}
+  #labelPrintHost{position:static;overflow:visible;background:white}
+  #labelPrintHost .lp-bar{display:none}
+  #labelPrintHost .lp-pages{padding:0;gap:0;display:block}
+  #labelPrintHost .lp-page{box-shadow:none;break-after:page;page-break-after:always}
+  #labelPrintHost .lp-page:last-child{break-after:auto;page-break-after:auto}
+  #labelPrintHost .lp-label{outline:none}
+}`;
+  const btn = { padding: '8px 16px', borderRadius: 99, fontWeight: 700, fontSize: 13, cursor: 'pointer', border: '1.5px solid #D9C9EE', background: 'white', color: '#5B3F8A' };
+  return ReactDOM.createPortal(
+    <div role="dialog" aria-modal="true" aria-label="Vista de impresión de etiquetas">
+      <style>{css}</style>
+      <div className="lp-bar">
+        <button type="button" onClick={onBack} style={btn}>← Volver</button>
+        <button type="button" onClick={() => window.print()} style={{ ...btn, background: 'linear-gradient(135deg,#C0336E,#9B5DE5)', color: 'white', border: 'none' }}>🖨️ Imprimir</button>
+        <span style={{ fontSize: 12, color: '#5B4A63' }}>{view.labels.length} etiqueta{view.labels.length === 1 ? '' : 's'} · {pages.length} página{pages.length === 1 ? '' : 's'} · {preset.name}</span>
+        <button type="button" onClick={onClose} aria-label="Cerrar etiquetas" style={{ ...btn, marginLeft: 'auto' }}>✕</button>
+      </div>
+      <div className="lp-pages">
+        {pages.map((pg, i) => (
+          <div className="lp-page" key={i}>
+            {pg.map((l, j) => l
+              ? <div className="lp-label" key={l.key}>
+                  <img src={l.src} alt={'QR ' + l.sku} />
+                  <div className="lp-txt"><div className="lp-sku">{l.sku}</div><div className="lp-name">{shortName(l.name, small ? 28 : 46)}</div></div>
+                </div>
+              : <div key={'skip' + j} />)}
+          </div>
+        ))}
+      </div>
+    </div>,
+    host
+  );
+}
+
+// ── Registrar fotos (19 nov) — el mayor refuerzo del reconocimiento por foto ──
+// Por cada pieza se guardan 1–3 fotos reales (como se fotografía en el taller) en el Worker
+// (/identify/ref/add, máx. IDENTIFY_REFS_PER_PRODUCT = 10 por pieza). Mismo cálculo de huella
+// que "Identificar" (embedQueryPhoto). Pensado para pasar muchas piezas seguidas.
+const ENROLL_MAX_REFS = 10;
+function EnrollPhotosModal({ products, token, onClose }) {
+  const [counts, setCounts]     = useState(null); // {id: n}
+  const [loadErr, setLoadErr]   = useState('');
+  const [onlyMissing, setOnly]  = useState(true);
+  const [q, setQ]               = useState('');
+  const [curId, setCurId]       = useState(null);
+  const [scan, setScan]         = useState(false);
+  const [busy, setBusy]         = useState(false);
+  const [status, setStatus]     = useState('');
+  const [err, setErr]           = useState('');
+  const [shots, setShots]       = useState([]); // miniaturas guardadas de la pieza actual
+  const [doneCount, setDone]    = useState(0);  // piezas con fotos nuevas en esta sesión
+  const fileRef = useRef(null);
+  const loadCounts = () => {
+    setLoadErr('');
+    apiCall('identify/refs', { token }).then(r => {
+      const out = {};
+      for (const [id, list] of Object.entries((r && r.refs) || {})) out[String(id)] = Array.isArray(list) ? list.length : 0;
+      setCounts(out);
+    }).catch(e => { setCounts({}); setLoadErr(pieceErrMsg(e)); });
+  };
+  useEffect(loadCounts, []);
+  // Precarga el reconocimiento en segundo plano (la 1ra foto no espera tanto).
+  useEffect(() => { loadRecognitionModel().catch(() => {}); }, []);
+  const all = (products || []).filter(p => p && p.available !== false && productImageUrl(p))
+    .sort((a, b) => String(a.category || '').localeCompare(String(b.category || ''), 'es') || normalizeSku(a.sku).localeCompare(normalizeSku(b.sku), 'es', { numeric: true }));
+  const cnt = p => (counts && counts[String(p.id)]) || 0;
+  const missingN = counts ? all.filter(p => !cnt(p)).length : null;
+  const list = all.filter(p => (!onlyMissing || !cnt(p)) && productMatchesSearch(p, q));
+  const cur = curId != null ? (products || []).find(p => String(p.id) === String(curId)) : null;
+  const openProduct = p => { setCurId(p ? String(p.id) : null); setShots([]); setErr(''); setStatus(''); setScan(false); };
+  const nextMissing = () => {
+    const idx = all.findIndex(p => String(p.id) === String(curId));
+    const order = [...all.slice(idx + 1), ...all.slice(0, Math.max(0, idx))];
+    const nx = order.find(p => !cnt(p));
+    if (nx) openProduct(nx);
+    else { openProduct(null); setStatus('🎉 Todas las piezas tienen al menos una foto registrada.'); }
+  };
+  const onScan = code => {
+    const p = findBySku(products, code);
+    setScan(false);
+    if (!p) { setErr('No hay ninguna pieza con el código ' + code + '.'); return; }
+    if (!productImageUrl(p) || p.available === false) { setErr(code + ' (' + p.name + ') está pausada o sin foto en el catálogo: el reconocimiento no la compara.'); return; }
+    openProduct(p);
+  };
+  const onFiles = async e => {
+    const files = Array.from((e.target.files) || []);
+    e.target.value = '';
+    if (!files.length || !cur) return;
+    const room = ENROLL_MAX_REFS - cnt(cur);
+    if (room <= 0) { setErr('Esta pieza ya tiene ' + ENROLL_MAX_REFS + ' fotos registradas (el máximo).'); return; }
+    const batch = files.slice(0, Math.min(3, room));
+    setBusy(true); setErr('');
+    let saved = 0;
+    try {
+      for (let i = 0; i < batch.length; i++) {
+        setStatus(`Procesando foto ${i + 1} de ${batch.length}…`);
+        const ph = await photoToJpegBase64(batch[i], 640, 0.8);
+        const q2 = await embedQueryPhoto(ph.dataUrl);
+        setStatus(`Guardando foto ${i + 1} de ${batch.length}…`);
+        const r = await apiCall('identify/ref/add', { token, id: String(cur.id), vector: quantizeEmb(q2.emb) });
+        saved++;
+        const n = r && Number.isInteger(r.count) ? r.count : cnt(cur) + 1;
+        setCounts(c => ({ ...(c || {}), [String(cur.id)]: n }));
+        setShots(s => [...s, ph.dataUrl]);
+      }
+      if (saved && !shots.length) setDone(d => d + 1);
+      setStatus(`✓ ${saved} foto${saved === 1 ? '' : 's'} guardada${saved === 1 ? '' : 's'} para ${normalizeSku(cur.sku) || cur.name}.` + (files.length > batch.length ? ` (Se usaron ${batch.length}: máximo 3 por vez y ${ENROLL_MAX_REFS} por pieza.)` : ''));
+    } catch (er) {
+      setErr(pieceErrMsg(er) + (saved ? ` (${saved} sí se guardaron)` : ''));
+      setStatus('');
+    }
+    setBusy(false);
+  };
+  const thumb = { width: 44, height: 44, borderRadius: 8, objectFit: 'cover', background: '#F3EFF5', flexShrink: 0 };
+  const bigBtn = { width: '100%', padding: 11, border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 14, cursor: 'pointer' };
+  return (
+    <Modal onClose={onClose} labelledBy="enrollTitle" boxStyle={{ maxWidth: 480, maxHeight: '92vh', overflowY: 'auto', padding: 20 }} overlayStyle={{ padding: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <div id="enrollTitle" style={{ fontWeight: 800, fontSize: 17, color: '#1A1118' }}>📸 Registrar fotos de piezas</div>
+        <button type="button" onClick={onClose} aria-label="Cerrar" style={{ width: 32, height: 32, borderRadius: '50%', background: '#F9F5F7', color: '#7A6880', border: 'none', cursor: 'pointer', fontSize: 16 }}>✕</button>
+      </div>
+      <div style={{ fontSize: 12, color: '#7A6880', marginBottom: 10 }}>
+        Toma 1 a 3 fotos de cada pieza real, como la fotografías al armar un pedido (sobre la mesa, con tu luz). Es lo que más mejora "Identificar por foto".
+        {missingN != null && <> <b style={{ color: missingN ? '#B45309' : '#15803D' }}>{missingN} pieza{missingN === 1 ? '' : 's'} sin fotos</b> de {all.length}.</>}
+        {doneCount > 0 && <> · {doneCount} registrada{doneCount === 1 ? '' : 's'} en esta sesión.</>}
+      </div>
+      {loadErr && <div role="alert" style={{ fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderRadius: 8, padding: '6px 10px', marginBottom: 8 }}>No se pudieron leer las fotos registradas: {loadErr} <button type="button" onClick={loadCounts} style={{ border: 'none', background: 'none', color: '#7C3AED', fontWeight: 700, cursor: 'pointer' }}>Reintentar</button></div>}
+
+      {cur ? (
+        <div>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center', background: '#FAF7FB', borderRadius: 12, padding: 10, marginBottom: 10 }}>
+            <img src={productImageUrl(cur)} alt="" style={{ width: 84, height: 84, borderRadius: 10, objectFit: 'cover' }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <SkuChip sku={cur.sku} style={{ fontSize: 13 }} />
+              <div style={{ fontWeight: 700, fontSize: 14, color: '#1A1118', marginTop: 4 }}>{cur.name}</div>
+              <div style={{ fontSize: 12, color: '#7A6880' }}>{cur.category}</div>
+              <div data-testid="enrollCount" style={{ fontSize: 12, fontWeight: 700, marginTop: 2, color: cnt(cur) ? '#15803D' : '#B45309' }}>{cnt(cur)} / {ENROLL_MAX_REFS} fotos registradas</div>
+            </div>
+          </div>
+          <button type="button" onClick={() => fileRef.current && fileRef.current.click()} disabled={busy || cnt(cur) >= ENROLL_MAX_REFS}
+            style={{ ...bigBtn, background: busy || cnt(cur) >= ENROLL_MAX_REFS ? '#C9B8D3' : 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white' }}>
+            {busy ? 'Guardando…' : cnt(cur) >= ENROLL_MAX_REFS ? 'Máximo de fotos alcanzado' : shots.length ? '📷 Tomar otra foto' : '📷 Tomar foto'}
+          </button>
+          <input ref={fileRef} type="file" accept="image/*" capture="environment" multiple aria-label="Fotos de la pieza para registrar" style={{ display: 'none' }} onChange={onFiles} />
+          <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#15803D', marginTop: 6, minHeight: 4 }}>{status}</div>
+          {err && <div role="alert" style={{ fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderRadius: 8, padding: '6px 10px', marginTop: 6 }}>{err}</div>}
+          {shots.length > 0 && <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>{shots.map((s, i) => <img key={i} src={s} alt={'Foto registrada ' + (i + 1)} style={thumb} />)}</div>}
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button type="button" onClick={() => openProduct(null)} style={{ ...bigBtn, flex: 1, background: '#F3EFF5', color: '#5B3F8A', fontSize: 13 }}>← Lista</button>
+            <button type="button" onClick={nextMissing} disabled={busy} style={{ ...bigBtn, flex: 2, background: '#1A1118', color: 'white', fontSize: 13 }}>Siguiente pieza sin fotos →</button>
+          </div>
+        </div>
+      ) : scan ? (
+        <div>
+          <QrScanPanel idPrefix="enrollQr" onCode={onScan} />
+          <button type="button" onClick={() => setScan(false)} style={{ ...bigBtn, marginTop: 8, background: '#F3EFF5', color: '#5B3F8A', fontSize: 13 }}>Cancelar</button>
+        </div>
+      ) : (
+        <div>
+          <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#15803D', minHeight: 4 }}>{status}</div>
+          {err && <div role="alert" style={{ fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderRadius: 8, padding: '6px 10px', marginBottom: 6 }}>{err}</div>}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+            <button type="button" onClick={() => { setErr(''); setStatus(''); setScan(true); }} style={{ ...bigBtn, flex: 1, background: '#F1EAFB', color: '#5B3F8A', fontSize: 13 }}>Escanear etiqueta</button>
+            <button type="button" disabled={!counts || !missingN} onClick={() => { const nx = all.find(p => !cnt(p)); if (nx) openProduct(nx); }} style={{ ...bigBtn, flex: 1, background: !counts || !missingN ? '#C9B8D3' : '#1A1118', color: 'white', fontSize: 13 }}>Empezar por la 1ra sin fotos</button>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+            <label htmlFor="enrollSearch" style={srOnlyStyle}>Buscar pieza</label>
+            <input id="enrollSearch" value={q} onChange={e => setQ(e.target.value)} placeholder="Buscar por nombre o código…"
+              style={{ flex: 1, padding: '8px 10px', border: '1.5px solid #E5DDEA', borderRadius: 8, fontSize: 13, outline: 'none', fontFamily: 'inherit' }} />
+            <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: '#5B4A63', whiteSpace: 'nowrap' }}>
+              <input type="checkbox" checked={onlyMissing} onChange={e => setOnly(e.target.checked)} /> Sin fotos
+            </label>
+          </div>
+          {!counts ? <div style={{ fontSize: 12, color: '#7A6880' }}>Cargando…</div> : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {!list.length && <div style={{ fontSize: 12, color: '#7A6880' }}>{onlyMissing && !q ? 'Todas las piezas tienen fotos registradas.' : 'Sin resultados.'}</div>}
+              {list.map(p => (
+                <button type="button" key={p.id} onClick={() => openProduct(p)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', padding: 6, background: cnt(p) ? '#FAF7FB' : '#FFF7ED', border: cnt(p) ? '1.5px solid #EDE3F1' : '1.5px solid #FCD9A8', borderRadius: 10, cursor: 'pointer', fontFamily: 'inherit' }}>
+                  <img src={productImageUrl(p)} alt="" style={thumb} />
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#1A1118', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
+                    <span style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 11, color: '#7A6880' }}><SkuChip sku={p.sku} />{p.category}</span>
+                  </span>
+                  <span style={{ fontWeight: 800, fontSize: 12, color: cnt(p) ? '#15803D' : '#B45309', background: cnt(p) ? '#DCFCE7' : '#FEF3C7', borderRadius: 99, padding: '3px 9px', flexShrink: 0 }}>
+                    {cnt(p)} foto{cnt(p) === 1 ? '' : 's'}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </Modal>
+  );
+}
+const srOnlyStyle = { position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clip: 'rect(0,0,0,0)', whiteSpace: 'nowrap', border: 0 };
+
+// ── Agregar pieza a un pedido (18–19 nov) ──
+// 3 caminos: escanear la etiqueta QR, escribir el código (AN001) o identificar por foto
+// (MobileNet, ver arriba). El código resuelve la pieza directo → confirmar (con stock) → agregar.
 function AddPieceModal({ order, token, photo, products, categories, stock, onRetake, onClose, onAdded }) {
+  const [mode, setMode]       = React.useState(photo ? 'photo' : 'choose'); // choose | scan | type | photo
   const [cat, setCat]         = React.useState('Todas');
   const [busy, setBusy]       = React.useState(false);
   const [adding, setAdding]   = React.useState(null); // id que se está agregando
@@ -2546,16 +3206,23 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
   const [matches, setMatches] = React.useState(null); // null = todavía no se identificó
   const [manual, setManual]   = React.useState(false);
   const [query, setQuery]     = React.useState('');
-  const [prep, setPrep]       = React.useState({ phase: 'model', done: 0, total: 0, failed: 0 });
+  const [code, setCode]       = React.useState('');
+  const [codeMsg, setCodeMsg] = React.useState('');
+  const [confirmP, setConfirmP] = React.useState(null); // producto resuelto por código
+  const [prep, setPrep]       = React.useState({ phase: 'idle', done: 0, total: 0, failed: 0 });
   const prepRef  = React.useRef(null);  // promesa: catálogo con huellas listo
   const refsRef  = React.useRef({});    // referencias aprendidas {id: [Float32Array]}
   const queryRef = React.useRef(null);  // huella de la foto actual {emb, color, src}
-  React.useEffect(() => { setMatches(null); setErrMsg(''); }, [photo && photo.dataUrl]);
+  React.useEffect(() => { setMatches(null); setErrMsg(''); if (photo) { setMode('photo'); setConfirmP(null); } }, [photo && photo.dataUrl]);
   const cats = ['Todas', ...((categories && categories.length) ? categories : DEFAULT_CATEGORIES)];
+  const recogOn = mode === 'photo';
 
-  // Al abrir: carga el modelo y prepara las huellas del catálogo (caché en IndexedDB).
+  // Al pasar a "por foto" (la 1ra vez): carga el modelo y prepara las huellas del catálogo
+  // (caché en IndexedDB). Escanear o escribir el código no descarga nada de esto.
   React.useEffect(() => {
+    if (!recogOn || prepRef.current) return;
     let alive = true;
+    setPrep({ phase: 'model', done: 0, total: 0, failed: 0 });
     prepRef.current = (async () => {
       await loadRecognitionModel();
       const res = await prepareCatalogEmbeddings(products, (d, t) => { if (alive) setPrep(s => ({ ...s, phase: 'catalog', done: d, total: t })); });
@@ -2572,17 +3239,17 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
       refsRef.current = out;
     }).catch(e => console.warn('identify/refs:', e && e.message));
     return () => { alive = false; };
-  }, []);
+  }, [recogOn]);
 
   const identify = async () => {
-    if (!photo || busy) return;
+    if (!photo || busy || !prepRef.current) return;
     setBusy(true); setErrMsg(''); setMatches(null);
     try {
       const catalog = await prepRef.current;
       let q = queryRef.current;
       if (!q || q.src !== photo.dataUrl) { q = { ...(await embedQueryPhoto(photo.dataUrl)), src: photo.dataUrl }; queryRef.current = q; }
       const ranked = rankCatalog(q, catalog.items, refsRef.current, cat, 5);
-      setMatches(ranked.map(r => ({ id: String(r.p.id), name: r.p.name, category: r.p.category, imageUrl: productImageUrl(r.p), pct: friendlyPct(r.score) })));
+      setMatches(ranked.map(r => ({ id: String(r.p.id), name: r.p.name, sku: normalizeSku(r.p.sku), category: r.p.category, imageUrl: productImageUrl(r.p), pct: friendlyPct(r.score) })));
     } catch (e) { setErrMsg(pieceErrMsg(e)); }
     setBusy(false);
   };
@@ -2601,89 +3268,151 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
       const res = await apiCall('order/update', { token, id: order.id, patch: { addProductIds: [String(pid)] } });
       // Aprende de esta foto (la próxima vez la reconoce mejor). Sin esperar ni bloquear.
       const q = queryRef.current;
-      if (q && photo && q.src === photo.dataUrl) {
+      if (mode === 'photo' && q && photo && q.src === photo.dataUrl) {
         apiCall('identify/ref/add', { token, id: String(pid), vector: quantizeEmb(q.emb) }).catch(e => console.warn('identify/ref/add:', e && e.message));
       }
       onAdded((res.order && res.order.productos) || null, name);
     } catch (e) { setErrMsg(pieceErrMsg(e)); setAdding(null); }
   };
+  // Código escaneado o escrito → pieza (o mensaje claro si no existe).
+  const resolveCode = raw => {
+    const c = extractSku(raw);
+    setErrMsg('');
+    if (!c) { setCodeMsg('Escribe el código de la etiqueta (ej: AN001).'); return; }
+    const p = findBySku(products, c);
+    if (!p) { setCodeMsg('No hay ninguna pieza con el código ' + c + '. Revisa la etiqueta o búscala a mano.'); setConfirmP(null); setMode('type'); setCode(c); return; }
+    setCodeMsg(''); setConfirmP(p);
+  };
   const q = query.trim().toLowerCase();
-  const manualList = q
-    ? (products || []).filter(p => String(p.name || '').toLowerCase().includes(q) || String(p.id) === q).slice(0, 30)
-    : [];
+  const manualList = q ? (products || []).filter(p => productMatchesSearch(p, q)).slice(0, 30) : [];
   const thumb = { width: 56, height: 56, borderRadius: 10, objectFit: 'cover', background: '#F3EFF5', flexShrink: 0 };
   const optBtn = { display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', padding: 8, background: '#FAF7FB', border: '1.5px solid #EDE3F1', borderRadius: 12, cursor: 'pointer', fontFamily: 'inherit' };
+  const choiceBtn = { display: 'flex', alignItems: 'center', gap: 12, width: '100%', textAlign: 'left', padding: '12px 14px', background: 'white', border: '1.5px solid #E5D7EE', borderRadius: 14, cursor: 'pointer', fontFamily: 'inherit', fontSize: 14, fontWeight: 700, color: '#1A1118' };
+  const backBtn = { fontSize: 12, fontWeight: 700, color: '#7A5F8A', background: '#F3EFF5', border: 'none', borderRadius: 8, padding: '7px 10px', cursor: 'pointer' };
+  const goPhoto = () => { setConfirmP(null); setCodeMsg(''); if (photo) setMode('photo'); else onRetake && onRetake(); };
 
   return (
     <Modal onClose={onClose} labelledBy={`addPieceTitle-${order.id}`} boxStyle={{ maxWidth: 440, maxHeight: '90vh', overflowY: 'auto', padding: 20 }} overlayStyle={{ padding: 12 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <div id={`addPieceTitle-${order.id}`} style={{ fontWeight: 800, fontSize: 17, color: '#1A1118' }}>📷 Agregar pieza con foto</div>
+        <div id={`addPieceTitle-${order.id}`} style={{ fontWeight: 800, fontSize: 17, color: '#1A1118' }}>Agregar pieza al pedido</div>
         <button type="button" onClick={onClose} aria-label="Cerrar" style={{ width: 32, height: 32, borderRadius: '50%', background: '#F9F5F7', color: '#7A6880', border: 'none', cursor: 'pointer', fontSize: 16 }}>✕</button>
       </div>
 
-      {photo && (
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12 }}>
-          <img src={photo.dataUrl} alt="Foto de la pieza a identificar" style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 12, border: '1px solid #EDE3F1' }} />
-          <button type="button" onClick={onRetake}
-            style={{ fontSize: 12, fontWeight: 700, color: '#7A5F8A', background: '#F3EFF5', border: 'none', borderRadius: 8, padding: '7px 10px', cursor: 'pointer' }}>
-            🔄 Tomar otra foto
+      {confirmP ? (
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63', marginBottom: 6 }}>¿Es esta la pieza?</div>
+          <div data-testid="pieceConfirm" style={{ ...optBtn, cursor: 'default', alignItems: 'flex-start' }}>
+            {productImageUrl(confirmP) ? <img src={productImageUrl(confirmP)} alt="" style={{ ...thumb, width: 72, height: 72 }} /> : <div style={{ ...thumb, width: 72, height: 72 }} />}
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <SkuChip sku={normalizeSku(confirmP.sku)} style={{ fontSize: 12 }} />
+              <span style={{ display: 'block', fontWeight: 700, fontSize: 14, color: '#1A1118', marginTop: 4 }}>{confirmP.name}</span>
+              <span style={{ display: 'block', fontSize: 11, color: '#7A6880' }}>{confirmP.category}{confirmP.available === false ? ' · pausado' : ''}</span>
+              {stockNote(confirmP.id)}
+            </span>
+          </div>
+          <button type="button" onClick={() => pick(confirmP.id, confirmP.name)} disabled={!!adding}
+            style={{ marginTop: 10, width: '100%', padding: 11, background: adding ? '#C9B8D3' : 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 14, cursor: adding ? 'default' : 'pointer' }}>
+            {adding ? 'Agregando…' : '✓ Agregar al pedido'}
+          </button>
+          <button type="button" onClick={() => { setConfirmP(null); setMode('choose'); }} style={{ ...backBtn, marginTop: 8 }}>← No es esta</button>
+        </div>
+      ) : mode === 'choose' ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <button type="button" onClick={() => { setCodeMsg(''); setMode('scan'); }} style={choiceBtn}>
+            <span aria-hidden="true" style={{ fontSize: 20, color: '#9B5DE5' }}>▣</span>
+            <span>Escanear etiqueta (QR)<span style={{ display: 'block', fontSize: 11, fontWeight: 500, color: '#7A6880' }}>Con la cámara, al instante</span></span>
+          </button>
+          <button type="button" onClick={() => { setCodeMsg(''); setMode('type'); }} style={choiceBtn}>
+            <span aria-hidden="true" style={{ fontSize: 18, color: '#9B5DE5', fontFamily: 'ui-monospace, Menlo, monospace' }}>#</span>
+            <span>Escribir código<span style={{ display: 'block', fontSize: 11, fontWeight: 500, color: '#7A6880' }}>El de la etiqueta, ej: AN001</span></span>
+          </button>
+          <button type="button" onClick={goPhoto} style={choiceBtn}>
+            <span aria-hidden="true" style={{ fontSize: 18, color: '#9B5DE5' }}>◎</span>
+            <span>Identificar por foto<span style={{ display: 'block', fontSize: 11, fontWeight: 500, color: '#7A6880' }}>Para piezas sin etiqueta</span></span>
           </button>
         </div>
-      )}
+      ) : mode === 'scan' ? (
+        <div>
+          <QrScanPanel idPrefix={`addPieceQr-${order.id}`} onCode={c => resolveCode(c)} />
+          <button type="button" onClick={() => setMode('choose')} style={{ ...backBtn, marginTop: 8 }}>← Otras opciones</button>
+        </div>
+      ) : mode === 'type' ? (
+        <form onSubmit={e => { e.preventDefault(); resolveCode(code); }}>
+          <label htmlFor={`addPieceCode-${order.id}`} style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63', display: 'block', marginBottom: 6 }}>Código de la etiqueta</label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input id={`addPieceCode-${order.id}`} value={code} onChange={e => { setCode(e.target.value); setCodeMsg(''); }} placeholder="AN001" autoFocus
+              autoCapitalize="characters" autoComplete="off" spellCheck={false}
+              style={{ flex: 1, minWidth: 0, padding: '10px 12px', border: '1.5px solid #E5D7EE', borderRadius: 10, fontSize: 18, fontWeight: 800, letterSpacing: '.06em', fontFamily: 'ui-monospace, Menlo, monospace', textTransform: 'uppercase', outline: 'none' }} />
+            <button type="submit" style={{ padding: '0 16px', background: 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', border: 'none', borderRadius: 10, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>Buscar</button>
+          </div>
+          <button type="button" onClick={() => setMode('choose')} style={{ ...backBtn, marginTop: 8 }}>← Otras opciones</button>
+        </form>
+      ) : (
+        <div>
+          {photo && (
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12 }}>
+              <img src={photo.dataUrl} alt="Foto de la pieza a identificar" style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 12, border: '1px solid #EDE3F1' }} />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <button type="button" onClick={onRetake} style={backBtn}>🔄 Tomar otra foto</button>
+                <button type="button" onClick={() => setMode('choose')} style={backBtn}>← Escanear o escribir código</button>
+              </div>
+            </div>
+          )}
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63', marginBottom: 6 }} id={`addPieceCats-${order.id}`}>Categoría</div>
+          <div role="group" aria-labelledby={`addPieceCats-${order.id}`} style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
+            {cats.map(c => (
+              <button type="button" key={c} onClick={() => setCat(c)} aria-pressed={cat === c}
+                style={{ fontSize: 12, fontWeight: 700, padding: '5px 10px', borderRadius: 99, cursor: 'pointer', border: cat === c ? '1.5px solid #E8508A' : '1.5px solid #EDE3F1', background: cat === c ? '#FCE8F3' : 'white', color: cat === c ? '#C0336E' : '#5B4A63' }}>
+                {c}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: '#7A6880', marginBottom: 6 }}>💡 Elegir la categoría ayuda a acertar.</div>
+          <div style={{ fontSize: 11, color: '#7A6880', marginBottom: 10 }} aria-live="polite">
+            {prep.phase === 'model' && 'Cargando el reconocimiento (la primera vez descarga ~16 MB)…'}
+            {prep.phase === 'catalog' && `Preparando el catálogo… ${prep.done}/${prep.total}`}
+            {prep.phase === 'ready' && (prep.failed ? `✓ Catálogo listo · ${prep.failed} pieza${prep.failed === 1 ? '' : 's'} sin foto utilizable` : '✓ Catálogo listo')}
+          </div>
+          {prep.phase === 'error' && <div role="alert" style={{ fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderRadius: 8, padding: '8px 10px', marginBottom: 8 }}>{prep.error} Puedes buscar la pieza a mano.</div>}
 
-      <div style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63', marginBottom: 6 }} id={`addPieceCats-${order.id}`}>Categoría</div>
-      <div role="group" aria-labelledby={`addPieceCats-${order.id}`} style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
-        {cats.map(c => (
-          <button type="button" key={c} onClick={() => setCat(c)} aria-pressed={cat === c}
-            style={{ fontSize: 12, fontWeight: 700, padding: '5px 10px', borderRadius: 99, cursor: 'pointer', border: cat === c ? '1.5px solid #E8508A' : '1.5px solid #EDE3F1', background: cat === c ? '#FCE8F3' : 'white', color: cat === c ? '#C0336E' : '#5B4A63' }}>
-            {c}
+          <button type="button" onClick={identify} disabled={!photo || busy}
+            style={{ width: '100%', padding: '10px', background: busy ? '#C9B8D3' : 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 13, cursor: busy ? 'default' : 'pointer' }}>
+            {busy ? 'Identificando…' : '✨ Identificar'}
           </button>
-        ))}
-      </div>
-      <div style={{ fontSize: 11, color: '#7A6880', marginBottom: 6 }}>💡 Elegir la categoría ayuda a acertar.</div>
-      <div style={{ fontSize: 11, color: '#7A6880', marginBottom: 10 }} aria-live="polite">
-        {prep.phase === 'model' && 'Cargando el reconocimiento (la primera vez descarga ~16 MB)…'}
-        {prep.phase === 'catalog' && `Preparando el catálogo… ${prep.done}/${prep.total}`}
-        {prep.phase === 'ready' && (prep.failed ? `✓ Catálogo listo · ${prep.failed} pieza${prep.failed === 1 ? '' : 's'} sin foto utilizable` : '✓ Catálogo listo')}
-      </div>
-      {prep.phase === 'error' && <div role="alert" style={{ fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderRadius: 8, padding: '8px 10px', marginBottom: 8 }}>{prep.error} Puedes buscar la pieza a mano.</div>}
-
-      <button type="button" onClick={identify} disabled={!photo || busy}
-        style={{ width: '100%', padding: '10px', background: busy ? '#C9B8D3' : 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 13, cursor: busy ? 'default' : 'pointer' }}>
-        {busy ? 'Identificando…' : '✨ Identificar'}
-      </button>
-      <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#7A6880', minHeight: 4, marginTop: 6 }}>
-        {busy ? (prep.phase === 'ready' ? 'Comparando con el catálogo…' : 'Esperando a que el catálogo esté listo…') : (matches && !matches.length ? 'No se encontró una pieza parecida. Prueba otra foto u otra categoría, o búscala a mano.' : '')}
-      </div>
+          <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#7A6880', minHeight: 4, marginTop: 6 }}>
+            {busy ? (prep.phase === 'ready' ? 'Comparando con el catálogo…' : 'Esperando a que el catálogo esté listo…') : (matches && !matches.length ? 'No se encontró una pieza parecida. Prueba otra foto u otra categoría, o búscala a mano.' : '')}
+          </div>
+          {matches && matches.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63' }}>Toca la pieza correcta:</div>
+              {matches.map(m => (
+                <button type="button" key={m.id} onClick={() => pick(m.id, m.name)} disabled={!!adding} style={{ ...optBtn, opacity: adding && adding !== String(m.id) ? 0.5 : 1 }}>
+                  {m.imageUrl ? <img src={m.imageUrl} alt="" style={thumb} /> : <div style={thumb} />}
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <span style={{ display: 'block', fontWeight: 700, fontSize: 13, color: '#1A1118' }}>{m.name}</span>
+                    <span style={{ display: 'block', fontSize: 11, color: '#7A6880' }}>{m.sku ? m.sku + ' · ' : ''}{m.category}</span>
+                    {stockNote(m.id)}
+                  </span>
+                  <span style={{ fontWeight: 800, fontSize: 13, color: '#C0336E', flexShrink: 0 }}>{adding === String(m.id) ? '…' : m.pct + '%'}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#B45309', marginTop: codeMsg ? 8 : 0 }}>{codeMsg}</div>
       {errMsg && <div role="alert" aria-live="assertive" style={{ fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderRadius: 8, padding: '8px 10px', marginTop: 6 }}>{errMsg}</div>}
-
-      {matches && matches.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63' }}>Toca la pieza correcta:</div>
-          {matches.map(m => (
-            <button type="button" key={m.id} onClick={() => pick(m.id, m.name)} disabled={!!adding} style={{ ...optBtn, opacity: adding && adding !== String(m.id) ? 0.5 : 1 }}>
-              {m.imageUrl ? <img src={m.imageUrl} alt="" style={thumb} /> : <div style={thumb} />}
-              <span style={{ flex: 1, minWidth: 0 }}>
-                <span style={{ display: 'block', fontWeight: 700, fontSize: 13, color: '#1A1118' }}>{m.name}</span>
-                <span style={{ display: 'block', fontSize: 11, color: '#7A6880' }}>{m.category}</span>
-                {stockNote(m.id)}
-              </span>
-              <span style={{ fontWeight: 800, fontSize: 13, color: '#C0336E', flexShrink: 0 }}>{adding === String(m.id) ? '…' : m.pct + '%'}</span>
-            </button>
-          ))}
-        </div>
-      )}
 
       <div style={{ borderTop: '1px solid #EDE8EA', marginTop: 14, paddingTop: 10 }}>
         {!manual ? (
           <button type="button" onClick={() => setManual(true)}
             style={{ fontSize: 12, fontWeight: 700, color: '#7A5F8A', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
-            🔍 Ninguna es / buscar a mano
+            🔍 Buscar a mano
           </button>
         ) : (
           <div>
             <label htmlFor={`addPieceSearch-${order.id}`} style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63', display: 'block', marginBottom: 6 }}>Buscar en el catálogo</label>
-            <input id={`addPieceSearch-${order.id}`} value={query} onChange={e => setQuery(e.target.value)} placeholder="Nombre de la pieza…"
+            <input id={`addPieceSearch-${order.id}`} value={query} onChange={e => setQuery(e.target.value)} placeholder="Nombre o código (AN001)…"
               style={{ width: '100%', boxSizing: 'border-box', padding: '8px 10px', border: '1.5px solid #EDE3F1', borderRadius: 8, fontSize: 13, outline: 'none', fontFamily: 'inherit' }} />
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
               {q && !manualList.length && <div style={{ fontSize: 12, color: '#7A6880' }}>Sin resultados.</div>}
@@ -2691,7 +3420,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
                 <button type="button" key={p.id} onClick={() => pick(p.id, p.name)} disabled={!!adding} style={{ ...optBtn, padding: 6, opacity: adding && adding !== String(p.id) ? 0.5 : 1 }}>
                   {productImageUrl(p) ? <img src={productImageUrl(p)} alt="" style={{ ...thumb, width: 40, height: 40 }} /> : <div style={{ ...thumb, width: 40, height: 40 }} />}
                   <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: '#1A1118' }}>
-                    {p.name}<span style={{ fontSize: 11, color: '#7A6880' }}> · {p.category}{p.available === false ? ' · pausado' : ''}</span>
+                    {p.name}<span style={{ fontSize: 11, color: '#7A6880' }}> · {p.sku ? normalizeSku(p.sku) + ' · ' : ''}{p.category}{p.available === false ? ' · pausado' : ''}</span>
                     {stockNote(p.id)}
                   </span>
                   {adding === String(p.id) && <span style={{ fontWeight: 800, color: '#C0336E' }}>…</span>}
@@ -3010,6 +3739,7 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
           <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, fontSize: 13, color: '#1A1118', padding: '2px 0' }}>
             <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
               {p.addedBy && productImageUrl(p) && <img src={productImageUrl(p)} alt="" style={{ width: 24, height: 24, borderRadius: 6, objectFit: 'cover', flexShrink: 0 }} />}
+              {(() => { const cp = p.id != null && (products || []).find(x => String(x.id) === String(p.id)); return cp && cp.sku ? <SkuChip sku={normalizeSku(cp.sku)} /> : null; })()}
               <span>{p.name}{p.personalization ? <span style={{ color: '#E8508A' }}> "{p.personalization}"</span> : null}</span>
             </span>
             <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
@@ -3032,9 +3762,9 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
         </div>
         {canLoadPieces && (
           <>
-            <button type="button" onClick={() => pieceInputRef.current && pieceInputRef.current.click()}
+            <button type="button" onClick={() => { setPieceErr(''); setPiecePhoto(null); setPieceOpen(true); }}
               style={{ marginTop: 8, width: '100%', padding: '8px', background: '#F3EFF5', color: '#7A5F8A', border: '1.5px dashed #C9B8D3', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
-              📷 Agregar pieza con foto
+              + Agregar pieza (etiqueta QR, código o foto)
             </button>
             <input ref={pieceInputRef} type="file" accept="image/*" capture="environment" aria-label="Foto de la pieza"
               style={{ display: 'none' }} onChange={handlePieceFile} />
@@ -3480,6 +4210,17 @@ function LandingTab({ home, setHome, products, setDirty, texts, setTexts }) {
     if (id) cur[cat] = id; else delete cur[cat];
     setHomeField('collectionPhotoIds', cur);
   };
+  // "Nuestra historia" (#storyImg2/#storyImg3): hasta 2 piezas; al elegir una 3ra se suelta la más vieja.
+  const toggleStory = (id) => {
+    const cur = Array.isArray(home.storyPhotoIds) ? home.storyPhotoIds : [];
+    setHomeField('storyPhotoIds', cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id].slice(-2));
+  };
+  // Banda de Navidad: una foto por tarjeta (u30 = menos de $30, u60 = de $30 a $60, name = con su nombre).
+  const setXmasPhoto = (key, id) => {
+    const cur = { ...((home.xmasPhotoIds && typeof home.xmasPhotoIds === 'object') ? home.xmasPhotoIds : {}) };
+    if (id && cur[key] !== id) cur[key] = id; else delete cur[key];
+    setHomeField('xmasPhotoIds', cur);
+  };
 
   const inp = { padding: '10px 13px', border: '1.5px solid #e4e4e4', borderRadius: 10, fontSize: 14, outline: 'none', width: '100%', boxSizing: 'border-box' };
   const lbl = { display: 'block', fontSize: 11, fontWeight: 600, color: '#777', letterSpacing: '.11em', textTransform: 'uppercase', marginBottom: 5 };
@@ -3493,6 +4234,16 @@ function LandingTab({ home, setHome, products, setDirty, texts, setTexts }) {
   const COLLECTION_CATS = ['Cadenas', 'Anillos', 'Hombres', 'Pulseras', 'Aretes'];
   const availProds = products.filter(p => p.available !== false);
   const availPhotoProds = availProds.filter(p => p.imageUrl);
+  const storySel = Array.isArray(home.storyPhotoIds) ? home.storyPhotoIds : [];
+  const xmasSel = (home.xmasPhotoIds && typeof home.xmasPhotoIds === 'object') ? home.xmasPhotoIds : {};
+  // Mismo precio que usa la tarjeta en el home (promo vigente si hay; sin recargo con tarjeta).
+  const _now = new Date();
+  const homePrice = p => (p.promo && p.promo.price && !(p.promo.endsAt && new Date(p.promo.endsAt) < _now)) ? Number(p.promo.price) : Number(p.price);
+  const XMAS_SLOTS = [
+    { key: 'u30', title: 'Menos de $30', list: availPhotoProds.filter(p => homePrice(p) < 30) },
+    { key: 'u60', title: 'De $30 a $60', list: availPhotoProds.filter(p => homePrice(p) >= 30 && homePrice(p) < 60) },
+    { key: 'name', title: 'Con su nombre', list: availPhotoProds.filter(p => p.personalized) }
+  ];
 
   return (
     <div style={{ maxWidth: 620, margin: '0 auto' }}>
@@ -3541,6 +4292,31 @@ function LandingTab({ home, setHome, products, setDirty, texts, setTexts }) {
           Elige qué producto representa la foto de cada categoría en esa sección de la portada. Abre una categoría para elegir solo entre sus propios productos. Si no eliges ninguno, se usa automáticamente el primero disponible con foto de esa categoría.
         </div>
         <CollectionPhotoPicker products={availPhotoProds} categories={COLLECTION_CATS} selection={collectionPhotos} onSelect={setCollectionPhoto} />
+      </div>
+
+      {/* ── Fotos de "Nuestra historia" ── */}
+      <div style={card} data-testid="storyPicker">
+        <div style={{ fontWeight: 800, fontSize: 15, color: '#1A1118', marginBottom: 4 }}>🖼️ Fotos de "Nuestra historia"</div>
+        <div style={{ fontSize: 12, color: '#7A6B85', marginBottom: 16 }}>
+          Elige hasta 2 piezas para las 2 fotos chicas junto al texto de "Artesanos del corazón" (la 1ra arriba, la 2da abajo). Si no eliges ninguna, se usan fotos recientes de Instagram (o, si no cargan, piezas del catálogo automáticamente). {storySel.length ? `Elegidas: ${storySel.length} de 2.` : ''}
+        </div>
+        <CategoryProductPicker products={availPhotoProds} selectedIds={storySel} onToggle={toggleStory} emptyMsg="No hay productos con foto disponibles aún." />
+      </div>
+
+      {/* ── Fotos de la banda de Navidad ── */}
+      <div style={card} data-testid="xmasPicker">
+        <div style={{ fontWeight: 800, fontSize: 15, color: '#1A1118', marginBottom: 4 }}>🎄 Fotos de la banda "Regalos de Navidad"</div>
+        <div style={{ fontSize: 12, color: '#7A6B85', marginBottom: 16 }}>
+          Una pieza para la foto de cada tarjeta (solo se muestra mientras la campaña de Navidad está activa, ver Ajustes). Cada tarjeta ofrece solo las piezas que le corresponden; si no eliges, o la pieza deja de estar disponible o de calzar en el rango, se elige una automáticamente.
+        </div>
+        {XMAS_SLOTS.map(sl => (
+          <div key={sl.key} style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63', marginBottom: 6 }}>
+              {sl.title}{xmasSel[sl.key] && products.find(p => p.id === xmasSel[sl.key]) ? <span style={{ fontWeight: 600, color: '#E85D8A' }}> · {products.find(p => p.id === xmasSel[sl.key]).name}</span> : <span style={{ fontWeight: 400, color: '#7A6B85' }}> · automática</span>}
+            </div>
+            <CategoryProductPicker products={sl.list} selectedIds={xmasSel[sl.key] != null ? [xmasSel[sl.key]] : []} onToggle={id => setXmasPhoto(sl.key, id)} emptyMsg="No hay piezas con foto en este grupo." />
+          </div>
+        ))}
       </div>
 
       {/* ── Quiénes somos ── */}
@@ -6211,6 +6987,9 @@ function App() {
   const [fbSurcharges, setFbSurcharges]     = useState({});
   const [fbMarkets, setFbMarkets]           = useState({});
   const [combos, setCombos]                 = useState([]);
+  const [skuSeq, setSkuSeq]                 = useState({}); // config.skuSeq: último número entregado por prefijo
+  const [showLabels, setShowLabels]         = useState(false);
+  const [showEnroll, setShowEnroll]         = useState(false);
   const [tiktokExportBusy, setTiktokExportBusy] = useState(false);
   const [tiktokExportMsg, setTiktokExportMsg]   = useState('');
   const [tiktokMeta, setTiktokMeta]             = useState(null);
@@ -6330,6 +7109,7 @@ function App() {
         setProducts(prods.map(p => ({ ...p, available: p.available !== false })));
         if (Array.isArray(data.combos)) setCombos(data.combos);
         const cfg = (data.config || {});
+        setSkuSeq((cfg.skuSeq && typeof cfg.skuSeq === 'object' && !Array.isArray(cfg.skuSeq)) ? cfg.skuSeq : {});
         setWhatsappNum(data.whatsapp || cfg.whatsapp || '');
         if (Array.isArray(cfg.categories) && cfg.categories.length) setCategories(cfg.categories);
         if (Array.isArray(cfg.materials)  && cfg.materials.length)  setMaterials(cfg.materials);
@@ -6452,6 +7232,13 @@ function App() {
       if (failedTr.length) {
         alert('⚠️ No se pudo traducir automáticamente al inglés (texto muy largo para el traductor gratuito) en estos productos — quedaron con el texto en español como respaldo, revísalos y corrígelos a mano en "Nombre/descripción en inglés":\n\n' + failedTr.join('\n'));
       }
+      // Código de producto: toda pieza sin código recibe el siguiente libre de su categoría, y
+      // config.skuSeq guarda el número más alto entregado por prefijo (nunca se reusa).
+      const asg = assignMissingSkus(prodsOut, skuSeq);
+      if (asg.assigned) { prodsOut = asg.products; setProducts(prodsOut); }
+      const seqOut = { ...asg.seq };
+      prodsOut.forEach(p => { const s = normalizeSku(p.sku); if (SKU_RE.test(s)) { const k = s.slice(0, 2), n = parseInt(s.slice(2), 10); if (!(seqOut[k] >= n)) seqOut[k] = n; } });
+      setSkuSeq(seqOut);
       setSyncMsg('☁️ Guardando de forma segura…');
       const json = JSON.stringify({
         version: '1.0',
@@ -6462,6 +7249,7 @@ function App() {
           whatsapp: whatsappNum, categories, materials, shipping,
           texts, texts_en, home, home_en, lovers, lovers_en, pages, pages_en,
           campaign,
+          skuSeq: seqOut,
           translations: enRef.current.translations || undefined
         },
         products: prodsOut,
@@ -6483,7 +7271,18 @@ function App() {
   };
 
   const saveProduct = async p => {
-    const { surcharge, market, marketEC, marketUS, promoEnabled, promoPrice, promoLabel, promoEndsAt, ...prodData } = p;
+    const { surcharge, market, marketEC, marketUS, promoEnabled, promoPrice, promoLabel, promoEndsAt, ...prodRaw } = p;
+    // Código de producto: se conserva el que ya tiene (aunque cambie de categoría); una pieza
+    // nueva recibe el siguiente número libre de su categoría (máximo existente + 1, nunca reusado).
+    let prodData = prodRaw;
+    if (SKU_RE.test(normalizeSku(prodRaw.sku))) prodData = { ...prodRaw, sku: normalizeSku(prodRaw.sku) };
+    else {
+      const others = products.filter(x => x.id !== prodRaw.id);
+      const prefix = skuPrefixFor(prodRaw.category, others);
+      const n = skuMaxNumber(prefix, others, skuSeq) + 1;
+      prodData = { ...prodRaw, sku: formatSku(prefix, n) };
+      setSkuSeq(s => ({ ...s, [prefix]: Math.max(n, Number.isInteger(s[prefix]) ? s[prefix] : 0) }));
+    }
     setProducts(prev => {
       const i = prev.findIndex(x => x.id === prodData.id);
       return i > -1 ? prev.map((x, j) => j === i ? prodData : x) : [...prev, prodData];
@@ -6552,7 +7351,7 @@ function App() {
 
   const filtered = products.filter(p => {
     if (filter !== 'all' && p.category !== filter) return false;
-    if (search && !p.name.toLowerCase().includes(search.toLowerCase()) && !(p.description || '').toLowerCase().includes(search.toLowerCase())) return false;
+    if (search && !productMatchesSearch(p, search)) return false;
     return true;
   });
   const activeCount = products.filter(p => p.available !== false).length;
@@ -6683,7 +7482,7 @@ function App() {
           <div>
             {/* Toolbar */}
             <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
-              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="🔍 Buscar por nombre o descripción…"
+              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="🔍 Buscar por nombre, descripción o código (AN001)…" aria-label="Buscar productos"
                 style={{ flex: 1, minWidth: 200, padding: '10px 14px', border: '1.5px solid #e0e0e0', borderRadius: 10, fontSize: 14, outline: 'none', background: 'white' }} />
               <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
                 {['all', ...categories].map(cat => {
@@ -6700,7 +7499,17 @@ function App() {
                 style={{ padding: '10px 20px', background: 'linear-gradient(135deg,#C0336E,#9B5DE5)', color: 'white', borderRadius: 99, fontWeight: 700, fontSize: 13, boxShadow: '0 4px 16px rgba(155,93,229,.3)', whiteSpace: 'nowrap', border: 'none', cursor: 'pointer' }}>
                 + Nuevo Producto
               </button>
+              <button onClick={() => setShowLabels(true)}
+                style={{ padding: '10px 16px', background: 'white', color: '#5B3F8A', border: '1.5px solid #D9C9EE', borderRadius: 99, fontWeight: 700, fontSize: 13, whiteSpace: 'nowrap', cursor: 'pointer' }}>
+                🏷️ Etiquetas
+              </button>
+              <button onClick={() => setShowEnroll(true)}
+                style={{ padding: '10px 16px', background: 'white', color: '#5B3F8A', border: '1.5px solid #D9C9EE', borderRadius: 99, fontWeight: 700, fontSize: 13, whiteSpace: 'nowrap', cursor: 'pointer' }}>
+                📸 Registrar fotos
+              </button>
             </div>
+            {showLabels && <LabelsModal products={products} categories={categories} stock={stock} onClose={() => setShowLabels(false)} />}
+            {showEnroll && <EnrollPhotosModal products={products} token={session.token} onClose={() => setShowEnroll(false)} />}
 
             {/* TikTok Shop: carga masiva */}
             <div style={{ background: '#FAF7FB', borderRadius: 12, padding: '12px 14px', marginBottom: 16 }}>
@@ -7029,7 +7838,7 @@ function App() {
             .then(res => setOrders(prev => [res.order || o, ...prev]))
             .catch(e => { console.warn('order manual:', e); setSyncMsg('❌ No se pudo guardar el pedido: ' + e.message); });
         }} />}
-        {showModal && <ProductModal product={editProduct} token={session.token} categories={categories} materials={materials} fbSurcharges={fbSurcharges} fbMarkets={fbMarkets} onSave={saveProduct} onClose={() => { setShowModal(false); setEditProd(null); }} />}
+        {showModal && <ProductModal product={editProduct} token={session.token} categories={categories} materials={materials} fbSurcharges={fbSurcharges} fbMarkets={fbMarkets} allProducts={products} skuSeq={skuSeq} onSave={saveProduct} onClose={() => { setShowModal(false); setEditProd(null); }} />}
 
         {delConfirm && (
           <div style={{ position: 'fixed', inset: 0, background: 'rgba(26,17,36,.65)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
