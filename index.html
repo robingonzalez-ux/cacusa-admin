@@ -1134,7 +1134,7 @@ async function teachPieceFromPhoto(token, pid, src) {
 function RefBadge({ n, style }) {
   if (n == null) return null;
   return <span data-refs={n} title={n + ' foto' + (n === 1 ? '' : 's') + ' real' + (n === 1 ? '' : 'es') + ' aprendida' + (n === 1 ? '' : 's') + ' por el identificador'}
-    style={{ fontSize: 10, fontWeight: 800, color: n ? '#15803D' : '#B45309', background: n ? '#DCFCE7' : '#FEF3C7', padding: '2px 7px', borderRadius: 99, whiteSpace: 'nowrap', ...style }}>◇ {n} foto{n === 1 ? '' : 's'}</span>;
+    style={{ fontSize: 10, fontWeight: 800, color: n ? '#15803D' : '#B45309', background: n ? '#DCFCE7' : '#FEF3C7', padding: '2px 7px', borderRadius: 99, whiteSpace: 'nowrap', ...style }}>◇ {n} foto{n === 1 ? '' : 's'} real{n === 1 ? '' : 'es'}</span>;
 }
 
 function ProductCard({ p, onEdit, onDelete, onToggle, onMoveUp, onMoveDown, canUp, canDown, stockQty, onStockSave, refN }) {
@@ -1511,7 +1511,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
               <span style={{ flexBasis: '100%', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 2 }}>
                 <button type="button" onClick={() => onEnroll(product)}
                   style={{ fontSize: 12, fontWeight: 700, padding: '6px 12px', borderRadius: 99, border: 'none', background: 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', cursor: 'pointer' }}>
-                  📷 Registrar fotos de esta pieza
+                  📷 Mejorar reconocimiento (opcional)
                 </button>
                 <RefBadge n={refCountsPM ? (refCountsPM[String(product.id)] || 0) : null} />
                 {(product.available === false || !productImageUrl(product)) && <span style={{ fontSize: 11, color: '#92400E' }}>Pausada o sin foto: el identificador no la compara hasta que esté activa con foto.</span>}
@@ -3190,15 +3190,15 @@ function EnrollPhotosModal({ products, token, onClose, onlyId = null }) {
       </div>
       {withN != null && onlyId == null && (
         <div data-testid="enrollSummary" style={{ background: '#F1EAFB', borderRadius: 10, padding: '8px 12px', marginBottom: 8 }}>
-          <div style={{ fontSize: 13, fontWeight: 800, color: '#5B3F8A' }}>◇ {withN} de {all.length} piezas con fotos reales</div>
+          <div style={{ fontSize: 13, fontWeight: 800, color: '#5B3F8A' }}>◇ {withN} de {all.length} piezas con fotos reales <span style={{ fontWeight: 600, color: '#7A6880' }}>(todas se reconocen por su foto del catálogo)</span></div>
           <div aria-hidden="true" style={{ height: 6, background: 'white', borderRadius: 99, marginTop: 6, overflow: 'hidden' }}>
             <div style={{ width: (all.length ? Math.round(withN / all.length * 100) : 0) + '%', height: '100%', background: 'linear-gradient(90deg,#E8508A,#9B5DE5)' }} />
           </div>
         </div>
       )}
       <div style={{ fontSize: 12, color: '#7A6880', marginBottom: 10 }}>
-        Toma 1 a 3 fotos de cada pieza real, como la fotografías al armar un pedido (sobre la mesa, con tu luz). Es lo que más mejora "Identificar por foto".
-        {missingN != null && onlyId == null && <> <b style={{ color: missingN ? '#B45309' : '#15803D' }}>{missingN} pieza{missingN === 1 ? '' : 's'} sin fotos</b> de {all.length}.</>}
+        No es obligatorio: todas las piezas ya se reconocen por su foto del catálogo. Las fotos reales del taller (1 a 3, sobre la mesa y con tu luz) mejoran el acierto, sobre todo en piezas parecidas entre sí, como los anillos dorados.
+        {missingN != null && onlyId == null && <> <b style={{ color: missingN ? '#B45309' : '#15803D' }}>{missingN} pieza{missingN === 1 ? '' : 's'} sin fotos reales</b> de {all.length}.</>}
         {doneCount > 0 && onlyId == null && <> · {doneCount} registrada{doneCount === 1 ? '' : 's'} en esta sesión.</>}
       </div>
       {loadErr && <div role="alert" style={{ fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderRadius: 8, padding: '6px 10px', marginBottom: 8 }}>No se pudieron leer las fotos registradas: {loadErr} <button type="button" onClick={loadCounts} style={{ border: 'none', background: 'none', color: '#7C3AED', fontWeight: 700, cursor: 'pointer' }}>Reintentar</button></div>}
@@ -3211,7 +3211,7 @@ function EnrollPhotosModal({ products, token, onClose, onlyId = null }) {
               <SkuChip sku={cur.sku} style={{ fontSize: 13 }} />
               <div style={{ fontWeight: 700, fontSize: 14, color: '#1A1118', marginTop: 4 }}>{cur.name}</div>
               <div style={{ fontSize: 12, color: '#7A6880' }}>{cur.category}</div>
-              <div data-testid="enrollCount" style={{ fontSize: 12, fontWeight: 700, marginTop: 2, color: cnt(cur) ? '#15803D' : '#B45309' }}>{cnt(cur)} / {ENROLL_MAX_REFS} fotos registradas</div>
+              <div data-testid="enrollCount" style={{ fontSize: 12, fontWeight: 700, marginTop: 2, color: cnt(cur) ? '#15803D' : '#B45309' }}>Ya la reconoce por su foto del catálogo · fotos reales: {cnt(cur)} / {ENROLL_MAX_REFS} (opcional)</div>
             </div>
           </div>
           <button type="button" onClick={() => fileRef.current && fileRef.current.click()} disabled={busy || cnt(cur) >= ENROLL_MAX_REFS}
@@ -3254,7 +3254,7 @@ function EnrollPhotosModal({ products, token, onClose, onlyId = null }) {
           </div>
           {!counts ? <div style={{ fontSize: 12, color: '#7A6880' }}>Cargando…</div> : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {!list.length && <div style={{ fontSize: 12, color: '#7A6880' }}>{onlyMissing && !q ? 'Todas las piezas tienen fotos registradas.' : 'Sin resultados.'}</div>}
+              {!list.length && <div style={{ fontSize: 12, color: '#7A6880' }}>{onlyMissing && !q ? 'Todas las piezas tienen fotos reales.' : 'Sin resultados.'}</div>}
               {list.map(p => (
                 <button type="button" key={p.id} onClick={() => openProduct(p)}
                   style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', padding: 6, background: cnt(p) ? '#FAF7FB' : '#FFF7ED', border: cnt(p) ? '1.5px solid #EDE3F1' : '1.5px solid #FCD9A8', borderRadius: 10, cursor: 'pointer', fontFamily: 'inherit' }}>
