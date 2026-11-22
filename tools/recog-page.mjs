@@ -1,7 +1,7 @@
 // Utilidad compartida por build-catalog-refs.mjs y eval-catalog-refs.mjs: abre Chromium
 // headless con el MISMO código de reconocimiento del panel (el bloque entre
 // "// @@recog-begin" y "// @@recog-end" de index.html, más productImageUrl) y el mismo
-// TF.js 4.22.0 + MobileNet v2 de models/mobilenet_v2/, servidos desde un servidor local.
+// TF.js 4.22.0 + modelos de models/, servidos desde un servidor local.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -22,7 +22,9 @@ export function extractRecognitionCode() {
 
 // siteDir: carpeta con data/products.json + ui_kits/store/images/... (copia local del sitio).
 // extraJs: código adicional para la página (p. ej. las transformaciones de la evaluación).
-export async function openRecognitionPage({ siteDir, tfjsFile, extraJs = '' }) {
+// backend: 'wasm' (por defecto: mismo resultado que WebGL a efectos prácticos y ~10× más rápido
+// que el WebGL por software de Chromium headless) o 'webgl' (exactamente el del navegador).
+export async function openRecognitionPage({ siteDir, tfjsFile, extraJs = '', warmup = true, backend: wantBackend = 'wasm' }) {
   let chromium;
   try { ({ chromium } = await import('playwright')); }
   catch (_) { throw new Error('Falta Playwright: cd tools && npm install && npx playwright install chromium'); }
@@ -30,14 +32,16 @@ export async function openRecognitionPage({ siteDir, tfjsFile, extraJs = '' }) {
   const page_html = `<!doctype html><meta charset="utf-8"><title>refs</title><body><script>${code}\n${extraJs}\nwindow.__ready = true;</script></body>`;
   const server = http.createServer((req, res) => {
     const u = decodeURIComponent(req.url.split('?')[0]);
-    if (u === '/__recog.html') { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end(page_html); }
+    // COOP/COEP: aislamiento entre orígenes → el backend wasm puede usar hilos.
+    const iso = { 'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Embedder-Policy': 'require-corp', 'Cross-Origin-Resource-Policy': 'same-origin' };
+    if (u === '/__recog.html') { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...iso }); return res.end(page_html); }
     let root = ADMIN_DIR, rel = u;
     if (u.startsWith('/__site/')) { root = siteDir; rel = u.slice('/__site'.length); }
     const f = path.join(root, rel);
     if (!f.startsWith(root) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) { res.writeHead(404); return res.end(); }
     const ext = path.extname(f);
-    const type = { '.json': 'application/json', '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png' }[ext] || 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': type }); res.end(fs.readFileSync(f));
+    const type = { '.json': 'application/json', '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.js': 'application/javascript', '.wasm': 'application/wasm' }[ext] || 'application/octet-stream';
+    res.writeHead(200, { 'Content-Type': type, ...iso }); res.end(fs.readFileSync(f));
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const port = server.address().port;
@@ -49,17 +53,28 @@ export async function openRecognitionPage({ siteDir, tfjsFile, extraJs = '' }) {
   await page.route(SITE_ORIGIN + '/**', r => {
     const f = path.join(siteDir, decodeURIComponent(new URL(r.request().url()).pathname));
     if (!f.startsWith(siteDir) || !fs.existsSync(f)) return r.fulfill({ status: 404 });
-    return r.fulfill({ status: 200, contentType: 'image/webp', headers: { 'Access-Control-Allow-Origin': '*' }, body: fs.readFileSync(f) });
+    return r.fulfill({ status: 200, contentType: 'image/webp', headers: { 'Access-Control-Allow-Origin': '*', 'Cross-Origin-Resource-Policy': 'cross-origin' }, body: fs.readFileSync(f) });
   });
   if (tfjsFile) {
-    await page.route(TFJS_CDN, r => r.fulfill({ status: 200, contentType: 'application/javascript', headers: { 'Access-Control-Allow-Origin': '*' }, body: fs.readFileSync(tfjsFile) }));
+    await page.route(TFJS_CDN, r => r.fulfill({ status: 200, contentType: 'application/javascript', headers: { 'Access-Control-Allow-Origin': '*', 'Cross-Origin-Resource-Policy': 'cross-origin' }, body: fs.readFileSync(tfjsFile) }));
   }
   await page.goto(`http://127.0.0.1:${port}/__recog.html`);
   await page.waitForFunction(() => window.__ready === true);
-  await page.evaluate(async () => { const eng = await loadRecognitionModel(); window.__backend = eng.tf.getBackend(); });
-  const backend = await page.evaluate(() => window.__backend);
+  if (wantBackend === 'wasm') {
+    const WASM_DIR = '/tools/node_modules/@tensorflow/tfjs-backend-wasm/dist/';
+    if (!fs.existsSync(path.join(ADMIN_DIR, WASM_DIR, 'tf-backend-wasm.min.js'))) throw new Error('Falta @tensorflow/tfjs-backend-wasm: cd tools && npm install');
+    await page.evaluate(async dir => {
+      const tf = await loadTfjs();
+      await new Promise((ok, ko) => { const s = document.createElement('script'); s.src = dir + 'tf-backend-wasm.min.js'; s.onload = ok; s.onerror = ko; document.head.appendChild(s); });
+      tf.wasm.setWasmPaths(dir);
+      if (!(await tf.setBackend('wasm'))) throw new Error('no se pudo activar el backend wasm');
+    }, WASM_DIR);
+  }
+  // warmup: carga el motor como el panel (v2 si están sus archivos; si no, v1 de respaldo).
+  const info = warmup ? await page.evaluate(async () => { const eng = await loadRecognitionModel(); return { backend: eng.tf.getBackend(), kind: eng.kind, ver: eng.ver }; }) : {};
+  const backend = info.backend;
   return {
-    page, backend,
+    page, backend, kind: info.kind, ver: info.ver,
     // URL pública del catálogo → ruta local servida (misma imagen, mismo origen).
     localUrl: url => '/__site' + new URL(url).pathname,
     async close() { await browser.close(); server.close(); },

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-// Evaluación del reconocimiento por foto: ANTES (lógica anterior: huella del catálogo +
-// color) vs DESPUÉS (con las referencias precalculadas de models/catalog-refs-v1.*).
+// Evaluación del reconocimiento por foto con la huella que carga el panel (v2 si están sus
+// archivos en models/, si no v1): SIN referencias precalculadas (solo la huella del catálogo +
+// color) vs CON ellas (models/catalog-refs-v2.* o v1.*).
 // Las fotos de prueba se fabrican con eval-transforms.js, transformaciones DISTINTAS de las
 // del entrenamiento. Además, "foto distinta": para productos con varias fotos, se busca con
 // una foto secundaria SIN sus propias referencias (la pieza real, otra toma).
 //
-//   node eval-catalog-refs.mjs --site <copia local del sitio> [--tfjs tf.min.js] [--refs ../models/catalog-refs-v1]
+//   node eval-catalog-refs.mjs --site <copia local del sitio> [--tfjs tf.min.js] [--refs ../models/catalog-refs-v2]
 //          [--cache q.json] (guarda/reusa las huellas de las fotos de prueba) [--panel] (cifras
 //          oficiales con las funciones reales del panel: prepareCatalogEmbeddings + rankCatalog)
 import fs from 'node:fs';
@@ -15,29 +16,34 @@ import { ADMIN_DIR, openRecognitionPage, productUrls } from './recog-page.mjs';
 const args = process.argv.slice(2);
 const opt = (name, def) => { const i = args.indexOf('--' + name); return i >= 0 ? (args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : true) : def; };
 const siteDir = path.resolve(opt('site', ''));
-const REFS = path.resolve(opt('refs', path.join(ADMIN_DIR, 'models', 'catalog-refs-v1')));
 const CACHE = opt('cache', null);
 const SAMPLES = opt('samples', null); // carpeta donde guardar algunas fotos de prueba (jpg)
 const catalog = JSON.parse(fs.readFileSync(path.join(siteDir, 'data', 'products.json'), 'utf8'));
 const avail = catalog.products.filter(p => p && p.available !== false && productUrls(p).length);
 const extraJs = fs.readFileSync(path.join(ADMIN_DIR, 'tools', 'eval-transforms.js'), 'utf8');
-const EMB_W = 0.85, COLOR_W = 0.15;
 
 let rp = null;
-const page = async () => (rp ||= await openRecognitionPage({ siteDir, tfjsFile: opt('tfjs', null), extraJs }));
+const page = async () => (rp ||= await openRecognitionPage({ siteDir, tfjsFile: opt('tfjs', null), extraJs, backend: opt('webgl', false) ? 'webgl' : 'wasm' }));
+// Versión de la huella y sus pesos (los del panel): se leen del motor que cargó la página.
+const engInfo = await (await page()).page.evaluate(async () => { const e = await loadRecognitionModel(); return { kind: e.kind, ver: e.ver, cw: e.cw, margin: e.margin, refsUrl: e.refsUrl }; });
+console.log(`Huella: ${engInfo.ver} (${engInfo.kind}), color ${engInfo.cw}, margen ${engInfo.margin}`);
+const PANEL_REFS = path.join(ADMIN_DIR, engInfo.refsUrl.replace(/\.json$/, ''));
+const REFS = path.resolve(opt('refs', PANEL_REFS));
+const COLOR_W = engInfo.cw, EMB_W = 1 - COLOR_W;
 
 // ── Fase 1: huellas de las fotos de prueba y del catálogo (como el panel anterior) ──
 let data = CACHE && fs.existsSync(CACHE) ? JSON.parse(fs.readFileSync(CACHE, 'utf8')) : null;
+if (data && data.ver !== engInfo.ver) { console.log('caché de otra versión de la huella: se recalcula'); data = null; }
 if (!data) {
   const { page: pg, localUrl } = await page();
-  data = { catalog: {}, queries: [] };
+  data = { ver: engInfo.ver, catalog: {}, queries: [] };
   const t0 = Date.now();
   for (const [i, p] of avail.entries()) {
     const urls = productUrls(p);
     const r = await pg.evaluate(async ([main, extras, id, keep]) => {
       const eng = await loadRecognitionModel();
       const img = await loadImg(main, false);
-      const cat = { emb: Array.from(embedCanvas(eng, squareCrop(img, 1, 224))), color: Array.from(colorDescriptor(img)) };
+      const cat = { emb: Array.from(embedPhoto(eng, img, 'base')), color: Array.from(colorDescriptor(img)) };
       const qs = [];
       for (const mode of ['A', 'B']) {
         const dataUrl = makeTestPhoto(img, strHash('eval|' + id + '|' + mode), mode);
@@ -67,7 +73,7 @@ if (!data) {
 
 // ── Fase 2: puntajes con distintas estrategias (réplica exacta de la fórmula del panel) ──
 const l2 = v => { let s = 0; for (const x of v) s += x * x; const n = Math.sqrt(s) || 1; return Float32Array.from(v, x => x / n); };
-const dot = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; };
+const dot = (a, b) => { let s = 0; const n = Math.min(a.length, b.length); for (let i = 0; i < n; i++) s += a[i] * b[i]; return s; };
 const colorSim = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += Math.min(a[i], b[i]); return s; };
 const idx = JSON.parse(fs.readFileSync(REFS + '.json', 'utf8'));
 const bin = new Int8Array(fs.readFileSync(REFS + '.bin').buffer.slice(0));
@@ -90,9 +96,9 @@ function simsFor(q, id, { nAug = 99, exclude = null, int8Base = false } = {}) {
   }
   return { base, aug: aug.sort((a, b) => b - a), color: colorSim(q.color, main.color) };
 }
-const AUG_MARGIN = 0.03; // = AUG_MARGIN de index.html
+const AUG_MARGIN = engInfo.margin; // = margen del panel
 const STRATS = {
-  'antes (catálogo)': s => s.base,
+  'solo catálogo': s => s.base,
   'max(catálogo, refs)': s => Math.max(s.base, ...s.aug),
   'PANEL max(catálogo, refs − margen)': s => Math.max(s.base, (s.aug[0] ?? -1) - AUG_MARGIN),
   'media top-2 de todo': s => { const a = [s.base, ...s.aug].sort((x, y) => y - x); return a.length > 1 ? (a[0] + a[1]) / 2 : a[0]; },
@@ -120,7 +126,7 @@ const groups = {
   'otra foto + A (sin sus refs)': queries.filter(q => q.kind === 'otra-foto+A'),
 };
 console.log(`\nRefs: ${idx.vectors} vectores, ${idx.perImage.aug} variantes/foto, generado ${idx.generated}`);
-const variants = { 'antes (catálogo)': [[{}, ''], [{ int8Base: true }, ' [base int8]']], 'PANEL max(catálogo, refs − margen)': [[{}, ''], [{ nAug: 4 }, ' [solo 4 var.]'], [{ nAug: 8 }, ' [solo 8 var.]']] };
+const variants = { 'solo catálogo': [[{}, ''], [{ int8Base: true }, ' [base int8]']], 'PANEL max(catálogo, refs − margen)': [[{}, ''], [{ nAug: 4 }, ' [solo 4 var.]'], [{ nAug: 8 }, ' [solo 8 var.]']] };
 for (const [gname, qs] of Object.entries(groups)) {
   if (!qs.length) continue;
   console.log(`\n== ${gname}: ${qs.length} consultas ==`);
@@ -131,15 +137,16 @@ for (const [gname, qs] of Object.entries(groups)) {
   }
 }
 // ── Fase 3 (--panel): cifras oficiales con las funciones REALES del panel ──
-// prepareCatalogEmbeddings (que carga models/catalog-refs-v1.* vía loadStaticRefs) + rankCatalog.
-// ANTES = sin referencias precalculadas (loadStaticRefs → null: exactamente la lógica anterior).
+// prepareCatalogEmbeddings (que carga las referencias precalculadas vía loadStaticRefs) + rankCatalog.
+// "sin refs" = sin referencias precalculadas (loadStaticRefs → null).
 // Para "otra foto", esa foto se quita de images[] del producto: el panel debe ignorar sus
 // referencias (es el mismo mecanismo que descarta referencias de una foto cambiada).
 if (opt('panel', false)) {
   const { page: pg } = await page();
-  if (REFS !== path.join(ADMIN_DIR, 'models', 'catalog-refs-v1')) throw new Error('--panel usa el archivo que carga el panel: models/catalog-refs-v1.* (no pasar --refs)');
+  if (REFS !== PANEL_REFS) throw new Error('--panel usa el archivo que carga el panel: ' + engInfo.refsUrl + ' (no pasar --refs)');
   const run = (mode, qs, prods) => pg.evaluate(async ([mode, qs, prods]) => {
-    _staticRefsPromise = mode === 'antes' ? Promise.resolve(null) : null;
+    const eng = await loadRecognitionModel();
+    _staticRefsPromise = mode === 'sin refs' ? Promise.resolve(null) : null; _staticRefsVer = eng.ver;
     _embMem.clear();
     const db = await embDb(); // caché vacía = primera vez en un navegador nuevo
     await new Promise(r => { const tx = db.transaction(EMB_STORE, 'readwrite'); tx.objectStore(EMB_STORE).clear(); tx.oncomplete = tx.onerror = () => r(); });
@@ -150,7 +157,7 @@ if (opt('panel', false)) {
     const out = [];
     for (const q of qs) {
       if (q.hideUrl) res = await prepareCatalogEmbeddings(prods.map(p => String(p.id) === q.id ? { ...p, images: (p.images || []).filter(u => u !== q.hideUrl) } : p));
-      const qq = { emb: Float32Array.from(q.emb), color: Float32Array.from(q.color) };
+      const qq = { emb: Float32Array.from(q.emb), color: Float32Array.from(q.color), kind: eng.kind, cw: eng.cw, margin: eng.margin };
       const rk = c => rankCatalog(qq, res.items, {}, c, 1e9).findIndex(r => String(r.p.id) === q.id) + 1;
       out.push([rk('Todas'), rk(q.category)]);
       if (q.hideUrl) res = await prepareCatalogEmbeddings(prods);
@@ -160,8 +167,8 @@ if (opt('panel', false)) {
   const qs = data.queries.map(q => ({ id: q.id, category: q.category, emb: q.emb, color: q.color, kind: q.kind, hideUrl: q.kind.startsWith('otra') ? q.url : null }));
   console.log('\n== Panel real (prepareCatalogEmbeddings + rankCatalog) ==');
   const res = {};
-  for (const mode of ['antes', 'después']) res[mode] = await run(mode, qs, catalog.products);
-  for (const mode of ['antes', 'después']) console.log(`  ${mode}: 1ra preparación ${(res[mode].prepMs / 1000).toFixed(1)} s (fotos calculadas: ${res[mode].computed}), 2da ${(res[mode].prep2Ms / 1000).toFixed(2)} s, productos con referencias: ${res[mode].trained}`);
+  for (const mode of ['sin refs', 'con refs']) res[mode] = await run(mode, qs, catalog.products);
+  for (const mode of ['sin refs', 'con refs']) console.log(`  ${mode}: 1ra preparación ${(res[mode].prepMs / 1000).toFixed(1)} s (fotos calculadas: ${res[mode].computed}), 2da ${(res[mode].prep2Ms / 1000).toFixed(2)} s, productos con referencias: ${res[mode].trained}`);
   for (const kinds of [['A'], ['B'], ['A', 'B'], ['otra-foto'], ['otra-foto+A']]) {
     const sel = qs.map((q, i) => [q, i]).filter(([q]) => kinds.includes(q.kind));
     if (!sel.length) continue;
@@ -169,7 +176,7 @@ if (opt('panel', false)) {
       const f = j => `hit@1 ${pct(r.filter(x => x[j] === 1).length, n).padEnd(16)} hit@5 ${pct(r.filter(x => x[j] >= 1 && x[j] <= 5).length, n).padEnd(16)}`;
       return `${f(0)}| con categoría: ${f(1)}`; };
     console.log(`  [${kinds.join('+')}] n=${sel.length}`);
-    for (const mode of ['antes', 'después']) console.log(`    ${mode.padEnd(8)} ${line(mode)}`);
+    for (const mode of ['sin refs', 'con refs']) console.log(`    ${mode.padEnd(8)} ${line(mode)}`);
   }
 }
 if (rp) await rp.close();

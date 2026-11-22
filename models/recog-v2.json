@@ -1,0 +1,64 @@
+{
+ "format": "cacusa-recog",
+ "version": 2,
+ "emb": "effv2b0-288-gem2-iso5-lw512-v2",
+ "model": "models/effv2b0_288/model.json",
+ "size": 288,
+ "dIn": 1952,
+ "parts": [
+  [
+   0,
+   1280
+  ],
+  [
+   1280,
+   1952
+  ]
+ ],
+ "views": [
+  [
+   "c",
+   1
+  ],
+  [
+   "c",
+   0.8
+  ],
+  [
+   "c",
+   0.6
+  ],
+  [
+   "p",
+   1.25
+  ],
+  [
+   "p",
+   1.6
+  ]
+ ],
+ "dOut": 512,
+ "cw": 0.05,
+ "margin": 0.03,
+ "pct": [
+  0.15,
+  0.65
+ ],
+ "refs": "models/catalog-refs-v2.json",
+ "proj": {
+  "bin": "recog-v2-proj.bin",
+  "binBytes": 1009280,
+  "binSha256": "7ee65fc193bd70f7e499c71a4cb3b761af1d1565b1d1af2f0da6b9bf279425e5",
+  "method": "learned-whitening",
+  "eps": 0.01,
+  "layout": "mu float32[dIn] · escala float32[dOut] · W int8[dIn×dOut] por filas (W real = int8 × escala de su columna)",
+  "trainedOn": {
+   "photos": 157,
+   "productPhotos": 131,
+   "otherSitePhotos": 26,
+   "variantsPerPhoto": 12,
+   "vectors": 2041
+  }
+ },
+ "generated": "2026-11-22T19:08:58.651Z"
+}

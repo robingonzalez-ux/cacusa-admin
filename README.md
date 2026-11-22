@@ -10,25 +10,48 @@ Vive separado de la tienda (`cacusabytaitus.com`, repo `cacusa`) a propósito: a
 
 ## Reconocimiento por foto ("📷 Agregar pieza con foto")
 
-Gratis y en el navegador: TF.js 4.22.0 + MobileNet v2 (`models/mobilenet_v2/`). La foto del
-taller se convierte en una huella de 1280 números y se compara con las huellas del catálogo.
+Gratis y en el navegador (TF.js 4.22.0, WebGL). La foto del taller se convierte en una huella de
+1280 números y se compara con las huellas del catálogo y con las fotos reales que ya se le
+enseñaron (el Worker las guarda en `/identify/refs`, 1280 bytes int8 cada una, máx. 10 por pieza).
 
-### Referencias de entrenamiento (`models/catalog-refs-v1.bin` + `.json`)
+### v2 (22 nov, `RECOG_VERSION = 2`)
 
-MobileNet no se re-entrena: por cada foto de cada producto (`imageUrl` + `images[]`) se
-precalculan variantes que imitan una foto del taller (recorte 60–95 %, giro ±15°, mesa de
-fondo lisa con textura leve, luz cálida/fría, brillo/contraste/saturación, desenfoque leve,
-espejo) y sus huellas quedan como referencias extra del producto. El panel:
+| Archivo | Qué es | Tamaño |
+|---|---|---|
+| `models/effv2b0_288/` | EfficientNetV2-B0 (ImageNet, Keras Applications, Apache 2.0) a 288 px, float16. Sale el GeM de la última capa (1280) + el de una capa media (672) | 11,7 MB |
+| `models/recog-v2.json` | manifiesto: versión de la huella, vistas, pesos, calibración del % | 1 KB |
+| `models/recog-v2-proj.bin` | proyección *learned whitening* 1952 → 512 (int8 por columna) | 1,0 MB |
+| `models/catalog-refs-v2.bin` + `.json` | referencias precalculadas (13 por foto: base + 12 variantes; 512 int8 por vector) | 0,9 MB |
 
-- baja el `.json` (índice, ~30 KB) con revalidación y el `.bin` (~2 MB) solo si cambió su hash,
-  y lo guarda en IndexedDB (sirve también sin conexión);
-- usa las referencias de una foto **solo si el producto sigue teniendo esa misma URL de foto**
-  (si se cambió la foto o el producto es nuevo, se ignoran);
-- para productos nuevos o con foto cambiada calcula 4 variantes en el momento (misma función
-  `augmentPhoto`, misma semilla) y las guarda en IndexedDB, así no hace falta regenerar el archivo
-  cada vez que se agrega un producto;
-- para los productos del archivo ya no necesita bajar la foto del catálogo la primera vez (el
-  archivo trae su huella y su color).
+Huella de una foto: se estima la zona de la joya (`pieceBox`: distancia al color de los bordes,
+Otsu) y se promedian 5 vistas (foto entera, centro 80 %, centro 60 %, pieza recortada con margen
+1,25 y 1,6); cada vista = partes normalizadas de las 2 capas; promedio → proyección → normalizada
+→ rellenada con ceros hasta 1280 (el Worker no cambia). Puntaje = 0,95 × coseno (mejor entre
+foto del catálogo, fotos reales aprendidas y variantes − 0,03) + 0,05 × color.
+
+Si `models/recog-v2.json` (o la red/proyección) no carga, el panel usa solo v1 (MobileNet v2,
+`models/mobilenet_v2/` + `models/catalog-refs-v1.*`) y en ese modo **no guarda** fotos
+aprendidas, para no mezclar huellas de dos versiones.
+
+**Fotos reales aprendidas al pasar de v1 a v2**: el Worker no guarda la versión de cada una, así
+que las que hay se tratan como v2. La primera vez que se abre el panel con v2, si el Worker tiene
+alguna, aparece un aviso único con "Borrar fotos viejas" (llama `/identify/ref/clear` por pieza)
+o "Mantenerlas". Nunca se borran solas. (Al 22 nov no había fotos reales registradas.)
+
+Medido (fotos de prueba sintéticas, `eval-transforms.js`; productos separados en mitad para
+ajustar / mitad de prueba — cifras de la mitad de prueba, 4 fotos por modo y producto):
+
+| | hit@1 | hit@5 | con categoría hit@1 | hit@5 |
+|---|---|---|---|---|
+| v1 — A+B (pieza chica/descentrada + recorte con dedo) | 55,3 % | 80,9 % | 70,0 % | 87,5 % |
+| v2 — A+B | 90,6 % | 96,9 % | 94,4 % | 98,1 % |
+| v2 — A+B, proyección aprendida SIN esos productos (pieza nueva) | 89,1 % | 96,2 % | 92,5 % | 98,4 % |
+
+Qué aporta cada parte (mitad de prueba, A+B hit@1): EfficientNetV2-B0 en vez de MobileNet v2 con
+el mismo método (80 → 86 a 224 px; 90,6 a 288 px), proyección *learned whitening* (63 → 91 con la
+misma red), aislamiento de la pieza (87,5 → 90,6), capa media (86 → 90,6). Probado y descartado por no mejorar:
+concatenar más capas medias, voltear la foto, re-ranking (expansión de consulta, media de las 2
+mejores), color de la zona de la pieza, más peso al color, MobileNetV3, EfficientNet-B0/V2-B1.
 
 ### Regenerar (cuando haya muchos productos nuevos o fotos cambiadas)
 
@@ -40,17 +63,27 @@ node build-catalog-refs.mjs --download            # baja products.json + fotos d
 node build-catalog-refs.mjs --site ../../cacusa
 ```
 
-Tarda ~6 s por foto en Chromium headless (≈10–15 min el catálogo entero) y escribe
-`models/catalog-refs-v1.bin` y `.json`; después se comitean. Usa el código del propio panel
-(bloque entre `// @@recog-begin` y `// @@recog-end` de `index.html`, sin JSX) para que las
-huellas coincidan con las del navegador. Opciones: `--n 12` (variantes por foto), `--tfjs
-<tf.min.js>` si no hay acceso a cdn.jsdelivr.net.
+Usa TODAS las fotos: `imageUrl` + `images[]` de todos los productos (también los pausados) y las
+fotos de `ui_kits/store/images/` que ya no usa ningún producto (estas últimas solo para aprender
+la proyección). Por cada foto calcula, con el código del propio panel (bloque entre
+`// @@recog-begin` y `// @@recog-end` de `index.html`, sin JSX) en Chromium headless (backend
+wasm), el descriptor sin proyectar de la foto y de 12 variantes (`augmentPhoto`: mesa, recorte,
+giro, luz, desenfoque, espejo); aprende la proyección (autovalores de 2 matrices 1952×1952 con
+`ml-matrix`) y escribe los 4 archivos de `models/` de la tabla. Tarda ~15 min; guarda los
+descriptores en `tools/.cache/` para no recalcular las fotos que no cambiaron. Opciones: `--n 12`,
+`--tfjs <tf.min.js>` si no hay acceso a cdn.jsdelivr.net.
 
-Si se cambia el modelo (`EMB_VERSION`) el panel ignora el archivo viejo hasta regenerarlo. Si
-se cambia `augmentPhoto`, subir `AUG_VERSION` y regenerar.
+El panel usa las referencias de una foto **solo si el producto sigue teniendo esa misma URL de
+foto**; para productos nuevos o con foto cambiada calcula 4 variantes en el momento (misma
+función, misma semilla) y las guarda en IndexedDB. Si se cambia algo de la huella (red, vistas,
+capas, proyección), cambiar `emb` en `SPEC` de `build-catalog-refs.mjs`, regenerar y subir
+`RECOG_VERSION` si las huellas dejan de ser comparables. Si se cambia `augmentPhoto`, subir
+`AUG_VERSION` y regenerar. La red se exporta con `tools/export-effv2b0.py` (TensorFlow 2.15 +
+tensorflowjs 4.17, pesos de storage.googleapis.com/tensorflow/keras-applications).
 
 ### Medir
 
 `node eval-catalog-refs.mjs --site ../../cacusa --cache /tmp/q.json --panel` arma fotos de
 prueba con transformaciones distintas a las del entrenamiento (`eval-transforms.js`) y compara
-hit@1/hit@5 antes y después, con y sin filtro de categoría.
+hit@1/hit@5 sin y con las referencias precalculadas, con y sin filtro de categoría, con las
+funciones reales del panel (`prepareCatalogEmbeddings` + `rankCatalog`).

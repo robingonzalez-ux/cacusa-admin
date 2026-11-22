@@ -3,6 +3,8 @@
   "private": true,
   "description": "Herramientas locales del panel (referencias de entrenamiento del reconocimiento por foto). No se publican ni corren en el navegador.",
   "dependencies": {
+    "@tensorflow/tfjs-backend-wasm": "4.22.0",
+    "ml-matrix": "6.12.1",
     "playwright": "1.63.0"
   }
 }

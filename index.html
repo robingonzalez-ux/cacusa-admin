@@ -1126,10 +1126,46 @@ function useRefCounts(token) {
 async function teachPieceFromPhoto(token, pid, src) {
   const dataUrl = src && src.dataUrl ? src.dataUrl : (await photoToJpegBase64(src, 640, 0.8)).dataUrl;
   const q = await embedQueryPhoto(dataUrl);
-  const r = await apiCall('identify/ref/add', { token, id: String(pid), vector: quantizeEmb(q.emb) });
+  const r = await apiCall('identify/ref/add', { token, id: String(pid), vector: learnedRefVector(q) });
   const n = r && Number.isInteger(r.count) ? r.count : Math.min(REFS_PER_PRODUCT, refCountOf(pid) + 1);
   setRefCount(pid, n);
   return n;
+}
+// Aviso único al estrenar una versión nueva del identificador (RECOG_VERSION, 22 nov: v2) si el
+// Worker ya tiene fotos reales aprendidas: se calcularon con la huella anterior y no se pueden
+// comparar con la nueva (el Worker no guarda la versión). Nunca se borran solas: el botón es
+// opcional. Mientras sigan ahí, el panel las usa como si fueran de la versión actual.
+const RECOG_SEEN_KEY = 'cacusa-recog-version-seen';
+function RecogUpgradeNotice({ token, counts }) {
+  const [seen, setSeen] = useState(() => { try { return localStorage.getItem(RECOG_SEEN_KEY) === String(RECOG_VERSION); } catch (_) { return true; } });
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  const ids = counts ? Object.keys(counts).filter(id => counts[id] > 0) : [];
+  const total = ids.reduce((a, id) => a + counts[id], 0);
+  const markSeen = () => { try { localStorage.setItem(RECOG_SEEN_KEY, String(RECOG_VERSION)); } catch (_) {} setSeen(true); };
+  useEffect(() => { if (!seen && counts && !total) markSeen(); }, [seen, counts, total]); // nada que avisar
+  if (seen || !counts || !total) return null;
+  const clearAll = async () => {
+    if (!window.confirm('¿Borrar las ' + total + ' fotos reales aprendidas (' + ids.length + ' pieza' + (ids.length === 1 ? '' : 's') + ')? Después puedes volver a registrarlas con "Registrar fotos".')) return;
+    setBusy(true); setMsg('');
+    let okN = 0;
+    for (const id of ids) {
+      try { await apiCall('identify/ref/clear', { token, id: String(id) }); setRefCount(id, 0); okN++; }
+      catch (e) { setMsg('No se pudieron borrar todas (' + pieceErrMsg(e) + '). Borradas: ' + okN + ' de ' + ids.length + ' piezas.'); setBusy(false); return; }
+    }
+    setBusy(false); markSeen();
+  };
+  return (
+    <div role="status" aria-live="polite" data-recog-notice style={{ borderRadius: 12, padding: '12px 16px', marginBottom: 14, fontSize: 13, background: '#EEF2FF', color: '#3730A3', border: '1px solid #C7D2FE' }}>
+      <div style={{ fontWeight: 800, marginBottom: 4 }}>◇ El identificador por foto se mejoró</div>
+      <div style={{ lineHeight: 1.45 }}>Ahora reconoce las piezas con mucha más precisión. {total === 1 ? 'La foto real que ya le habías enseñado se guardó' : 'Las ' + total + ' fotos reales que ya le habías enseñado se guardaron'} con la versión anterior y {total === 1 ? 'puede' : 'pueden'} confundirlo: lo mejor es {total === 1 ? 'borrarla y volver a tomarla' : 'borrarlas y volver a tomarlas'} con "Registrar fotos". No se borra nada si no lo pides.</div>
+      {msg && <div role="alert" style={{ color: '#DC2626', fontWeight: 700, marginTop: 6 }}>{msg}</div>}
+      <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+        <button onClick={clearAll} disabled={busy} style={{ padding: '8px 14px', borderRadius: 99, border: 'none', background: '#3730A3', color: 'white', fontWeight: 700, fontSize: 12, cursor: busy ? 'default' : 'pointer', opacity: busy ? .7 : 1 }}>{busy ? 'Borrando…' : 'Borrar fotos viejas'}</button>
+        <button onClick={markSeen} disabled={busy} style={{ padding: '8px 14px', borderRadius: 99, border: '1px solid #A5B4FC', background: 'white', color: '#3730A3', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>Mantenerlas</button>
+      </div>
+    </div>
+  );
 }
 function RefBadge({ n, style }) {
   if (n == null) return null;
@@ -2348,22 +2384,36 @@ function pieceErrMsg(e) {
 
 // @@recog-begin — tools/build-catalog-refs.mjs extrae este bloque tal cual (JS puro, sin JSX)
 // para calcular las referencias precalculadas con EXACTAMENTE el mismo código. No meter JSX acá.
-// ── Reconocimiento por foto EN EL NAVEGADOR (19 nov) — gratis, sin API de pago ──────────
-// MobileNet v2 (TF.js, modelo en /models/mobilenet_v2/, ~14 MB) convierte cada foto en un
-// vector de 1280 números ("huella visual", capa previa a la clasificación). Se compara la
-// foto del taller con las fotos del catálogo (y con las fotos reales ya confirmadas antes,
-// "referencias aprendidas" que guarda el Worker en /identify/refs) por similitud coseno,
-// más un poco de similitud de color. Todo se carga recién al abrir el modal de la foto.
-// Las huellas del catálogo se guardan en IndexedDB (por URL de la foto + versión del
-// modelo): la primera vez tarda, después solo calcula las fotos nuevas.
+// ── Reconocimiento por foto EN EL NAVEGADOR — gratis, sin API de pago ───────────────────
+// Cada foto se convierte en un vector de 1280 números ("huella visual") y se compara con las
+// fotos del catálogo (y con las fotos reales ya confirmadas antes, "referencias aprendidas"
+// que guarda el Worker en /identify/refs) por similitud coseno, más un poco de color. Todo se
+// carga recién al abrir el modal de la foto.
+//
+// v2 (22 nov, RECOG_VERSION = 2) — medido con tools/eval-catalog-refs.mjs (ver tools/README.md):
+//   · Red: EfficientNetV2-B0 (ImageNet, Keras Applications) a 288 px, en models/effv2b0_288/
+//     (~12 MB). Huella = GeM de la última capa (1280) + GeM de una capa media (672, detalle:
+//     textura, grabado, piedras), cada parte normalizada.
+//   · Aislamiento de la pieza: se estima la zona de la joya (distancia al color de los bordes
+//     de la foto) y se recorta a ella. La huella promedia 5 vistas: foto entera, centro 80 %,
+//     centro 60 %, pieza recortada y pieza con más margen.
+//   · Proyección "learned whitening" (models/recog-v2-proj.bin) aprendida con TODAS las fotos
+//     del catálogo y sus variantes: 1952 → 512 números (los 768 restantes van en cero, así el
+//     Worker sigue recibiendo exactamente 1280 bytes).
+// v1 (19 nov) queda como respaldo automático si los archivos de v2 no cargan: MobileNet v2
+// (models/mobilenet_v2/), capa AvgPool, 3 recortes centrados, sin proyección.
+// Las huellas del catálogo se guardan en IndexedDB (por URL de la foto + versión de la
+// huella): la primera vez tarda, después solo calcula las fotos nuevas.
 const TFJS_URL = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js';
 const TFJS_SRI = 'sha384-vE8hbVJ4lezako5rlvE7bY0BVzWlFhZncPlckrqNwcUQpVtgbENTgZ8TBbnPjZre';
+const RECOG_VERSION = 2;        // sube cuando las huellas dejan de ser comparables con las anteriores
+const RECOG_V2_URL = 'models/recog-v2.json'; // manifiesto de v2 (lo genera tools/build-catalog-refs.mjs)
 const MNV2_URL = 'models/mobilenet_v2/model.json';
 const MNV2_IDB = 'indexeddb://cacusa-mobilenet-v2-v1';
 const MNV2_NODE = 'module_apply_default/MobilenetV2/Logits/AvgPool'; // [1,1,1,1280]
-const EMB_DIM = 1280;           // = IDENTIFY_REF_DIM en admin-worker.js
-const EMB_VERSION = 'mnv2-224-avgpool-v1';
-const EMB_W = 0.85, COLOR_W = 0.15;
+const EMB_DIM = 1280;           // = IDENTIFY_REF_DIM en admin-worker.js (no cambiar: el Worker exige 1280 bytes)
+const EMB_VERSION_V1 = 'mnv2-224-avgpool-v1';
+const EMB_W = 0.85, COLOR_W = 0.15; // pesos de v1 (v2 trae los suyos en el manifiesto)
 let _tfPromise = null, _modelPromise = null;
 function loadTfjs() {
   if (window.tf && window.tf.loadGraphModel) return Promise.resolve(window.tf);
@@ -2381,19 +2431,59 @@ function loadTfjs() {
   });
   return _tfPromise;
 }
+// Modelo desde IndexedDB (sin volver a bajarlo) o desde el sitio, y se guarda.
+async function loadGraphCached(tf, url, idbKey) {
+  let model = null;
+  try { model = await tf.loadGraphModel(idbKey); } catch (_) { model = null; }
+  if (!model) {
+    model = await tf.loadGraphModel(url);
+    try { await model.save(idbKey); } catch (e) { console.warn('no se pudo guardar el modelo en IndexedDB:', e && e.message); }
+  }
+  return model;
+}
+// Proyección v2 (models/recog-v2-proj.bin): mu float32[dIn] · escala float32[dOut] · W int8[dIn×dOut]
+// (por filas). Se guarda en IndexedDB por hash, igual que las referencias precalculadas.
+async function loadV2Projection(man) {
+  const db = await embDb();
+  const key = 'proj|' + man.proj.binSha256;
+  let buf = null;
+  const cached = await embDbGet(db, key);
+  if (cached instanceof ArrayBuffer && cached.byteLength === man.proj.binBytes) buf = cached;
+  if (!buf) {
+    const r = await fetch(new URL(man.proj.bin, new URL(RECOG_V2_URL, location.href)).href + '?h=' + String(man.proj.binSha256).slice(0, 12));
+    if (!r.ok) throw new Error('proyección v2: HTTP ' + r.status);
+    buf = await r.arrayBuffer();
+    if (buf.byteLength !== man.proj.binBytes) throw new Error('proyección v2: tamaño inesperado');
+    await embDbPut(db, key, buf);
+  }
+  const dIn = man.dIn, dOut = man.dOut;
+  const mu = new Float32Array(buf, 0, dIn), sc = new Float32Array(buf, dIn * 4, dOut), q = new Int8Array(buf, (dIn + dOut) * 4, dIn * dOut);
+  const W = new Float32Array(dIn * dOut);
+  for (let i = 0; i < dIn; i++) for (let j = 0; j < dOut; j++) W[i * dOut + j] = q[i * dOut + j] * sc[j];
+  return { mu: Float32Array.from(mu), W, dIn, dOut };
+}
+async function loadV2(tf) {
+  const res = await fetch(RECOG_V2_URL, { cache: 'no-cache' });
+  if (!res.ok) throw new Error('manifiesto v2: HTTP ' + res.status);
+  const man = await res.json();
+  if (!man || man.version !== RECOG_VERSION || !man.proj || !man.model || man.dOut > EMB_DIM) throw new Error('manifiesto v2 inválido');
+  const [proj, model] = await Promise.all([loadV2Projection(man), loadGraphCached(tf, man.model, 'indexeddb://cacusa-' + man.emb)]);
+  return { tf, model, kind: 'v2', ver: man.emb, size: man.size, proj, parts: man.parts, views: man.views,
+           cw: man.cw, margin: man.margin, pct: man.pct, refsUrl: man.refs };
+}
+async function loadV1(tf) {
+  const model = await loadGraphCached(tf, MNV2_URL, MNV2_IDB);
+  return { tf, model, kind: 'v1', ver: EMB_VERSION_V1, size: 224, cw: COLOR_W, margin: 0.03, pct: [0.35, 0.55],
+           refsUrl: 'models/catalog-refs-v1.json' };
+}
 function loadRecognitionModel() {
   if (_modelPromise) return _modelPromise;
   _modelPromise = (async () => {
     const tf = await loadTfjs();
     try { await tf.ready(); } catch (_) {}
-    let model = null;
-    // 1ro desde IndexedDB (sin volver a bajar 14 MB); si no está, desde el sitio y se guarda.
-    try { model = await tf.loadGraphModel(MNV2_IDB); } catch (_) { model = null; }
-    if (!model) {
-      model = await tf.loadGraphModel(MNV2_URL);
-      try { await model.save(MNV2_IDB); } catch (e) { console.warn('no se pudo guardar el modelo en IndexedDB:', e && e.message); }
-    }
-    return { tf, model };
+    try { return await loadV2(tf); }
+    catch (e) { console.warn('reconocimiento v2 no disponible, se usa v1:', e && e.message); }
+    return await loadV1(tf);
   })();
   _modelPromise.catch(() => { _modelPromise = null; });
   return _modelPromise;
@@ -2402,10 +2492,14 @@ function loadRecognitionModel() {
 function squareCrop(img, frac, size) {
   const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
   const side = Math.min(w, h) * frac;
+  return cropSquare(img, (w - side) / 2, (h - side) / 2, side, size);
+}
+// Cuadrado (sx, sy, lado) de la imagen → canvas size×size (lo que quede afuera, blanco).
+function cropSquare(img, sx, sy, side, size) {
   const cv = document.createElement('canvas'); cv.width = size; cv.height = size;
   const ctx = cv.getContext('2d');
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, size, size);
-  ctx.drawImage(img, (w - side) / 2, (h - side) / 2, side, side, 0, 0, size, size);
+  ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
   return cv;
 }
 function l2norm(v) {
@@ -2414,8 +2508,8 @@ function l2norm(v) {
   for (let i = 0; i < v.length; i++) out[i] = v[i] / n;
   return out;
 }
-function dot(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }
-// El modelo espera RGB en [0,1], 224×224.
+function dot(a, b) { const n = Math.min(a.length, b.length); let s = 0; for (let i = 0; i < n; i++) s += a[i] * b[i]; return s; }
+// v1: el modelo espera RGB en [0,1], 224×224.
 function embedCanvas(eng, canvas) {
   const { tf, model } = eng;
   const out = tf.tidy(() => {
@@ -2424,6 +2518,108 @@ function embedCanvas(eng, canvas) {
   });
   const v = out.dataSync(); out.dispose();
   return l2norm(v);
+}
+// ── v2: zona de la pieza ──
+// Distancia de cada píxel (foto reducida a 128 px) al color más parecido de los bordes
+// (24 muestras: mediana de 6 tramos por lado), suavizado 5×5 y umbral de Otsu. La caja es la
+// del 3 %–97 % de la "masa" (distancia sobre el umbral). null si no hay una pieza clara (fondo
+// liso sin nada, o la pieza ocupa casi toda la foto): entonces se usa la foto entera.
+function pieceBox(img) {
+  const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+  const S = 128 / Math.max(w, h);
+  const W = Math.max(8, Math.round(w * S)), H = Math.max(8, Math.round(h * S));
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d'); ctx.drawImage(img, 0, 0, W, H);
+  const d = ctx.getImageData(0, 0, W, H).data;
+  const B = 4, segs = 6, protos = [];
+  const med = arr => { arr.sort((a, b) => a - b); return arr[arr.length >> 1]; };
+  const sample = (x0, y0, x1, y1) => {
+    const r = [], g = [], b = [];
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const i = (y * W + x) * 4; r.push(d[i]); g.push(d[i + 1]); b.push(d[i + 2]); }
+    if (r.length) protos.push([med(r), med(g), med(b)]);
+  };
+  for (let s = 0; s < segs; s++) {
+    const xa = Math.floor(W * s / segs), xb = Math.floor(W * (s + 1) / segs), ya = Math.floor(H * s / segs), yb = Math.floor(H * (s + 1) / segs);
+    sample(xa, 0, xb, B); sample(xa, H - B, xb, H); sample(0, ya, B, yb); sample(W - B, ya, W, yb);
+  }
+  const dist = new Float32Array(W * H);
+  for (let i = 0, p = 0; p < W * H; p++, i += 4) {
+    let m = 1e9;
+    for (const q of protos) { const dr = d[i] - q[0], dg = d[i + 1] - q[1], db = d[i + 2] - q[2]; const e = dr * dr + dg * dg + db * db; if (e < m) m = e; }
+    dist[p] = Math.sqrt(m);
+  }
+  const bl = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let s = 0, n = 0;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < W && yy < H) { s += dist[yy * W + xx]; n++; } }
+    bl[y * W + x] = s / n;
+  }
+  let mx = 0; for (const v of bl) mx = Math.max(mx, v);
+  if (mx < 8) return null;
+  const hist = new Float64Array(64); for (const v of bl) hist[Math.min(63, Math.floor(v / mx * 64))]++;
+  const tot = W * H; let sum = 0; for (let i = 0; i < 64; i++) sum += i * hist[i];
+  let wB = 0, sB = 0, best = 0, th = 32;
+  for (let i = 0; i < 64; i++) {
+    wB += hist[i]; if (!wB) continue; const wF = tot - wB; if (!wF) break;
+    sB += i * hist[i]; const mB = sB / wB, mF = (sum - sB) / wF, v = wB * wF * (mB - mF) * (mB - mF);
+    if (v > best) { best = v; th = i; }
+  }
+  const thr = Math.max((th + 1) / 64 * mx, 18);
+  const px = new Float64Array(W), py = new Float64Array(H); let mass = 0, fg = 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const v = bl[y * W + x]; if (v > thr) { const wgt = v - thr; px[x] += wgt; py[y] += wgt; mass += wgt; fg++; } }
+  const frac = fg / tot;
+  if (!mass || frac < 0.01 || frac > 0.75) return null;
+  const pct = (arr, q) => { let c = 0; const t = mass * q; for (let i = 0; i < arr.length; i++) { c += arr[i]; if (c >= t) return i; } return arr.length - 1; };
+  return [pct(px, 0.03) / S, pct(py, 0.03) / S, (pct(px, 0.97) + 1) / S, (pct(py, 0.97) + 1) / S];
+}
+// Caja → cuadrado centrado en ella (lado = lado mayor × margen, mínimo 30 % del lado corto).
+function boxSquare(img, box, margin) {
+  const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+  const cx = (box[0] + box[2]) / 2, cy = (box[1] + box[3]) / 2;
+  let side = Math.max(box[2] - box[0], box[3] - box[1]) * margin;
+  side = Math.min(Math.max(side, Math.min(w, h) * 0.3), Math.max(w, h));
+  return [cx - side / 2, cy - side / 2, side];
+}
+// Las vistas de v2 (manifiesto: views), cada una size×size:
+//   ['c', f] = cuadrado centrado de fracción f del lado corto; ['p', m] = pieza con margen m
+//   (sin pieza clara = foto entera).
+function v2Views(eng, img) {
+  const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height, s = Math.min(w, h);
+  const box = pieceBox(img);
+  return eng.views.map(([t, f]) => {
+    const q = t === 'p' && box ? boxSquare(img, box, f) : [(w - s * (t === 'c' ? f : 1)) / 2, (h - s * (t === 'c' ? f : 1)) / 2, s * (t === 'c' ? f : 1)];
+    return cropSquare(img, q[0], q[1], q[2], eng.size);
+  });
+}
+// v2: huella de una foto = promedio de las vistas (cada vista: partes normalizadas) →
+// proyección → normalizada → rellenada con ceros hasta EMB_DIM.
+function embedV2(eng, img) { return projectV2(eng.proj, rawV2(eng, img)); }
+// Descriptor sin proyectar (dIn números, normalizado). Con esto se aprende la proyección.
+function rawV2(eng, img) {
+  const { tf, model, proj } = eng;
+  const views = v2Views(eng, img);
+  const out = tf.tidy(() => model.execute(tf.stack(views.map(c => tf.browser.fromPixels(c))).toFloat().div(255)));
+  const raw = out.dataSync(); out.dispose();
+  const dIn = proj.dIn, acc = new Float64Array(dIn);
+  for (let v = 0; v < views.length; v++) {
+    const f = raw.subarray(v * dIn, (v + 1) * dIn), x = new Float64Array(dIn);
+    for (const [a, b] of eng.parts) { let s = 0; for (let i = a; i < b; i++) s += f[i] * f[i]; const n = Math.sqrt(s) || 1; for (let i = a; i < b; i++) x[i] = f[i] / n; }
+    let s = 0; for (let i = 0; i < dIn; i++) s += x[i] * x[i]; const n = Math.sqrt(s) || 1;
+    for (let i = 0; i < dIn; i++) acc[i] += x[i] / n;
+  }
+  return l2norm(acc);
+}
+function projectV2(proj, x) {
+  const { mu, W, dIn, dOut } = proj, y = new Float64Array(dOut);
+  for (let i = 0; i < dIn; i++) { const xi = x[i] - mu[i]; if (!xi) continue; const r = i * dOut; for (let j = 0; j < dOut; j++) y[j] += xi * W[r + j]; }
+  const out = new Float32Array(EMB_DIM); out.set(l2norm(y));
+  return out;
+}
+// Huella de una foto. role 'base' = foto del catálogo; 'query' = foto a identificar o variante
+// de entrenamiento. En v2 son la misma; en v1 la del catálogo es solo el recorte completo.
+function embedPhoto(eng, img, role) {
+  if (eng.kind === 'v2') return embedV2(eng, img);
+  return role === 'base' ? embedCanvas(eng, squareCrop(img, 1, 224)) : embedMultiCrop(eng, img);
 }
 // Huella de color: histograma HSV de la zona central (8 tonos × 3 saturaciones + 3 grises).
 function colorDescriptor(img) {
@@ -2488,9 +2684,9 @@ function embDbPut(db, key, val) {
 const _embMem = new Map(); // misma sesión, sin volver a IndexedDB
 // Calcula (o lee de la caché) la huella de cada producto disponible con foto, y junta sus
 // referencias de entrenamiento POR CADA FOTO del producto (imageUrl + images[]): para cada URL
-// se usan las precalculadas solo si existen para ESA misma URL (models/catalog-refs-v1.*; si la
+// se usan las precalculadas solo si existen para ESA misma URL (models/catalog-refs-v2.*; si la
 // foto cambió o es nueva no hay entrada y se ignoran), y si no, AUG_LIVE_N variantes calculadas
-// acá con la misma función y semilla, guardadas en IndexedDB por URL (clave EMB_VERSION|url: una
+// acá con la misma función y semilla, guardadas en IndexedDB por URL (clave versión|url: una
 // foto nueva o cambiada siempre se recalcula sola; las que no cambiaron no se vuelven a bajar).
 // Las fotos de galería además suman su huella base como referencia.
 // onProgress(hechos, total). Devuelve { items: [{p, emb, color, aug}], failed, computed, trained }.
@@ -2498,13 +2694,13 @@ async function prepareCatalogEmbeddings(products, onProgress) {
   const list = (products || []).filter(p => p && p.available !== false && productImageUrl(p));
   const eng = await loadRecognitionModel();
   const db = await embDb();
-  const st = await loadStaticRefs(); // null = sin referencias precalculadas (sin variantes)
+  const st = await loadStaticRefs(eng); // null = sin referencias precalculadas (sin variantes)
   const items = []; let failed = 0, computed = 0, done = 0, trained = 0;
   for (const p of list) {
     const id = String(p.id), urls = productImageUrls(p);
     let main = null; const aug = [];
     for (let k = 0; k < urls.length; k++) {
-      const url = urls[k], key = EMB_VERSION + '|' + url;
+      const url = urls[k], key = eng.ver + '|' + url;
       const sRef = st && st.get(id + '|' + url);
       let rec = _embMem.get(key) || await embDbGet(db, key);
       const okRec = !!(rec && rec.emb && rec.emb.length === EMB_DIM);
@@ -2513,7 +2709,7 @@ async function prepareCatalogEmbeddings(products, onProgress) {
       if ((!okRec && !(rec && rec.fromStatic)) || needLive) {
         try {
           const img = await loadCatalogImg(url);
-          rec = okRec ? { ...rec } : { emb: embedCanvas(eng, squareCrop(img, 1, 224)), color: colorDescriptor(img), at: Date.now() };
+          rec = okRec ? { ...rec } : { emb: embedPhoto(eng, img, 'base'), color: colorDescriptor(img), at: Date.now() };
           if (needLive) { rec.aug = augmentEmbeddings(eng, img, url, AUG_LIVE_N); rec.augV = AUG_VERSION; }
           computed++;
           await embDbPut(db, key, rec);
@@ -2538,19 +2734,19 @@ async function prepareCatalogEmbeddings(products, onProgress) {
     done++;
     if (onProgress) onProgress(done, list.length);
   }
-  return { items, failed, computed, trained, total: list.length };
+  return { items, failed, computed, trained, total: list.length, kind: eng.kind };
 }
-// Huella "tipo foto del taller": promedio de 3 recortes centrados (100 %, 80 %, 60 %). La usan
-// la foto a identificar y las variantes de entrenamiento (así se comparan en igualdad).
+// v1: "foto del taller" = promedio de 3 recortes centrados (100 %, 80 %, 60 %).
 function embedMultiCrop(eng, img) {
   const acc = new Float32Array(EMB_DIM);
   for (const f of [1, 0.8, 0.6]) { const v = embedCanvas(eng, squareCrop(img, f, 224)); for (let i = 0; i < EMB_DIM; i++) acc[i] += v[i]; }
   return l2norm(acc);
 }
+// Huella de la foto a identificar. Lleva la versión y los pesos de la huella con que se calculó.
 async function embedQueryPhoto(dataUrl) {
   const eng = await loadRecognitionModel();
   const img = await loadImg(dataUrl, false);
-  return { emb: embedMultiCrop(eng, img), color: colorDescriptor(img) };
+  return { emb: embedPhoto(eng, img, 'query'), color: colorDescriptor(img), kind: eng.kind, ver: eng.ver, cw: eng.cw, margin: eng.margin, pct: eng.pct };
 }
 // Referencias aprendidas: int8 en base64, escalado por el máximo absoluto (el coseno no
 // depende de la escala) → al leerlas se vuelven a normalizar.
@@ -2569,16 +2765,22 @@ function dequantizeEmb(b64) {
     return l2norm(Float32Array.from(new Int8Array(u.buffer)));
   } catch (_) { return null; }
 }
-// ── "Entrenamiento" con el catálogo (19 nov) ──
-// MobileNet no se re-entrena (no hace falta y en el navegador sería lento): se le enseñan
+// Vector para guardar como referencia aprendida (/identify/ref/add). El Worker no guarda la
+// versión: las que hay se tratan como de la versión actual (RECOG_VERSION). Si v2 no cargó y
+// el panel quedó en v1 de respaldo, NO se guarda nada (no mezclar huellas de dos versiones).
+function learnedRefVector(q) {
+  if (!q || q.kind !== 'v2') throw new Error('El identificador mejorado no terminó de cargar (modo básico): esta foto no se guarda como referencia. Recarga la página e inténtalo de nuevo.');
+  return quantizeEmb(q.emb);
+}
+// ── "Entrenamiento" con el catálogo ──
+// La red no se re-entrena (no hace falta y en el navegador sería lento): se le enseñan
 // VARIANTES de cada foto del catálogo que imitan una foto del taller (recorte, giro, mesa de
 // fondo, luz cálida/fría, brillo, contraste, desenfoque leve, espejo). Cada variante es una
 // "referencia" más del producto. tools/build-catalog-refs.mjs las precalcula para todo el
-// catálogo en models/catalog-refs-v1.bin (+ .json); los productos nuevos o con foto cambiada
+// catálogo en models/catalog-refs-v2.bin (+ .json); los productos nuevos o con foto cambiada
 // calculan AUG_LIVE_N variantes acá mismo, con la MISMA función y la misma semilla.
 const AUG_VERSION = 'aug-v1';
-const AUG_LIVE_N = 4;
-const REFS_INDEX_URL = 'models/catalog-refs-v1.json';
+const AUG_LIVE_N = 4;           // variantes en vivo por foto nueva o cambiada (sin referencias precalculadas)
 function mulberry32(a) {
   return function () {
     a = (a + 0x6D2B79F5) | 0;
@@ -2649,37 +2851,40 @@ function augmentPhoto(img, seed, size = 320) {
 }
 function augmentEmbeddings(eng, img, url, n) {
   const out = [];
-  for (let k = 0; k < n; k++) out.push(embedMultiCrop(eng, augmentPhoto(img, augSeed(url, k))));
+  for (let k = 0; k < n; k++) out.push(embedPhoto(eng, augmentPhoto(img, augSeed(url, k)), 'query'));
   return out;
 }
-// Referencias precalculadas (models/catalog-refs-v1.json + .bin, ver tools/build-catalog-refs.mjs).
-// El índice (chico) se pide una vez por sesión con revalidación; el .bin (~2 MB) se guarda en
-// IndexedDB y solo se vuelve a bajar si cambió su hash. Sin conexión se usa la copia guardada.
-// Devuelve Map "id|url" → { base, color, aug: [Float32Array] } o null si no hay.
-let _staticRefsPromise = null;
-function loadStaticRefs() {
-  if (_staticRefsPromise) return _staticRefsPromise;
+// Referencias precalculadas (models/catalog-refs-v2.json + .bin, o v1 en modo de respaldo; ver
+// tools/build-catalog-refs.mjs). El índice (chico) se pide una vez por sesión con revalidación;
+// el .bin se guarda en IndexedDB y solo se vuelve a bajar si cambió su hash. Sin conexión se
+// usa la copia guardada. Los vectores del .bin pueden ser más cortos que EMB_DIM (v2: 512): se
+// rellenan con ceros. Devuelve Map "id|url" → { base, color, aug: [Float32Array] } o null.
+let _staticRefsPromise = null, _staticRefsVer = '';
+function loadStaticRefs(eng) {
+  if (_staticRefsPromise && _staticRefsVer === eng.ver) return _staticRefsPromise;
+  _staticRefsVer = eng.ver;
   _staticRefsPromise = (async () => {
-    const db = await embDb();
-    const cached = await embDbGet(db, 'static-refs'); // { idx, buf }
+    const db = await embDb(), ckey = 'static-refs|' + eng.ver;
+    const cached = await embDbGet(db, ckey); // { idx, buf }
     let idx = null, buf = null;
     try {
-      const res = await fetch(REFS_INDEX_URL, { cache: 'no-cache' });
+      const res = await fetch(eng.refsUrl, { cache: 'no-cache' });
       if (res.ok) idx = await res.json();
     } catch (e) { console.warn('referencias precalculadas: sin índice', e && e.message); }
     if (idx && cached && cached.idx && cached.idx.binSha256 === idx.binSha256 && cached.buf instanceof ArrayBuffer) buf = cached.buf;
     else if (idx) {
       try {
-        const r = await fetch(new URL(idx.bin, new URL(REFS_INDEX_URL, location.href)).href + '?h=' + String(idx.binSha256).slice(0, 12));
+        const r = await fetch(new URL(idx.bin, new URL(eng.refsUrl, location.href)).href + '?h=' + String(idx.binSha256).slice(0, 12));
         if (r.ok) buf = await r.arrayBuffer();
       } catch (e) { console.warn('referencias precalculadas: sin .bin', e && e.message); }
-      if (buf && buf.byteLength === idx.binBytes) await embDbPut(db, 'static-refs', { idx, buf });
+      if (buf && buf.byteLength === idx.binBytes) await embDbPut(db, ckey, { idx, buf });
       else buf = null;
     }
     if (!buf && cached && cached.idx && cached.buf instanceof ArrayBuffer) { idx = cached.idx; buf = cached.buf; } // sin conexión
-    if (!idx || !buf || idx.model !== EMB_VERSION || idx.dim !== EMB_DIM || buf.byteLength !== idx.binBytes) return null;
-    const i8 = new Int8Array(buf), nVec = i8.length / EMB_DIM;
-    const vec = k => l2norm(Float32Array.from(i8.subarray(k * EMB_DIM, (k + 1) * EMB_DIM)));
+    const dim = idx && idx.dim;
+    if (!idx || !buf || idx.model !== eng.ver || !(dim > 0 && dim <= EMB_DIM) || buf.byteLength !== idx.binBytes) return null;
+    const i8 = new Int8Array(buf), nVec = i8.length / dim;
+    const vec = k => { const v = new Float32Array(EMB_DIM); v.set(l2norm(Float32Array.from(i8.subarray(k * dim, (k + 1) * dim)))); return v; };
     const map = new Map();
     for (const [id, list] of Object.entries(idx.products || {})) {
       for (const e of (Array.isArray(list) ? list : [])) {
@@ -2700,22 +2905,25 @@ function productImageUrls(p) {
   for (const u of (p && Array.isArray(p.images) ? p.images : [])) if (typeof u === 'string' && /^https:\/\//.test(u) && !out.includes(u)) out.push(u);
   return out;
 }
-// Puntaje "amigable" 0–100 a partir del puntaje combinado (calibrado con fotos de prueba).
-function friendlyPct(score) { return Math.round(Math.max(0, Math.min(1, (score - 0.35) / 0.55)) * 100); }
+// Puntaje "amigable" 0–100 a partir del puntaje combinado (calibrado con fotos de prueba por
+// versión: pct = [puntaje que da 0 %, rango hasta 100 %]).
+function friendlyPct(score, pct) { const [lo, span] = pct || [0.35, 0.55]; return Math.round(Math.max(0, Math.min(1, (score - lo) / span)) * 100); }
 // Similitud de un producto = la mejor entre su foto del catálogo, sus referencias aprendidas
-// (fotos reales confirmadas) y sus referencias de entrenamiento menos AUG_MARGIN (son
-// variantes sintéticas: se les pide un poco más para ganar; medido con
-// tools/eval-catalog-refs.mjs, rinde mejor que el máximo puro o el promedio de las 2 mejores).
-const AUG_MARGIN = 0.03;
+// (fotos reales confirmadas) y sus referencias de entrenamiento menos el margen (son variantes
+// sintéticas: se les pide un poco más para ganar; medido con tools/eval-catalog-refs.mjs).
+// Las referencias aprendidas solo se usan con huellas de la versión actual (v2): en el modo de
+// respaldo v1 se ignoran.
 function rankCatalog(query, items, refs, category, topN = 5) {
   const catLc = category && category !== 'Todas' ? String(category).toLowerCase() : '';
+  const cw = query.cw != null ? query.cw : COLOR_W, margin = query.margin != null ? query.margin : 0.03;
+  const useRefs = query.kind !== 'v1';
   const out = [];
   for (const it of items) {
     if (catLc && String(it.p.category || '').toLowerCase() !== catLc) continue;
     let emb = dot(query.emb, it.emb);
-    for (const r of (refs && refs[String(it.p.id)]) || []) emb = Math.max(emb, dot(query.emb, r));
-    for (const r of it.aug || []) emb = Math.max(emb, dot(query.emb, r) - AUG_MARGIN);
-    const score = EMB_W * emb + COLOR_W * colorSim(query.color, it.color);
+    if (useRefs) for (const r of (refs && refs[String(it.p.id)]) || []) emb = Math.max(emb, dot(query.emb, r));
+    for (const r of it.aug || []) emb = Math.max(emb, dot(query.emb, r) - margin);
+    const score = (1 - cw) * emb + cw * colorSim(query.color, it.color);
     out.push({ p: it.p, score, emb });
   }
   out.sort((a, b) => b.score - a.score);
@@ -3166,7 +3374,7 @@ function EnrollPhotosModal({ products, token, onClose, onlyId = null }) {
         const ph = await photoToJpegBase64(batch[i], 640, 0.8);
         const q2 = await embedQueryPhoto(ph.dataUrl);
         setStatus(`Guardando foto ${i + 1} de ${batch.length}…`);
-        const r = await apiCall('identify/ref/add', { token, id: String(cur.id), vector: quantizeEmb(q2.emb) });
+        const r = await apiCall('identify/ref/add', { token, id: String(cur.id), vector: learnedRefVector(q2) });
         saved++;
         const n = r && Number.isInteger(r.count) ? r.count : cnt(cur) + 1;
         setRefCount(cur.id, n);
@@ -3277,7 +3485,7 @@ const srOnlyStyle = { position: 'absolute', width: 1, height: 1, padding: 0, mar
 
 // ── Agregar pieza a un pedido (18–19 nov) ──
 // 3 caminos: escanear la etiqueta QR, escribir el código (AN001) o identificar por foto
-// (MobileNet, ver arriba). El código resuelve la pieza directo → confirmar (con stock) → agregar.
+// (ver arriba). El código resuelve la pieza directo → confirmar (con stock) → agregar.
 // Después de agregar por QR, código o búsqueda: paso "Enseñar al identificador" (foto de la joya,
 // se guarda en segundo plano con onTeach). Con foto de la joya (modo foto), aprende de esa foto.
 function AddPieceModal({ order, token, photo, products, categories, stock, onRetake, onClose, onAdded, onTeach }) {
@@ -3335,7 +3543,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
       let q = queryRef.current;
       if (!q || q.src !== photo.dataUrl) { q = { ...(await embedQueryPhoto(photo.dataUrl)), src: photo.dataUrl }; queryRef.current = q; }
       const ranked = rankCatalog(q, catalog.items, refsRef.current, cat, 5);
-      setMatches(ranked.map(r => ({ id: String(r.p.id), name: r.p.name, sku: normalizeSku(r.p.sku), category: r.p.category, imageUrl: productImageUrl(r.p), pct: friendlyPct(r.score) })));
+      setMatches(ranked.map(r => ({ id: String(r.p.id), name: r.p.name, sku: normalizeSku(r.p.sku), category: r.p.category, imageUrl: productImageUrl(r.p), pct: friendlyPct(r.score, q.pct) })));
     } catch (e) { setErrMsg(pieceErrMsg(e)); }
     setBusy(false);
   };
@@ -3358,7 +3566,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
       if (mode === 'photo' && photo && !confirmP) {
         const q = queryRef.current;
         if (q && q.src === photo.dataUrl) {
-          apiCall('identify/ref/add', { token, id: String(pid), vector: quantizeEmb(q.emb) })
+          Promise.resolve().then(() => apiCall('identify/ref/add', { token, id: String(pid), vector: learnedRefVector(q) }))
             .then(r => { if (r && Number.isInteger(r.count)) setRefCount(pid, r.count); })
             .catch(e => console.warn('identify/ref/add:', e && e.message));
         } else if (onTeach) onTeach(pid, name, { dataUrl: photo.dataUrl });
@@ -3516,7 +3724,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
           </div>
           <div style={{ fontSize: 11, color: '#7A6880', marginBottom: 6 }}>💡 Elegir la categoría ayuda a acertar.</div>
           <div style={{ fontSize: 11, color: '#7A6880', marginBottom: 10 }} aria-live="polite">
-            {prep.phase === 'model' && 'Cargando el reconocimiento (la primera vez descarga ~16 MB)…'}
+            {prep.phase === 'model' && 'Cargando el reconocimiento (la primera vez descarga ~15 MB)…'}
             {prep.phase === 'catalog' && `Preparando el catálogo… ${prep.done}/${prep.total}`}
             {prep.phase === 'ready' && (prep.failed ? `✓ Catálogo listo · ${prep.failed} pieza${prep.failed === 1 ? '' : 's'} sin foto utilizable` : '✓ Catálogo listo')}
           </div>
@@ -7598,6 +7806,8 @@ function App() {
             {syncMsg}
           </div>
         )}
+
+        <RecogUpgradeNotice token={session.token} counts={refCounts} />
 
         {/* ── WhatsApp + Publish bar ── */}
         <div style={{ background: 'white', borderRadius: 12, padding: '12px 16px', marginBottom: 14, display: 'flex', alignItems: 'center', gap: 12, boxShadow: '0 1px 6px rgba(0,0,0,.05)', flexWrap: 'wrap' }}>
