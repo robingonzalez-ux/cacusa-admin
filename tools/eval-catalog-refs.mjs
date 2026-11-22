@@ -9,6 +9,8 @@
 //   node eval-catalog-refs.mjs --site <copia local del sitio> [--tfjs tf.min.js] [--refs ../models/catalog-refs-v2]
 //          [--cache q.json] (guarda/reusa las huellas de las fotos de prueba) [--panel] (cifras
 //          oficiales con las funciones reales del panel: prepareCatalogEmbeddings + rankCatalog)
+//          [--multi] [--box] [--cache21 q21.json] (v2.1: varias fotos de la pieza y caja marcada a mano)
+//          [--quality] (calibración del aviso de foto oscura/movida)
 import fs from 'node:fs';
 import path from 'node:path';
 import { ADMIN_DIR, openRecognitionPage, productUrls } from './recog-page.mjs';
@@ -178,5 +180,101 @@ if (opt('panel', false)) {
     console.log(`  [${kinds.join('+')}] n=${sel.length}`);
     for (const mode of ['sin refs', 'con refs']) console.log(`    ${mode.padEnd(8)} ${line(mode)}`);
   }
+}
+// ── Fase 4 (--multi / --box, v2.1): varias fotos de la misma pieza y "Marca la joya" ──
+// Mismas mitades que el ajuste: producto en la mitad "ajuste" si strHash(id) es par, si no "prueba".
+// Por producto: 4 fotos de prueba de cada modo (A, B; semillas 0–3) y, si tiene otra foto, esa
+// foto tal cual + 2 versiones "A" (sin sus referencias). --multi combina 2 o 3 fotos de la misma
+// pieza con rankCatalogMulti; --box usa la caja exacta de la pieza en la foto de prueba (la que
+// marcaría a mano) en vez de la automática. Todo con las funciones reales del panel.
+if (opt('multi', false) || opt('box', false)) {
+  const { page: pg, localUrl } = await page();
+  const C21 = opt('cache21', null);
+  let d21 = C21 && fs.existsSync(C21) ? JSON.parse(fs.readFileSync(C21, 'utf8')) : null;
+  if (d21 && d21.ver !== engInfo.ver) d21 = null;
+  if (!d21) {
+    d21 = { ver: engInfo.ver, q: [] };
+    const t0 = Date.now();
+    for (const [i, p] of avail.entries()) {
+      const urls = productUrls(p);
+      const r = await pg.evaluate(async ([main, extras, id, wantBox]) => {
+        const img = await loadImg(main, false), out = [], E = q => Array.from(q.emb.subarray(0, 512));
+        for (const mode of ['A', 'B']) for (let s = 0; s < 4; s++) {
+          const info = {}, du = makeTestPhoto(img, strHash('eval|' + id + '|' + mode + (s ? '|' + s : '')), mode, info);
+          const q = await embedQueryPhoto(du), rec = { kind: mode, k: s, emb: E(q), color: Array.from(q.color) };
+          if (wantBox) rec.embBox = E(await embedQueryPhoto(du, { box: info.box }));
+          out.push(rec);
+        }
+        for (const [k, u] of extras.entries()) {
+          const eimg = await loadImg(u.local, false);
+          const q0 = await embedQueryPhoto(u.local);
+          out.push({ kind: 'otra-foto', k: 0, url: u.url, emb: E(q0), color: Array.from(q0.color) });
+          for (let s = 0; s < 2; s++) { const q = await embedQueryPhoto(makeTestPhoto(eimg, strHash('eval|' + id + '|X' + k + (s ? '|' + s : '')), 'A')); out.push({ kind: 'otra-foto+A', k: s, url: u.url, emb: E(q), color: Array.from(q.color) }); }
+        }
+        return out;
+      }, [localUrl(urls[0]), urls.slice(1).map(u => ({ url: u, local: localUrl(u) })), String(p.id), !!opt('box', false)]);
+      for (const q of r) d21.q.push({ id: String(p.id), category: p.category, ...q });
+      process.stdout.write(`\r  fase 4: ${i + 1}/${avail.length} productos · ${((Date.now() - t0) / 1000).toFixed(0)} s  `);
+    }
+    console.log('');
+    if (C21) fs.writeFileSync(C21, JSON.stringify(d21));
+  }
+  const res = await pg.evaluate(async ([qs, prods, wantMulti, wantBox]) => {
+    const eng = await loadRecognitionModel();
+    _staticRefsPromise = null; _staticRefsVer = eng.ver;
+    const cat = await prepareCatalogEmbeddings(prods);
+    const pad = a => { const v = new Float32Array(EMB_DIM); v.set(a); return v; };
+    const Q = qs.map(q => ({ ...q, emb: pad(q.emb), embBox: q.embBox ? pad(q.embBox) : null, color: Float32Array.from(q.color), kind2: q.kind, kind: eng.kind, cw: eng.cw, margin: eng.margin }));
+    const split = id => (strHash(String(id)) % 2 === 0 ? 'ajuste' : 'prueba');
+    // rank del producto correcto, sin y con categoría.
+    const rankOf = (items, list, id, category) => { const r = c => rankCatalogMulti(list, items, {}, c, Infinity).findIndex(x => String(x.p.id) === id) + 1; return [r('Todas'), r(category)]; };
+    const by = {}; for (const q of Q) (by[q.id] ||= []).push(q);
+    const groups = {};
+    const add = (g, sp, rk) => { ((groups[g] ||= {})[sp] ||= []).push(rk); };
+    for (const [id, list] of Object.entries(by)) {
+      const sp = split(id), c = list[0].category, f = (k, s) => list.find(q => q.kind2 === k && q.k === s);
+      const A = [0, 1, 2, 3].map(s => f('A', s)), B = [0, 1, 2, 3].map(s => f('B', s));
+      for (const q of [...A, ...B]) add('1 foto (A o B)', sp, rankOf(cat.items, [q], id, c));
+      if (wantMulti) {
+        for (const pr of [[A[0], B[1]], [A[2], B[3]], [A[1], A[3]], [B[0], B[2]]]) add('2 fotos', sp, rankOf(cat.items, pr, id, c));
+        for (const tr of [[A[0], B[1], A[2]], [B[0], A[1], B[3]]]) add('3 fotos', sp, rankOf(cat.items, tr, id, c));
+        // Otra foto real del producto (sin sus referencias: se quita de images[] como en la fase 3).
+        for (const url of [...new Set(list.filter(q => q.url).map(q => q.url))]) {
+          const hidden = await prepareCatalogEmbeddings(prods.map(p => String(p.id) === id ? { ...p, images: (p.images || []).filter(u => u !== url) } : p));
+          const o0 = list.find(q => q.url === url && q.kind2 === 'otra-foto'), o1 = list.find(q => q.url === url && q.kind2 === 'otra-foto+A' && q.k === 0), o2 = list.find(q => q.url === url && q.kind2 === 'otra-foto+A' && q.k === 1);
+          for (const q of [o0, o1, o2]) add('otra foto, 1', sp, rankOf(hidden.items, [q], id, c));
+          for (const pr of [[o0, o1], [o1, o2]]) add('otra foto, 2', sp, rankOf(hidden.items, pr, id, c));
+          add('otra foto, 3', sp, rankOf(hidden.items, [o0, o1, o2], id, c));
+        }
+      }
+      if (wantBox) for (const q of [...A, ...B]) add('1 foto, caja exacta', sp, rankOf(cat.items, [{ ...q, emb: q.embBox }], id, c));
+    }
+    return groups;
+  }, [d21.q, catalog.products, !!opt('multi', false), !!opt('box', false)]);
+  console.log('\n== v2.1 (funciones reales del panel; mitad de prueba | mitad de ajuste) ==');
+  for (const [g, bySplit] of Object.entries(res)) {
+    const f = r => { const n = r.length, h = j => (100 * r.filter(x => x[j] === 1).length / n).toFixed(1), h5 = j => (100 * r.filter(x => x[j] >= 1 && x[j] <= 5).length / n).toFixed(1); return `n=${n} hit@1 ${h(0)} % hit@5 ${h5(0)} % | categoría ${h(1)} % / ${h5(1)} %`; };
+    console.log(`  ${g.padEnd(22)} prueba: ${f(bySplit.prueba || [])}   ajuste: ${f(bySplit.ajuste || [])}`);
+  }
+}
+// ── Fase 5 (--quality): calibración del aviso "salió oscura/movida" (photoQuality) ──
+// Ninguna foto del catálogo debe disparar el aviso; se cuenta también cuántas versiones
+// oscurecidas (brillo 30 %) y desenfocadas (6 px) sí lo disparan, y las fotos de prueba A/B.
+if (opt('quality', false)) {
+  const { page: pg, localUrl } = await page();
+  const urls = [...new Set(catalog.products.flatMap(productUrls))];
+  const rows = [];
+  for (const u of urls) rows.push(await pg.evaluate(async src => {
+    const img = await loadImg(src, false);
+    const mk = f => { const cv = document.createElement('canvas'); cv.width = img.naturalWidth; cv.height = img.naturalHeight; const c = cv.getContext('2d'); c.filter = f; c.drawImage(img, 0, 0); return cv; };
+    const flag = q => q.dark || q.blurry, seed = strHash(src);
+    const A = await loadImg(makeTestPhoto(img, seed, 'A'), false), B = await loadImg(makeTestPhoto(img, seed, 'B'), false);
+    const o = photoQuality(img);
+    return { lum: o.lum, lap: o.lap, orig: flag(o), dark: flag(photoQuality(mk('brightness(0.3)'))), blur: flag(photoQuality(mk('blur(6px)'))), A: flag(photoQuality(A)), B: flag(photoQuality(B)) };
+  }, localUrl(u)));
+  const cnt = k => rows.filter(r => r[k]).length;
+  console.log(`\n== Aviso de calidad (${rows.length} fotos del catálogo) ==`);
+  console.log(`  catálogo: ${cnt('orig')} avisos (luminancia mín. ${Math.min(...rows.map(r => r.lum)).toFixed(0)}, nitidez mín. ${Math.min(...rows.map(r => r.lap)).toFixed(0)})`);
+  console.log(`  oscurecidas: ${cnt('dark')} · desenfocadas: ${cnt('blur')} · fotos de prueba A: ${cnt('A')} · B: ${cnt('B')} (de ${rows.length})`);
 }
 if (rp) await rp.close();

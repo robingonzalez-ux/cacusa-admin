@@ -2583,21 +2583,25 @@ function boxSquare(img, box, margin) {
 // Las vistas de v2 (manifiesto: views), cada una size×size:
 //   ['c', f] = cuadrado centrado de fracción f del lado corto; ['p', m] = pieza con margen m
 //   (sin pieza clara = foto entera).
-function v2Views(eng, img) {
+// manualBox ("Marca la joya", [x0, y0, x1, y1] en px de la foto): la zona la marca la usuaria y
+// las vistas pasan a MANUAL_VIEWS (centro 80/60 % + la zona con margen 1, 1,25 y 1,6; elegido con
+// tools/eval-catalog-refs.mjs --box sobre la mitad de ajuste).
+const MANUAL_VIEWS = [['c', 0.8], ['c', 0.6], ['p', 1], ['p', 1.25], ['p', 1.6]];
+function v2Views(eng, img, manualBox) {
   const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height, s = Math.min(w, h);
-  const box = pieceBox(img);
-  return eng.views.map(([t, f]) => {
+  const box = manualBox || pieceBox(img);
+  return (manualBox ? MANUAL_VIEWS : eng.views).map(([t, f]) => {
     const q = t === 'p' && box ? boxSquare(img, box, f) : [(w - s * (t === 'c' ? f : 1)) / 2, (h - s * (t === 'c' ? f : 1)) / 2, s * (t === 'c' ? f : 1)];
     return cropSquare(img, q[0], q[1], q[2], eng.size);
   });
 }
 // v2: huella de una foto = promedio de las vistas (cada vista: partes normalizadas) →
 // proyección → normalizada → rellenada con ceros hasta EMB_DIM.
-function embedV2(eng, img) { return projectV2(eng.proj, rawV2(eng, img)); }
+function embedV2(eng, img, manualBox) { return projectV2(eng.proj, rawV2(eng, img, manualBox)); }
 // Descriptor sin proyectar (dIn números, normalizado). Con esto se aprende la proyección.
-function rawV2(eng, img) {
+function rawV2(eng, img, manualBox) {
   const { tf, model, proj } = eng;
-  const views = v2Views(eng, img);
+  const views = v2Views(eng, img, manualBox);
   const out = tf.tidy(() => model.execute(tf.stack(views.map(c => tf.browser.fromPixels(c))).toFloat().div(255)));
   const raw = out.dataSync(); out.dispose();
   const dIn = proj.dIn, acc = new Float64Array(dIn);
@@ -2617,9 +2621,36 @@ function projectV2(proj, x) {
 }
 // Huella de una foto. role 'base' = foto del catálogo; 'query' = foto a identificar o variante
 // de entrenamiento. En v2 son la misma; en v1 la del catálogo es solo el recorte completo.
-function embedPhoto(eng, img, role) {
-  if (eng.kind === 'v2') return embedV2(eng, img);
+// manualBox: zona marcada a mano (solo v2; en el modo de respaldo v1 se ignora).
+function embedPhoto(eng, img, role, manualBox) {
+  if (eng.kind === 'v2') return embedV2(eng, img, manualBox || null);
   return role === 'base' ? embedCanvas(eng, squareCrop(img, 1, 224)) : embedMultiCrop(eng, img);
+}
+// ── Calidad de la foto (aviso "salió oscura/movida", 22 nov) ──
+// Gris reducido a 160 px de lado mayor: luminancia media (0–255) y nitidez = varianza del
+// laplaciano (4 vecinos), medida en la zona de la pieza si se encontró (si no, la foto entera)
+// para que un fondo liso no la haga parecer "movida". Umbrales calibrados con todas las fotos del
+// catálogo (ninguna dispara el aviso; ver tools/eval-catalog-refs.mjs --quality).
+const QUALITY_DARK_LUM = 62, QUALITY_BLUR_LAP = 100; // catálogo: luminancia mín. 70, nitidez mín. 160
+function photoQuality(img, box) {
+  const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+  const S = 160 / Math.max(w, h), W = Math.max(8, Math.round(w * S)), H = Math.max(8, Math.round(h * S));
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d'); ctx.drawImage(img, 0, 0, W, H);
+  const d = ctx.getImageData(0, 0, W, H).data, g = new Float32Array(W * H);
+  let sum = 0;
+  for (let p = 0, i = 0; p < W * H; p++, i += 4) { g[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; sum += g[p]; }
+  const b = box === undefined ? pieceBox(img) : box;
+  const x0 = Math.max(1, Math.floor((b ? b[0] : 0) * S)), y0 = Math.max(1, Math.floor((b ? b[1] : 0) * S));
+  const x1 = Math.min(W - 1, Math.ceil((b ? b[2] : w) * S)), y1 = Math.min(H - 1, Math.ceil((b ? b[3] : h) * S));
+  let n = 0, m = 0, m2 = 0;
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+    const p = y * W + x, l = g[p - 1] + g[p + 1] + g[p - W] + g[p + W] - 4 * g[p];
+    n++; m += l; m2 += l * l;
+  }
+  const lum = sum / (W * H), lap = n ? m2 / n - (m / n) * (m / n) : 0;
+  const dark = lum < QUALITY_DARK_LUM; // oscura ya baja el contraste: entonces no se dice además "movida"
+  return { lum, lap, dark, blurry: !dark && n > 0 && lap < QUALITY_BLUR_LAP };
 }
 // Huella de color: histograma HSV de la zona central (8 tonos × 3 saturaciones + 3 grises).
 function colorDescriptor(img) {
@@ -2743,10 +2774,19 @@ function embedMultiCrop(eng, img) {
   return l2norm(acc);
 }
 // Huella de la foto a identificar. Lleva la versión y los pesos de la huella con que se calculó.
-async function embedQueryPhoto(dataUrl) {
+// opts.box: zona marcada a mano ("Marca la joya").
+async function embedQueryPhoto(dataUrl, opts) {
   const eng = await loadRecognitionModel();
   const img = await loadImg(dataUrl, false);
-  return { emb: embedPhoto(eng, img, 'query'), color: colorDescriptor(img), kind: eng.kind, ver: eng.ver, cw: eng.cw, margin: eng.margin, pct: eng.pct };
+  const box = opts && Array.isArray(opts.box) ? opts.box : null;
+  return { emb: embedPhoto(eng, img, 'query', box), color: colorDescriptor(img), kind: eng.kind, ver: eng.ver, cw: eng.cw, margin: eng.margin, pct: eng.pct, box };
+}
+// Zona automática de la pieza, tamaño y calidad de una foto (sin cargar la red).
+async function photoInfo(dataUrl) {
+  const img = await loadImg(dataUrl, false);
+  const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+  const box = pieceBox(img);
+  return { w, h, box, quality: photoQuality(img, box) };
 }
 // Referencias aprendidas: int8 en base64, escalado por el máximo absoluto (el coseno no
 // depende de la escala) → al leerlas se vuelven a normalizar.
@@ -2928,6 +2968,43 @@ function rankCatalog(query, items, refs, category, topN = 5) {
   }
   out.sort((a, b) => b.score - a.score);
   return out.slice(0, topN);
+}
+// Varias fotos de la misma pieza (hasta 3, distintos ángulos): puntaje de cada producto = promedio
+// de sus puntajes en todas las fotos + MULTI_BONUS por cada foto extra en la que sale 1ro.
+// Medido con tools/eval-catalog-refs.mjs --multi (mitad de prueba): 1 foto 90,6 % → 2 fotos
+// 95,6 % → 3 fotos ≈ 97 % hit@1. El bono casi no cambia nada (desempata); 1 sola foto = rankCatalog.
+const MULTI_BONUS = 0.02;
+function rankCatalogMulti(queries, items, refs, category, topN = 5) {
+  const qs = (queries || []).filter(Boolean);
+  if (qs.length <= 1) return qs.length ? rankCatalog(qs[0], items, refs, category, Infinity).slice(0, topN) : [];
+  const acc = new Map();
+  for (const q of qs) {
+    const r = rankCatalog(q, items, refs, category, Infinity);
+    r.forEach((x, i) => {
+      const id = String(x.p.id), a = acc.get(id) || { p: x.p, score: 0, emb: 0, firsts: 0 };
+      a.score += x.score / qs.length; a.emb += x.emb / qs.length; if (i === 0) a.firsts++;
+      acc.set(id, a);
+    });
+  }
+  const out = [...acc.values()].map(a => ({ p: a.p, score: a.score + MULTI_BONUS * Math.max(0, a.firsts - 1), emb: a.emb }));
+  out.sort((a, b) => b.score - a.score);
+  return out.slice(0, topN);
+}
+// Desempate por stock: si 2 candidatas seguidas están a ≤ STOCK_TIE de puntaje y la de arriba
+// figura con stock 0 y la de abajo con stock > 0, sube la que tiene stock. Nunca saca a nadie de
+// la lista (las de stock 0 siguen ahí, con su aviso). qtyOf(id) → número o null (desconocido).
+const STOCK_TIE = 0.01;
+function stockTiebreak(list, qtyOf) {
+  const out = list.slice();
+  for (let pass = 0; pass < out.length; pass++) {
+    let moved = false;
+    for (let i = 0; i + 1 < out.length; i++) {
+      const a = out[i], b = out[i + 1];
+      if (a.score - b.score <= STOCK_TIE && qtyOf(String(a.p.id)) === 0 && (qtyOf(String(b.p.id)) || 0) > 0) { out[i] = b; out[i + 1] = a; moved = true; }
+    }
+    if (!moved) break;
+  }
+  return out;
 }
 
 // @@recog-end
@@ -3427,6 +3504,7 @@ function EnrollPhotosModal({ products, token, onClose, onlyId = null }) {
             {busy ? 'Guardando…' : cnt(cur) >= ENROLL_MAX_REFS ? 'Máximo de fotos alcanzado' : shots.length ? '📷 Tomar otra foto' : '📷 Tomar foto'}
           </button>
           <input ref={fileRef} type="file" accept="image/*" capture="environment" multiple aria-label="Fotos de la pieza para registrar" style={{ display: 'none' }} onChange={onFiles} />
+          <PhotoTip style={{ marginTop: 8 }} />
           <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#15803D', marginTop: 6, minHeight: 4 }}>{status}</div>
           {err && <div role="alert" style={{ fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderRadius: 8, padding: '6px 10px', marginTop: 6 }}>{err}</div>}
           {shots.length > 0 && <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>{shots.map((s, i) => <img key={i} src={s} alt={'Foto registrada ' + (i + 1)} style={thumb} />)}</div>}
@@ -3488,6 +3566,112 @@ const srOnlyStyle = { position: 'absolute', width: 1, height: 1, padding: 0, mar
 // (ver arriba). El código resuelve la pieza directo → confirmar (con stock) → agregar.
 // Después de agregar por QR, código o búsqueda: paso "Enseñar al identificador" (foto de la joya,
 // se guarda en segundo plano con onTeach). Con foto de la joya (modo foto), aprende de esa foto.
+// ── Fotos para el identificador (22 nov, v2.1): consejo de toma, "Marca la joya" y aviso de calidad ──
+const PHOTO_TIP = 'Fondo liso claro, sin sombra, que la joya llene el cuadro.';
+// Consejo con un cuadro guía (la cámara del teléfono es la nativa: el cuadro va acá, antes de tomarla).
+function PhotoTip({ style }) {
+  const c = { position: 'absolute', width: 9, height: 9, borderColor: '#9B5DE5', borderStyle: 'solid', borderWidth: 0 };
+  return (
+    <div data-testid="photoTip" style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12, color: '#5B4A63', background: '#F7F3FA', borderRadius: 10, padding: '8px 10px', ...style }}>
+      <span aria-hidden="true" style={{ position: 'relative', width: 34, height: 34, flexShrink: 0, background: '#FFFFFF', borderRadius: 4 }}>
+        <span style={{ ...c, top: 2, left: 2, borderTopWidth: 2, borderLeftWidth: 2 }} />
+        <span style={{ ...c, top: 2, right: 2, borderTopWidth: 2, borderRightWidth: 2 }} />
+        <span style={{ ...c, bottom: 2, left: 2, borderBottomWidth: 2, borderLeftWidth: 2 }} />
+        <span style={{ ...c, bottom: 2, right: 2, borderBottomWidth: 2, borderRightWidth: 2 }} />
+        <span style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#C0336E', fontSize: 16 }}>◇</span>
+      </span>
+      <span><b>Para que la reconozca:</b> {PHOTO_TIP.charAt(0).toLowerCase() + PHOTO_TIP.slice(1)}</span>
+    </div>
+  );
+}
+// Aviso (no bloquea) si la foto salió oscura o movida.
+function qualityMsg(q) {
+  if (!q || (!q.dark && !q.blurry)) return '';
+  return 'Toma otra: salió ' + (q.dark ? 'oscura' : 'movida');
+}
+// "Marca la joya": recuadro que se arrastra (mover) o se estira desde las esquinas, con mouse,
+// dedo o teclado (flechas mueven, Mayús + flechas cambian el tamaño). box en px de la foto.
+function JewelBoxEditor({ src, w, h, box, autoBox, onApply, onCancel, idPrefix }) {
+  const full = [0, 0, w, h];
+  const [b, setB] = useState(() => (box || autoBox || [w * 0.2, h * 0.2, w * 0.8, h * 0.8]).slice());
+  const wrapRef = useRef(null), drag = useRef(null);
+  const minS = Math.min(w, h) * 0.08;
+  const clampBox = nb => {
+    let [x0, y0, x1, y1] = nb;
+    if (x1 - x0 < minS) x1 = x0 + minS; if (y1 - y0 < minS) y1 = y0 + minS;
+    const dx = x0 < 0 ? -x0 : x1 > w ? w - x1 : 0, dy = y0 < 0 ? -y0 : y1 > h ? h - y1 : 0;
+    x0 += dx; x1 += dx; y0 += dy; y1 += dy;
+    return [Math.max(0, x0), Math.max(0, y0), Math.min(w, x1), Math.min(h, y1)];
+  };
+  const onDown = (mode) => e => {
+    e.preventDefault(); e.stopPropagation();
+    const r = wrapRef.current.getBoundingClientRect();
+    drag.current = { mode, x: e.clientX, y: e.clientY, b0: b.slice(), k: w / r.width };
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}
+  };
+  const onMove = e => {
+    const d = drag.current; if (!d) return;
+    const dx = (e.clientX - d.x) * d.k, dy = (e.clientY - d.y) * d.k, [x0, y0, x1, y1] = d.b0;
+    if (d.mode === 'move') { const bw = x1 - x0, bh = y1 - y0; let nx = Math.min(Math.max(0, x0 + dx), w - bw), ny = Math.min(Math.max(0, y0 + dy), h - bh); setB([nx, ny, nx + bw, ny + bh]); return; }
+    const nb = [x0, y0, x1, y1];
+    if (d.mode.includes('w')) nb[0] = Math.min(x0 + dx, x1 - minS); if (d.mode.includes('e')) nb[2] = Math.max(x1 + dx, x0 + minS);
+    if (d.mode.includes('n')) nb[1] = Math.min(y0 + dy, y1 - minS); if (d.mode.includes('s')) nb[3] = Math.max(y1 + dy, y0 + minS);
+    setB(clampBox(nb));
+  };
+  const onUp = () => { drag.current = null; };
+  const onKey = e => {
+    const st = Math.min(w, h) * 0.03, k = { ArrowLeft: [-st, 0], ArrowRight: [st, 0], ArrowUp: [0, -st], ArrowDown: [0, st] }[e.key];
+    if (!k) return;
+    e.preventDefault();
+    if (e.shiftKey) setB(([x0, y0, x1, y1]) => clampBox([x0, y0, x1 + k[0], y1 + k[1]]));
+    else setB(([x0, y0, x1, y1]) => { const bw = x1 - x0, bh = y1 - y0, nx = Math.min(Math.max(0, x0 + k[0]), w - bw), ny = Math.min(Math.max(0, y0 + k[1]), h - bh); return [nx, ny, nx + bw, ny + bh]; });
+  };
+  const pc = v => (v * 100) + '%';
+  const handle = (pos, css) => (
+    <span key={pos} data-testid={'jewelBoxHandle-' + pos} onPointerDown={onDown(pos)} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
+      style={{ position: 'absolute', width: 28, height: 28, touchAction: 'none', cursor: (pos === 'nw' || pos === 'se') ? 'nwse-resize' : 'nesw-resize', ...css }}>
+      <span style={{ position: 'absolute', left: 7, top: 7, width: 14, height: 14, borderRadius: 4, background: 'white', border: '2px solid #C0336E', boxSizing: 'border-box' }} />
+    </span>
+  );
+  const changed = !box || b.some((v, i) => Math.abs(v - box[i]) > 0.5);
+  return (
+    <div data-testid="jewelBoxEditor" style={{ marginBottom: 12 }}>
+      <div id={idPrefix + '-help'} style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63', marginBottom: 6 }}>Marca la joya: mueve el recuadro o estíralo desde las esquinas para que encierre solo la pieza.</div>
+      <div ref={wrapRef} style={{ position: 'relative', width: '100%', maxWidth: 320, margin: '0 auto', aspectRatio: w + ' / ' + h, overflow: 'hidden', borderRadius: 12, background: '#F3EFF5', userSelect: 'none' }}>
+        <img src={src} alt="Foto de la pieza" draggable={false} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', display: 'block' }} />
+        <div data-testid="jewelBox" role="group" tabIndex={0} aria-describedby={idPrefix + '-help'}
+          aria-label="Zona de la joya. Flechas: mover. Mayús + flechas: cambiar el tamaño."
+          onKeyDown={onKey} onPointerDown={onDown('move')} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
+          style={{ position: 'absolute', left: pc(b[0] / w), top: pc(b[1] / h), width: pc((b[2] - b[0]) / w), height: pc((b[3] - b[1]) / h), boxSizing: 'border-box',
+                   border: '2px solid #FFFFFF', outline: '2px dashed #C0336E', outlineOffset: -2, boxShadow: '0 0 0 9999px rgba(26,17,36,.45)', touchAction: 'none', cursor: 'move' }}>
+          {handle('nw', { left: -14, top: -14 })}{handle('ne', { right: -14, top: -14 })}{handle('sw', { left: -14, bottom: -14 })}{handle('se', { right: -14, bottom: -14 })}
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+        <button type="button" onClick={() => onApply(b.map(Math.round))} style={{ padding: '8px 14px', borderRadius: 99, border: 'none', background: 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>✓ Usar esta zona</button>
+        <button type="button" onClick={() => onApply(null)} style={{ padding: '8px 12px', borderRadius: 99, border: '1px solid #E5D7EE', background: 'white', color: '#7A5F8A', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>Automática</button>
+        <button type="button" onClick={onCancel} style={{ padding: '8px 12px', borderRadius: 99, border: 'none', background: '#F3EFF5', color: '#7A5F8A', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>Cancelar</button>
+      </div>
+      {!changed && <div style={{ fontSize: 11, color: '#7A6880', marginTop: 4 }}>Sin cambios: se usa la zona marcada.</div>}
+    </div>
+  );
+}
+// Miniatura de una foto con la zona usada (automática o marcada) dibujada encima.
+function ShotThumb({ shot, info, box, size = 72 }) {
+  const b = box || (info && info.box);
+  let ov = null;
+  if (info && b) {
+    const k = size / Math.max(info.w, info.h), dw = info.w * k, dh = info.h * k, ox = (size - dw) / 2, oy = (size - dh) / 2;
+    ov = { left: ox + b[0] * k, top: oy + b[1] * k, width: (b[2] - b[0]) * k, height: (b[3] - b[1]) * k };
+  }
+  return (
+    <span style={{ position: 'relative', display: 'block', width: size, height: size, borderRadius: 10, overflow: 'hidden', background: '#F3EFF5', border: '1px solid #EDE3F1', flexShrink: 0 }}>
+      <img src={shot.dataUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} />
+      {ov && <span aria-hidden="true" data-testid="shotBox" style={{ position: 'absolute', ...ov, border: box ? '2px solid #C0336E' : '1.5px dashed #9B5DE5', boxSizing: 'border-box', borderRadius: 3 }} />}
+    </span>
+  );
+}
+
 function AddPieceModal({ order, token, photo, products, categories, stock, onRetake, onClose, onAdded, onTeach }) {
   const refCounts = useRefCounts(token);
   const [teachP, setTeachP]   = React.useState(null); // pieza recién agregada → paso "Enseñar"
@@ -3506,8 +3690,20 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
   const [prep, setPrep]       = React.useState({ phase: 'idle', done: 0, total: 0, failed: 0 });
   const prepRef  = React.useRef(null);  // promesa: catálogo con huellas listo
   const refsRef  = React.useRef({});    // referencias aprendidas {id: [Float32Array]}
-  const queryRef = React.useRef(null);  // huella de la foto actual {emb, color, src}
-  React.useEffect(() => { setMatches(null); setErrMsg(''); if (photo) { setMode('photo'); setConfirmP(null); } }, [photo && photo.dataUrl]);
+  const queryRef = React.useRef(null);  // última búsqueda {keys, qs}: huellas de las fotos usadas
+  const qCache   = React.useRef(new Map()); // dataUrl|zona → huella
+  const extraRef = React.useRef(null);  // input de "＋ Otra foto"
+  const [extras, setExtras]   = React.useState([]);   // fotos extra (otro ángulo), máx. 2
+  const [infos, setInfos]     = React.useState({});   // dataUrl → { w, h, box, quality }
+  const [boxes, setBoxes]     = React.useState({});   // dataUrl → zona marcada a mano (o nada)
+  const [editShot, setEditShot] = React.useState(null); // dataUrl de la foto en "Marca la joya"
+  const [okQ, setOkQ]         = React.useState({});   // dataUrl → "Seguir igual" (aviso de calidad)
+  const shots = photo ? [photo, ...extras] : [];
+  React.useEffect(() => { setMatches(null); setErrMsg(''); setExtras([]); setBoxes({}); setEditShot(null); if (photo) { setMode('photo'); setConfirmP(null); } }, [photo && photo.dataUrl]);
+  React.useEffect(() => { // zona automática y calidad de cada foto (no necesita la red)
+    for (const sh of shots) if (!infos[sh.dataUrl]) photoInfo(sh.dataUrl).then(i => setInfos(m => ({ ...m, [sh.dataUrl]: i }))).catch(() => {});
+  }, [shots.map(s => s.dataUrl).join('|')]);
+  const shotKey = sh => sh.dataUrl + '|' + (boxes[sh.dataUrl] ? boxes[sh.dataUrl].join(',') : 'auto');
   const cats = ['Todas', ...((categories && categories.length) ? categories : DEFAULT_CATEGORIES)];
   const recogOn = mode === 'photo';
 
@@ -3535,19 +3731,49 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
     return () => { alive = false; };
   }, [recogOn]);
 
+  const qtyOf = pid => (stock ? stockOf(stock, pid) : null);
+  const shotQuery = async sh => {
+    const k = shotKey(sh);
+    if (!qCache.current.has(k)) qCache.current.set(k, await embedQueryPhoto(sh.dataUrl, { box: boxes[sh.dataUrl] || null }));
+    return qCache.current.get(k);
+  };
+  // Todas las fotos (hasta 3) → UNA búsqueda con los puntajes combinados (rankCatalogMulti) y el
+  // desempate por stock (stockTiebreak: nunca oculta piezas con stock 0).
   const identify = async () => {
     if (!photo || busy || !prepRef.current) return;
-    setBusy(true); setErrMsg(''); setMatches(null);
+    setBusy(true); setErrMsg(''); setMatches(null); setEditShot(null);
     try {
       const catalog = await prepRef.current;
-      let q = queryRef.current;
-      if (!q || q.src !== photo.dataUrl) { q = { ...(await embedQueryPhoto(photo.dataUrl)), src: photo.dataUrl }; queryRef.current = q; }
-      const ranked = rankCatalog(q, catalog.items, refsRef.current, cat, 5);
-      setMatches(ranked.map(r => ({ id: String(r.p.id), name: r.p.name, sku: normalizeSku(r.p.sku), category: r.p.category, imageUrl: productImageUrl(r.p), pct: friendlyPct(r.score, q.pct) })));
+      const qs = [];
+      for (const sh of shots) qs.push(await shotQuery(sh));
+      queryRef.current = { keys: shots.map(shotKey), qs };
+      const ranked = stockTiebreak(rankCatalogMulti(qs, catalog.items, refsRef.current, cat, Infinity), id => qtyOf(id)).slice(0, 5);
+      setMatches(ranked.map(r => ({ id: String(r.p.id), name: r.p.name, sku: normalizeSku(r.p.sku), category: r.p.category, imageUrl: productImageUrl(r.p), pct: friendlyPct(r.score, qs[0].pct) })));
     } catch (e) { setErrMsg(pieceErrMsg(e)); }
     setBusy(false);
   };
-  const qtyOf = pid => (stock ? stockOf(stock, pid) : null);
+  const onExtraFile = async e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file || shots.length >= 3) return;
+    try { const ph = await photoToJpegBase64(file); setExtras(x => [...x, ph].slice(0, 2)); setMatches(null); }
+    catch (er) { setErrMsg(er.message); }
+  };
+  const removeExtra = dataUrl => { setExtras(x => x.filter(s => s.dataUrl !== dataUrl)); setMatches(null); if (editShot === dataUrl) setEditShot(null); };
+  // Aprende TODAS las fotos de la búsqueda (en orden, en segundo plano; el Worker guarda máx. 10).
+  const learnShots = (pid, list) => {
+    const last = queryRef.current;
+    (async () => {
+      for (const sh of list) {
+        try {
+          const k = shotKey(sh), i = last ? last.keys.indexOf(k) : -1;
+          const q = i >= 0 ? last.qs[i] : await shotQuery(sh);
+          const r = await apiCall('identify/ref/add', { token, id: String(pid), vector: learnedRefVector(q) });
+          if (r && Number.isInteger(r.count)) setRefCount(pid, r.count);
+        } catch (e) { console.warn('identify/ref/add:', e && e.message); }
+      }
+    })();
+  };
   const stockNote = pid => {
     const n = qtyOf(pid);
     if (n == null) return null;
@@ -3564,12 +3790,9 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
       // Con la foto de la joya (modo foto): aprende de esa foto (la próxima vez la reconoce
       // mejor), sin esperar ni bloquear. Si se eligió a mano sin "Identificar", igual se usa.
       if (mode === 'photo' && photo && !confirmP) {
-        const q = queryRef.current;
-        if (q && q.src === photo.dataUrl) {
-          Promise.resolve().then(() => apiCall('identify/ref/add', { token, id: String(pid), vector: learnedRefVector(q) }))
-            .then(r => { if (r && Number.isInteger(r.count)) setRefCount(pid, r.count); })
-            .catch(e => console.warn('identify/ref/add:', e && e.message));
-        } else if (onTeach) onTeach(pid, name, { dataUrl: photo.dataUrl });
+        const last = queryRef.current;
+        if ((last && last.keys.length) || shots.length > 1 || !onTeach) learnShots(pid, shots);
+        else onTeach(pid, name, { dataUrl: photo.dataUrl });
         onAdded(productos, name);
         return;
       }
@@ -3650,6 +3873,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
                 <button type="button" onClick={onClose} style={{ marginTop: 10, width: '100%', padding: 10, background: '#1A1118', color: 'white', border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>Ahora no</button>
               </>
             )}
+            <PhotoTip style={{ marginTop: 10 }} />
             <input ref={teachRef} type="file" accept="image/*" capture="environment" aria-label="Foto de la joya para enseñar al identificador" style={{ display: 'none' }} onChange={onTeachFile} />
           </div>
         );
@@ -3685,6 +3909,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
             <span aria-hidden="true" style={{ fontSize: 18, color: '#9B5DE5' }}>◎</span>
             <span>Identificar por foto<span style={{ display: 'block', fontSize: 11, fontWeight: 500, color: '#7A6880' }}>Para piezas sin etiqueta</span></span>
           </button>
+          <PhotoTip />
         </div>
       ) : mode === 'scan' ? (
         <div>
@@ -3704,15 +3929,56 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
         </form>
       ) : (
         <div>
-          {photo && (
-            <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12 }}>
-              <img src={photo.dataUrl} alt="Foto de la pieza a identificar" style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 12, border: '1px solid #EDE3F1' }} />
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {photo && (editShot && infos[editShot] ? (
+            <JewelBoxEditor key={editShot} idPrefix={`jewelBox-${order.id}`} src={editShot} w={infos[editShot].w} h={infos[editShot].h}
+              box={boxes[editShot] || null} autoBox={infos[editShot].box}
+              onApply={bx => { setBoxes(m => ({ ...m, [editShot]: bx })); setEditShot(null); setMatches(null); }}
+              onCancel={() => setEditShot(null)} />
+          ) : (
+            <div style={{ marginBottom: 12 }}>
+              <div data-testid="shots" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+                {shots.map((sh, i) => (
+                  <div key={sh.dataUrl} data-testid="shot" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, width: 84 }}>
+                    <span style={{ position: 'relative' }}>
+                      <ShotThumb shot={sh} info={infos[sh.dataUrl]} box={boxes[sh.dataUrl]} />
+                      {i > 0 && <button type="button" onClick={() => removeExtra(sh.dataUrl)} aria-label={'Quitar la foto ' + (i + 1)}
+                        style={{ position: 'absolute', top: -6, right: -6, width: 22, height: 22, borderRadius: '50%', border: 'none', background: '#1A1118', color: 'white', fontSize: 11, cursor: 'pointer', lineHeight: 1 }}>✕</button>}
+                    </span>
+                    <button type="button" onClick={() => setEditShot(sh.dataUrl)} disabled={!infos[sh.dataUrl]} aria-label={'Marca la joya en la foto ' + (i + 1)}
+                      style={{ ...backBtn, padding: '5px 6px', fontSize: 11, width: '100%', color: boxes[sh.dataUrl] ? '#C0336E' : backBtn.color }}>
+                      {boxes[sh.dataUrl] ? '✓ Zona marcada' : '✎ Marca la joya'}
+                    </button>
+                  </div>
+                ))}
+                {shots.length < 3 && (
+                  <button type="button" onClick={() => extraRef.current && extraRef.current.click()}
+                    style={{ width: 84, height: 72, borderRadius: 10, border: '1.5px dashed #C9B8D3', background: '#FAF7FB', color: '#7A5F8A', fontSize: 11, fontWeight: 700, cursor: 'pointer', lineHeight: 1.3 }}>
+                    ＋ Otra foto<br />(otro ángulo)
+                  </button>
+                )}
+              </div>
+              <input ref={extraRef} type="file" accept="image/*" capture="environment" aria-label="Otra foto de la pieza (otro ángulo)" style={{ display: 'none' }} onChange={onExtraFile} />
+              {shots.map((sh, i) => {
+                const msg = !okQ[sh.dataUrl] && infos[sh.dataUrl] ? qualityMsg(infos[sh.dataUrl].quality) : '';
+                if (!msg) return null;
+                return (
+                  <div key={'q' + sh.dataUrl} role="status" aria-live="polite" data-testid="qualityWarn" style={{ marginTop: 8, fontSize: 12, color: '#92400E', background: '#FEF3C7', borderRadius: 10, padding: '8px 10px' }}>
+                    <b>{msg}{shots.length > 1 ? ' (foto ' + (i + 1) + ')' : ''}.</b> Con buena luz y la cámara quieta acierta mucho más.
+                    <div style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
+                      <button type="button" onClick={() => { if (i === 0) onRetake && onRetake(); else { removeExtra(sh.dataUrl); extraRef.current && extraRef.current.click(); } }} style={{ ...backBtn, background: 'white' }}>📷 Tomar otra</button>
+                      <button type="button" onClick={() => setOkQ(m => ({ ...m, [sh.dataUrl]: true }))} style={{ ...backBtn, background: 'white' }}>Seguir igual</button>
+                    </div>
+                  </div>
+                );
+              })}
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
                 <button type="button" onClick={onRetake} style={backBtn}>🔄 Tomar otra foto</button>
                 <button type="button" onClick={() => setMode('choose')} style={backBtn}>← Escanear o escribir código</button>
               </div>
+              <PhotoTip style={{ marginTop: 8 }} />
+              {shots.length > 1 && <div style={{ fontSize: 11, color: '#7A6880', marginTop: 6 }}>Se buscará con las {shots.length} fotos juntas y, al elegir la pieza, aprenderá de todas.</div>}
             </div>
-          )}
+          ))}
           <div style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63', marginBottom: 6 }} id={`addPieceCats-${order.id}`}>Categoría</div>
           <div role="group" aria-labelledby={`addPieceCats-${order.id}`} style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
             {cats.map(c => (

@@ -57,7 +57,9 @@ function evalLight(ctx, W, H, R) {
   ctx.putImageData(im, 0, 0);
 }
 // mode 'A' = pieza chica y descentrada; 'B' = recorte parcial + dedo.
-function makeTestPhoto(img, seed, mode) {
+// info (opcional): se completa con la caja exacta de la pieza en la foto de prueba
+// ({ box: [x0, y0, x1, y1] }, la que marcaría a mano "Marca la joya").
+function makeTestPhoto(img, seed, mode, info) {
   const R = mulberry32((seed ^ 0x5bd1e995) >>> 0), rnd = (a, b) => a + (b - a) * R(), sgn = () => (R() < 0.5 ? -1 : 1);
   const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
   const portrait = R() < 0.5, W = portrait ? 600 : 800, H = portrait ? 800 : 600, S = Math.min(W, H);
@@ -80,7 +82,19 @@ function makeTestPhoto(img, seed, mode) {
     tctx.globalCompositeOperation = 'destination-in'; tctx.beginPath();
     tctx.roundRect ? tctx.roundRect(0, 0, T, T, T * 0.18) : tctx.rect(0, 0, T, T); tctx.fill();
   }
-  ctx.save(); ctx.translate(cx, cy); ctx.rotate(sgn() * rnd(10, 25) * Math.PI / 180);
+  const ang = sgn() * rnd(10, 25) * Math.PI / 180;
+  if (info) { // caja exacta: la joya (pieceBox de la foto del catálogo; o el recuadro pegado) llevada a la foto de prueba
+    const pb = (typeof pieceBox === 'function' && pieceBox(img)) || [sx, sy, sx + side, sy + side];
+    const bx = [Math.max(pb[0], sx), Math.max(pb[1], sy), Math.min(pb[2], sx + side), Math.min(pb[3], sy + side)];
+    const ok = bx[2] > bx[0] && bx[3] > bx[1], src = ok ? bx : [sx, sy, sx + side, sy + side];
+    const pts = [[src[0], src[1]], [src[2], src[1]], [src[0], src[3]], [src[2], src[3]]].map(([x, y]) => {
+      const u = (x - sx) / side * dst - dst / 2, v = (y - sy) / side * dst - dst / 2;
+      return [cx + u * Math.cos(ang) - v * Math.sin(ang), cy + u * Math.sin(ang) + v * Math.cos(ang)];
+    });
+    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+    info.box = [Math.max(0, Math.min(...xs)), Math.max(0, Math.min(...ys)), Math.min(W, Math.max(...xs)), Math.min(H, Math.max(...ys))];
+  }
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(ang);
   ctx.shadowColor = 'rgba(0,0,0,0.35)'; ctx.shadowBlur = 18; ctx.shadowOffsetX = 6; ctx.shadowOffsetY = 8;
   ctx.drawImage(tile, -dst / 2, -dst / 2, dst, dst); ctx.restore();
   if (mode === 'B') { // dedo sobre un borde de la pieza (~6–10 % del área de la pieza)

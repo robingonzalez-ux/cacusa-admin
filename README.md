@@ -53,6 +53,23 @@ misma red), aislamiento de la pieza (87,5 → 90,6), capa media (86 → 90,6). P
 concatenar más capas medias, voltear la foto, re-ranking (expansión de consulta, media de las 2
 mejores), color de la zona de la pieza, más peso al color, MobileNetV3, EfficientNet-B0/V2-B1.
 
+### v2.1 (22 nov): varias fotos, "Marca la joya", consejo de toma y desempate por stock
+
+- **Varias fotos** (hasta 3, "＋ Otra foto (otro ángulo)"): una sola búsqueda con el promedio de
+  los puntajes de cada producto + 0,02 por cada foto extra en la que sale 1ro (`rankCatalogMulti`);
+  al elegir la pieza aprende de todas las fotos. Mitad de prueba, hit@1: 1 foto 90,9 % → 2 fotos
+  98,1 % → 3 fotos 100 % (`node eval-catalog-refs.mjs … --multi`).
+- **"Marca la joya"**: recuadro (mouse, dedo o teclado) sobre la foto, precargado con la zona
+  automática (`pieceBox`); si se marca, la huella usa `MANUAL_VIEWS` (centro 80/60 % + la zona con
+  margen 1, 1,25 y 1,6). Con la caja exacta da lo mismo que la automática en las fotos de prueba
+  (91,3 % vs 90,9 % hit@1, `--box`): sirve cuando la zona automática se equivoca (fondos con cosas).
+- **Consejo de toma** ("fondo liso claro, sin sombra, que la joya llene el cuadro", con un cuadro
+  guía) donde se toma una foto para el identificador, y aviso que no bloquea si la foto salió
+  oscura (luminancia media < 62) o movida (varianza del laplaciano en la zona de la pieza < 100,
+  gris de 160 px). Ninguna foto del catálogo lo dispara (`--quality`).
+- **Desempate por stock** (`stockTiebreak`): si 2 candidatas seguidas están a ≤ 0,01 y la de arriba
+  tiene stock 0 y la de abajo > 0, sube la que tiene stock. Nunca oculta piezas con stock 0.
+
 ### Regenerar (cuando haya muchos productos nuevos o fotos cambiadas)
 
 ```bash
