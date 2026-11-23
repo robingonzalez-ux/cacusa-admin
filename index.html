@@ -2990,6 +2990,78 @@ function rankCatalogMulti(queries, items, refs, category, topN = 5) {
   out.sort((a, b) => b.score - a.score);
   return out.slice(0, topN);
 }
+// ── v2.2 (23 nov) ──
+// Prototipo de fotos reales: con 3 o más fotos reales aprendidas de una pieza, su promedio
+// normalizado se suma como una referencia más (tools/eval-catalog-refs.mjs --proto, 3 fotos reales
+// simuladas por pieza, mitad de prueba: hit@1 81,6 % → 83,4 %; con variantes como reemplazo, neutro).
+function learnedRefSet(list) {
+  const v = (Array.isArray(list) ? list : []).map(dequantizeEmb).filter(Boolean);
+  if (v.length >= 3) { const m = new Float32Array(EMB_DIM); for (const x of v) for (let i = 0; i < EMB_DIM; i++) m[i] += x[i]; v.push(l2norm(m)); }
+  return v;
+}
+// Aviso de duda: si el 1ro y el 2do quedan a menos de DOUBT_MARGIN de puntaje, conviene otra foto.
+// Calibrado en la mitad de ajuste (1 foto; tools/eval-catalog-refs.mjs --doubt): avisa en el 16 %
+// de las búsquedas y atrapa el 83 % de los errores del 1er puesto (precisión 45 %); mitad de
+// prueba: 86 % de los errores, precisión 48 %. Con 3 fotos (el máximo) no se avisa.
+const DOUBT_MARGIN = 0.04;
+// Piezas "gemelas": para cada producto, el otro producto que más se le parece según sus
+// referencias del catálogo (las mismas que usa el identificador). Similitud = la mejor entre
+// cualquier par de referencias de los dos productos, calculada solo contra los TWIN_K más
+// parecidos por el promedio de referencias (da lo mismo que contra todos y cuesta ~1/8).
+// Se guarda en memoria e IndexedDB por versión de huella + referencias. → Map id → { id, sim }.
+const TWIN_K = 12;
+const _twinMem = new Map();
+async function computeTwins(items, ver) {
+  const sig = ver + '|' + items.map(it => it.p.id + ':' + (1 + (it.aug ? it.aug.length : 0))).join(',');
+  const key = 'twins|' + strHash(sig).toString(36) + '|' + items.length;
+  if (_twinMem.has(key)) return _twinMem.get(key);
+  const db = await embDb();
+  const cached = await embDbGet(db, key);
+  if (cached && cached.sig === sig && Array.isArray(cached.list)) { const m = new Map(cached.list); _twinMem.set(key, m); return m; }
+  const refs = items.map(it => [it.emb, ...(it.aug || [])]);
+  let D = 0; // dimensiones usadas (v2: 512; el resto son ceros)
+  for (const r of refs) for (const v of r) { for (let i = v.length - 1; i >= D; i--) if (v[i] !== 0) { D = i + 1; break; } }
+  const dotD = (a, b) => { let s = 0; for (let i = 0; i < D; i++) s += a[i] * b[i]; return s; };
+  const cent = refs.map(r => { const m = new Float32Array(D); for (const v of r) for (let i = 0; i < D; i++) m[i] += v[i]; return l2norm(m); });
+  const n = items.length, best = new Array(n).fill(null);
+  const pairSim = (a, b) => { let m = -2; for (const x of refs[a]) for (const y of refs[b]) { const s = dotD(x, y); if (s > m) m = s; } return m; };
+  const done = new Map();
+  for (let a = 0; a < n; a++) {
+    const cand = [];
+    for (let b = 0; b < n; b++) if (b !== a) cand.push([dotD(cent[a], cent[b]), b]);
+    cand.sort((x, y) => y[0] - x[0]);
+    for (const [, b] of cand.slice(0, TWIN_K)) {
+      const k = a < b ? a + ',' + b : b + ',' + a;
+      if (!done.has(k)) done.set(k, pairSim(a, b));
+      const s = done.get(k);
+      if (!best[a] || s > best[a].sim) best[a] = { id: String(items[b].p.id), sim: s };
+      if (!best[b] || s > best[b].sim) best[b] = { id: String(items[a].p.id), sim: s };
+    }
+    if (a % 8 === 7) await new Promise(r => setTimeout(r, 0));
+  }
+  const m = new Map(items.map((it, i) => [String(it.p.id), best[i]]).filter(x => x[1]));
+  _twinMem.set(key, m);
+  await embDbPut(db, key, { sig, list: [...m] });
+  return m;
+}
+// Acierto real en este teléfono: por cada pieza elegida después de identificar por foto se guarda
+// { r: puesto (1, 2–5 o 0 = no estaba en la lista), n: fotos, ms: ms por foto, t }. Sin datos de
+// clientas. Últimas 50, en localStorage (si no se puede, no pasa nada).
+const RECOG_STATS_KEY = 'cacusa-recog-stats', RECOG_STATS_MAX = 50;
+function recogStatsRead() {
+  try { const a = JSON.parse(localStorage.getItem(RECOG_STATS_KEY) || '[]'); return Array.isArray(a) ? a.filter(x => x && typeof x.r === 'number') : []; }
+  catch (_) { return []; }
+}
+function recogStatsAdd(e) {
+  try { const a = recogStatsRead(); a.push({ r: e.r | 0, n: e.n | 0, ms: Math.round(e.ms) || 0, t: Date.now() }); localStorage.setItem(RECOG_STATS_KEY, JSON.stringify(a.slice(-RECOG_STATS_MAX))); }
+  catch (_) {}
+}
+function recogStatsSummary() {
+  const a = recogStatsRead();
+  if (!a.length) return null;
+  const ms = a.filter(x => x.ms > 0);
+  return { n: a.length, first: a.filter(x => x.r === 1).length, top5: a.filter(x => x.r >= 1 && x.r <= 5).length, sPerPhoto: ms.length ? ms.reduce((s, x) => s + x.ms, 0) / ms.length / 1000 : null };
+}
 // Desempate por stock: si 2 candidatas seguidas están a ≤ STOCK_TIE de puntaje y la de arriba
 // figura con stock 0 y la de abajo con stock > 0, sube la que tiene stock. Nunca saca a nadie de
 // la lista (las de stock 0 siguen ahí, con su aviso). qtyOf(id) → número o null (desconocido).
@@ -3412,10 +3484,26 @@ function EnrollPhotosModal({ products, token, onClose, onlyId = null }) {
   const [doneCount, setDone]    = useState(0);  // piezas con fotos nuevas en esta sesión
   const fileRef = useRef(null);
   const loadCounts = () => { loadRefCounts(token, true).catch(() => {}); };
-  // Precarga el reconocimiento en segundo plano (la 1ra foto no espera tanto).
-  useEffect(() => { loadRecognitionModel().catch(() => {}); }, []);
+  const [twins, setTwins]       = useState(null); // Map id → { id, sim }: pieza con la que más se confunde
+  const [stats]                 = useState(() => recogStatsSummary()); // acierto real en este teléfono
+  // Precarga el reconocimiento en segundo plano (la 1ra foto no espera tanto) y calcula las
+  // gemelas con las referencias del catálogo (en caché: la 2da vez es instantáneo).
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const eng = await loadRecognitionModel();
+      const res = await prepareCatalogEmbeddings(products);
+      const t = await computeTwins(res.items, eng.ver);
+      if (alive) setTwins(t);
+    })().catch(e => console.warn('gemelas:', e && e.message));
+    return () => { alive = false; };
+  }, []);
+  const twinOf = p => (twins && twins.get(String(p.id))) || null;
+  const twinSku = p => { const t = twinOf(p); if (!t) return ''; const o = (products || []).find(x => String(x.id) === t.id); return o ? (normalizeSku(o.sku) || o.name) : ''; };
+  // Con gemelas: primero las piezas que más se parecen a otra (son las que más ayudan las fotos reales).
   const all = (products || []).filter(p => p && p.available !== false && productImageUrl(p))
-    .sort((a, b) => String(a.category || '').localeCompare(String(b.category || ''), 'es') || normalizeSku(a.sku).localeCompare(normalizeSku(b.sku), 'es', { numeric: true }));
+    .sort((a, b) => (twins ? ((twinOf(b) ? twinOf(b).sim : -2) - (twinOf(a) ? twinOf(a).sim : -2)) : 0)
+      || String(a.category || '').localeCompare(String(b.category || ''), 'es') || normalizeSku(a.sku).localeCompare(normalizeSku(b.sku), 'es', { numeric: true }));
   const cnt = p => (counts && counts[String(p.id)]) || 0;
   const missingN = counts ? all.filter(p => !cnt(p)).length : null;
   const withN = counts ? all.length - missingN : null;
@@ -3481,6 +3569,11 @@ function EnrollPhotosModal({ products, token, onClose, onlyId = null }) {
           </div>
         </div>
       )}
+      {stats && (
+        <div data-testid="recogStats" role="status" style={{ fontSize: 12, fontWeight: 700, color: '#5B3F8A', background: '#FAF7FB', border: '1px solid #EDE3F1', borderRadius: 10, padding: '6px 10px', marginBottom: 8 }}>
+          Últimas {stats.n} identificaciones en este teléfono: {stats.first} al primer intento{stats.sPerPhoto != null ? ' · ' + stats.sPerPhoto.toLocaleString('es', { maximumFractionDigits: 1 }) + ' s por foto' : ''}
+        </div>
+      )}
       <div style={{ fontSize: 12, color: '#7A6880', marginBottom: 10 }}>
         No es obligatorio: todas las piezas ya se reconocen por su foto del catálogo. Las fotos reales del taller (1 a 3, sobre la mesa y con tu luz) mejoran el acierto, sobre todo en piezas parecidas entre sí, como los anillos dorados.
         {missingN != null && onlyId == null && <> <b style={{ color: missingN ? '#B45309' : '#15803D' }}>{missingN} pieza{missingN === 1 ? '' : 's'} sin fotos reales</b> de {all.length}.</>}
@@ -3497,6 +3590,7 @@ function EnrollPhotosModal({ products, token, onClose, onlyId = null }) {
               <div style={{ fontWeight: 700, fontSize: 14, color: '#1A1118', marginTop: 4 }}>{cur.name}</div>
               <div style={{ fontSize: 12, color: '#7A6880' }}>{cur.category}</div>
               <div data-testid="enrollCount" style={{ fontSize: 12, fontWeight: 700, marginTop: 2, color: cnt(cur) ? '#15803D' : '#B45309' }}>Ya la reconoce por su foto del catálogo · fotos reales: {cnt(cur)} / {ENROLL_MAX_REFS} (opcional)</div>
+              {twinSku(cur) && <div data-testid="twinLabel" style={{ fontSize: 11, fontWeight: 700, color: '#9D174D', marginTop: 2 }}>Se confunde con {twinSku(cur)}</div>}
             </div>
           </div>
           <button type="button" onClick={() => fileRef.current && fileRef.current.click()} disabled={busy || cnt(cur) >= ENROLL_MAX_REFS}
@@ -3547,7 +3641,7 @@ function EnrollPhotosModal({ products, token, onClose, onlyId = null }) {
                   <img src={productImageUrl(p)} alt="" style={thumb} />
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#1A1118', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
-                    <span style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 11, color: '#7A6880' }}><SkuChip sku={p.sku} />{p.category}</span>
+                    <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', fontSize: 11, color: '#7A6880' }}><SkuChip sku={p.sku} />{p.category}{twinSku(p) && <span data-testid="twinLabel" style={{ color: '#9D174D', fontWeight: 700 }}>· Se confunde con {twinSku(p)}</span>}</span>
                   </span>
                   <RefBadge n={cnt(p)} style={{ fontSize: 12, padding: '3px 9px', flexShrink: 0 }} />
                 </button>
@@ -3698,6 +3792,8 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
   const [boxes, setBoxes]     = React.useState({});   // dataUrl → zona marcada a mano (o nada)
   const [editShot, setEditShot] = React.useState(null); // dataUrl de la foto en "Marca la joya"
   const [okQ, setOkQ]         = React.useState({});   // dataUrl → "Seguir igual" (aviso de calidad)
+  const [doubt, setDoubt]     = React.useState(false); // 1ro y 2do muy parejos → pedir otro ángulo
+  const msRef = React.useRef(0);                      // ms por foto de la última búsqueda (estadística local)
   const shots = photo ? [photo, ...extras] : [];
   React.useEffect(() => { setMatches(null); setErrMsg(''); setExtras([]); setBoxes({}); setEditShot(null); if (photo) { setMode('photo'); setConfirmP(null); } }, [photo && photo.dataUrl]);
   React.useEffect(() => { // zona automática y calidad de cada foto (no necesita la red)
@@ -3723,7 +3819,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
     loadRefCounts(token, true).then(r => {
       const out = {};
       for (const [id, list] of Object.entries((r && r.refs) || {})) {
-        const v = (Array.isArray(list) ? list : []).map(dequantizeEmb).filter(Boolean);
+        const v = learnedRefSet(list); // + prototipo con 3 o más fotos reales
         if (v.length) out[id] = v;
       }
       refsRef.current = out;
@@ -3732,22 +3828,25 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
   }, [recogOn]);
 
   const qtyOf = pid => (stock ? stockOf(stock, pid) : null);
-  const shotQuery = async sh => {
+  const shotQuery = async (sh, times) => {
     const k = shotKey(sh);
-    if (!qCache.current.has(k)) qCache.current.set(k, await embedQueryPhoto(sh.dataUrl, { box: boxes[sh.dataUrl] || null }));
+    if (!qCache.current.has(k)) { const t0 = performance.now(); qCache.current.set(k, await embedQueryPhoto(sh.dataUrl, { box: boxes[sh.dataUrl] || null })); if (times) times.push(performance.now() - t0); }
     return qCache.current.get(k);
   };
   // Todas las fotos (hasta 3) → UNA búsqueda con los puntajes combinados (rankCatalogMulti) y el
   // desempate por stock (stockTiebreak: nunca oculta piezas con stock 0).
   const identify = async () => {
     if (!photo || busy || !prepRef.current) return;
-    setBusy(true); setErrMsg(''); setMatches(null); setEditShot(null);
+    setBusy(true); setErrMsg(''); setMatches(null); setEditShot(null); setDoubt(false);
     try {
       const catalog = await prepRef.current;
-      const qs = [];
-      for (const sh of shots) qs.push(await shotQuery(sh));
+      const qs = [], times = [];
+      for (const sh of shots) qs.push(await shotQuery(sh, times));
+      if (times.length) msRef.current = times.reduce((a, b) => a + b, 0) / times.length;
       queryRef.current = { keys: shots.map(shotKey), qs };
-      const ranked = stockTiebreak(rankCatalogMulti(qs, catalog.items, refsRef.current, cat, Infinity), id => qtyOf(id)).slice(0, 5);
+      const fused = rankCatalogMulti(qs, catalog.items, refsRef.current, cat, Infinity);
+      setDoubt(fused.length > 1 && fused[0].score - fused[1].score < DOUBT_MARGIN && shots.length < 3);
+      const ranked = stockTiebreak(fused, id => qtyOf(id)).slice(0, 5);
       setMatches(ranked.map(r => ({ id: String(r.p.id), name: r.p.name, sku: normalizeSku(r.p.sku), category: r.p.category, imageUrl: productImageUrl(r.p), pct: friendlyPct(r.score, qs[0].pct) })));
     } catch (e) { setErrMsg(pieceErrMsg(e)); }
     setBusy(false);
@@ -3756,7 +3855,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
     const file = e.target.files && e.target.files[0];
     e.target.value = '';
     if (!file || shots.length >= 3) return;
-    try { const ph = await photoToJpegBase64(file); setExtras(x => [...x, ph].slice(0, 2)); setMatches(null); }
+    try { const ph = await photoToJpegBase64(file); setExtras(x => [...x, ph].slice(0, 2)); setMatches(null); setDoubt(false); }
     catch (er) { setErrMsg(er.message); }
   };
   const removeExtra = dataUrl => { setExtras(x => x.filter(s => s.dataUrl !== dataUrl)); setMatches(null); if (editShot === dataUrl) setEditShot(null); };
@@ -3790,6 +3889,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
       // Con la foto de la joya (modo foto): aprende de esa foto (la próxima vez la reconoce
       // mejor), sin esperar ni bloquear. Si se eligió a mano sin "Identificar", igual se usa.
       if (mode === 'photo' && photo && !confirmP) {
+        if (matches && matches.length) { const r = matches.findIndex(m => String(m.id) === String(pid)) + 1; recogStatsAdd({ r, n: shots.length, ms: msRef.current }); }
         const last = queryRef.current;
         if ((last && last.keys.length) || shots.length > 1 || !onTeach) learnShots(pid, shots);
         else onTeach(pid, name, { dataUrl: photo.dataUrl });
@@ -3951,8 +4051,8 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
                   </div>
                 ))}
                 {shots.length < 3 && (
-                  <button type="button" onClick={() => extraRef.current && extraRef.current.click()}
-                    style={{ width: 84, height: 72, borderRadius: 10, border: '1.5px dashed #C9B8D3', background: '#FAF7FB', color: '#7A5F8A', fontSize: 11, fontWeight: 700, cursor: 'pointer', lineHeight: 1.3 }}>
+                  <button type="button" onClick={() => extraRef.current && extraRef.current.click()} data-doubt={doubt ? '1' : undefined}
+                    style={{ width: 84, height: 72, borderRadius: 10, border: doubt ? '2px solid #E8508A' : '1.5px dashed #C9B8D3', background: doubt ? '#FCE8F3' : '#FAF7FB', color: doubt ? '#C0336E' : '#7A5F8A', boxShadow: doubt ? '0 0 0 3px rgba(232,80,138,.25)' : 'none', fontSize: 11, fontWeight: 700, cursor: 'pointer', lineHeight: 1.3 }}>
                     ＋ Otra foto<br />(otro ángulo)
                   </button>
                 )}
@@ -4005,6 +4105,11 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
           </div>
           {matches && matches.length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
+              {doubt && shots.length < 3 && (
+                <div role="status" data-testid="doubtPrompt" style={{ fontSize: 12, fontWeight: 700, color: '#9D174D', background: '#FCE8F3', border: '1px solid #F9C6DD', borderRadius: 10, padding: '8px 10px', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span>◇ Duda entre 2 piezas: toma otra foto desde otro ángulo (botón <b>＋ Otra foto</b>, arriba).</span>
+                </div>
+              )}
               <div style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63' }}>Toca la pieza correcta:</div>
               {matches.map(m => (
                 <button type="button" key={m.id} onClick={() => pick(m.id, m.name)} disabled={!!adding} style={{ ...optBtn, opacity: adding && adding !== String(m.id) ? 0.5 : 1 }}>

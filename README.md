@@ -70,6 +70,21 @@ mejores), color de la zona de la pieza, más peso al color, MobileNetV3, Efficie
 - **Desempate por stock** (`stockTiebreak`): si 2 candidatas seguidas están a ≤ 0,01 y la de arriba
   tiene stock 0 y la de abajo > 0, sube la que tiene stock. Nunca oculta piezas con stock 0.
 
+### v2.2 (23 nov): gemelas, aviso de duda, acierto real y prototipo de fotos reales
+
+- **Gemelas** (`computeTwins`): para cada pieza, la otra que más se le parece (mejor par de
+  referencias del catálogo, solo contra las 12 más parecidas por el promedio; ~0,4 s sin caché,
+  luego en memoria/IndexedDB). "Registrar fotos" ordena la lista y "Siguiente pieza sin fotos" por
+  la gemela más cercana y muestra "Se confunde con <código>".
+- **Aviso de duda**: si el 1ro y el 2do quedan a menos de 0,04, "Duda entre 2 piezas: toma otra
+  foto desde otro ángulo" y se resalta "＋ Otra foto" (no con 3 fotos). Mitad de ajuste: avisa en el
+  16 % de las búsquedas, atrapa el 83 % de los errores, precisión 45 % (`--doubt`).
+- **Acierto real**: al elegir una pieza después de identificar se guarda en localStorage (últimas
+  50, sin datos de clientas) el puesto, la cantidad de fotos y los ms por foto; "Registrar fotos"
+  muestra "Últimas N identificaciones en este teléfono: X al primer intento · Y s por foto".
+- **Prototipo**: con 3 o más fotos reales de una pieza, su promedio normalizado es una referencia
+  más (`learnedRefSet`; `--proto`: 81,6 % → 83,4 % hit@1 con 3 fotos simuladas por pieza).
+
 ### Regenerar (cuando haya muchos productos nuevos o fotos cambiadas)
 
 ```bash
