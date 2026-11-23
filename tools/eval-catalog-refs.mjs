@@ -11,7 +11,7 @@
 //          oficiales con las funciones reales del panel: prepareCatalogEmbeddings + rankCatalog)
 //          [--multi] [--box] [--cache21 q21.json] (v2.1: varias fotos de la pieza y caja marcada a mano)
 //          [--quality] (calibración del aviso de foto oscura/movida)
-//          [--doubt] [--proto] (v2.2: umbral del aviso de duda; prototipo de fotos reales; usan --cache21)
+//          [--doubt] [--learned] (umbral del aviso de duda; fotos reales simuladas en 4 escenarios; usan --cache21)
 import fs from 'node:fs';
 import path from 'node:path';
 import { ADMIN_DIR, openRecognitionPage, productUrls } from './recog-page.mjs';
@@ -188,11 +188,11 @@ if (opt('panel', false)) {
 // foto tal cual + 2 versiones "A" (sin sus referencias). --multi combina 2 o 3 fotos de la misma
 // pieza con rankCatalogMulti; --box usa la caja exacta de la pieza en la foto de prueba (la que
 // marcaría a mano) en vez de la automática. Todo con las funciones reales del panel.
-if (opt('multi', false) || opt('box', false) || opt('doubt', false) || opt('proto', false)) {
+if (opt('multi', false) || opt('box', false) || opt('doubt', false) || opt('learned', false)) {
   const { page: pg, localUrl } = await page();
   const C21 = opt('cache21', null);
   let d21 = C21 && fs.existsSync(C21) ? JSON.parse(fs.readFileSync(C21, 'utf8')) : null;
-  if (d21 && d21.ver !== engInfo.ver) d21 = null;
+  if (d21 && (d21.ver !== engInfo.ver || !d21.q.some(q => q.embRef))) d21 = null; // v2.3: hace falta embRef
   if (!d21) {
     d21 = { ver: engInfo.ver, q: [] };
     const t0 = Date.now();
@@ -202,7 +202,7 @@ if (opt('multi', false) || opt('box', false) || opt('doubt', false) || opt('prot
         const img = await loadImg(main, false), out = [], E = q => Array.from(q.emb.subarray(0, 512));
         for (const mode of ['A', 'B']) for (let s = 0; s < 4; s++) {
           const info = {}, du = makeTestPhoto(img, strHash('eval|' + id + '|' + mode + (s ? '|' + s : '')), mode, info);
-          const q = await embedQueryPhoto(du), rec = { kind: mode, k: s, emb: E(q), color: Array.from(q.color) };
+          const q = await embedQueryPhoto(du), rec = { kind: mode, k: s, emb: E(q), embRef: E({ emb: q.embRef || q.emb }), color: Array.from(q.color) };
           if (wantBox) rec.embBox = E(await embedQueryPhoto(du, { box: info.box }));
           out.push(rec);
         }
@@ -225,7 +225,7 @@ if (opt('multi', false) || opt('box', false) || opt('doubt', false) || opt('prot
     _staticRefsPromise = null; _staticRefsVer = eng.ver;
     const cat = await prepareCatalogEmbeddings(prods);
     const pad = a => { const v = new Float32Array(EMB_DIM); v.set(a); return v; };
-    const Q = qs.map(q => ({ ...q, emb: pad(q.emb), embBox: q.embBox ? pad(q.embBox) : null, color: Float32Array.from(q.color), kind2: q.kind, kind: eng.kind, cw: eng.cw, margin: eng.margin }));
+    const Q = qs.map(q => ({ ...q, emb: pad(q.emb), embBox: q.embBox ? pad(q.embBox) : null, embRef: q.embRef ? pad(q.embRef) : null, color: Float32Array.from(q.color), kind2: q.kind, kind: eng.kind, cw: eng.cw, margin: eng.margin }));
     const split = id => (strHash(String(id)) % 2 === 0 ? 'ajuste' : 'prueba');
     // rank del producto correcto, sin y con categoría.
     const rankOf = (items, list, id, category) => { const r = c => rankCatalogMulti(list, items, {}, c, Infinity).findIndex(x => String(x.p.id) === id) + 1; return [r('Todas'), r(category)]; };
@@ -263,28 +263,44 @@ if (opt('multi', false) || opt('box', false) || opt('doubt', false) || opt('prot
         return { t, avisos: al.length, n: rr.length, precision: al.length ? tp / al.length : 0, recall: errs ? tp / errs : 0, errores: errs };
       })]));
     }
-    // --proto (v2.2): fotos reales simuladas = otras 3 fotos de prueba de cada pieza (int8, como el
-    // Worker), para TODAS las piezas. Mejor referencia sola vs + prototipo (learnedRefSet).
+    // --learned (v2.3): fotos reales simuladas = otras 3 fotos de prueba de cada pieza (int8, como el
+    // Worker; mismo generador → fondo compartido con la foto a identificar). Escenarios: (a) todas las
+    // piezas con 3 fotos reales, (b) solo la correcta, (c) ~30 % de las piezas, (d) ninguna.
+    // "v2.2" = foto real con las 5 vistas, sin margen ni fondo común (+ prototipo); "v2.3" = panel actual.
     if (wantProto) {
       const K = 3, keysAB = [['A', 0], ['A', 1], ['A', 2], ['A', 3], ['B', 0], ['B', 1], ['B', 2], ['B', 3]];
-      const pick = (list, skip) => keysAB.filter(([k, s]) => !(skip && skip.kind2 === k && skip.k === s)).slice(0, K).map(([k, s]) => quantizeEmb(list.find(q => q.kind2 === k && q.k === s).emb));
-      const baseRefs = Object.fromEntries(Object.entries(by).map(([id, list]) => [id, pick(list, null)]));
-      const res2 = { ajuste: { sola: [], proto: [] }, prueba: { sola: [], proto: [] } };
-      for (const [id, list] of Object.entries(by)) for (const q of list.filter(q => q.kind2 === 'A' || q.kind2 === 'B')) {
-        const raw = { ...baseRefs, [id]: pick(list, q) };
-        for (const [mode, fn] of [['sola', l => l.map(dequantizeEmb).filter(Boolean)], ['proto', learnedRefSet]]) {
-          const refs = Object.fromEntries(Object.entries(raw).map(([k, l]) => [k, fn(l)]));
-          res2[split(id)][mode].push(rankCatalog(q, cat.items, refs, 'Todas', Infinity).findIndex(x => String(x.p.id) === id) + 1);
+      const settings = { 'v2.2': { field: 'emb', opts: { bgMin: Infinity, m: 0, mp: 0 } }, 'v2.3': { field: 'embRef', opts: {} } };
+      const pick = (list, skip, field) => keysAB.filter(([k, s]) => !(skip && skip.kind2 === k && skip.k === s)).slice(0, K).map(([k, s]) => { const q = list.find(q => q.kind2 === k && q.k === s); return quantizeEmb(q[field] || q.emb); });
+      const in30 = id => strHash(id + '|30') % 10 < 3;
+      const out = {};
+      for (const [sname, st] of Object.entries(settings)) for (const scen of ['a', 'b', 'c', 'd']) {
+        const r = { ajuste: [], prueba: [] };
+        for (const [id, list] of Object.entries(by)) for (const q of list.filter(q => q.kind2 === 'A' || q.kind2 === 'B')) {
+          const raw = {};
+          if (scen !== 'd') for (const [pid, pl] of Object.entries(by)) {
+            if (scen === 'b' && pid !== id) continue;
+            if (scen === 'c' && !in30(pid)) continue;
+            raw[pid] = pick(pl, pid === id ? q : null, st.field);
+          }
+          const learned = prepareLearnedRefs(raw, st.opts);
+          r[split(id)].push(rankCatalog(q, cat.items, learned, 'Todas', Infinity).findIndex(x => String(x.p.id) === id) + 1);
         }
+        out[sname + ' ' + scen] = r;
       }
-      groups.__proto = res2;
+      groups.__learned = out;
     }
     return groups;
-  }, [d21.q, catalog.products, !!opt('multi', false), !!opt('box', false), !!opt('doubt', false), !!opt('proto', false)]);
+  }, [d21.q, catalog.products, !!opt('multi', false), !!opt('box', false), !!opt('doubt', false), !!opt('learned', false)]);
   console.log('\n== v2.1 (funciones reales del panel; mitad de prueba | mitad de ajuste) ==');
-  const doubt = res.__doubt, proto = res.__proto; delete res.__doubt; delete res.__proto;
+  const doubt = res.__doubt, learned = res.__learned; delete res.__doubt; delete res.__learned;
   if (doubt) for (const [sp, rows] of Object.entries(doubt)) for (const r of rows) console.log(`  duda ${sp}: margen < ${r.t} → avisos ${r.avisos}/${r.n} (${(100 * r.avisos / r.n).toFixed(0)} %), precisión ${(100 * r.precision).toFixed(0)} %, recall ${(100 * r.recall).toFixed(0)} % de ${r.errores} errores`);
-  if (proto) for (const [sp, m] of Object.entries(proto)) { const f = a => `hit@1 ${(100 * a.filter(x => x === 1).length / a.length).toFixed(1)} % hit@5 ${(100 * a.filter(x => x >= 1 && x <= 5).length / a.length).toFixed(1)} %`; console.log(`  fotos reales simuladas (3 por pieza) ${sp}: mejor referencia sola ${f(m.sola)} · + prototipo ${f(m.proto)} (n=${m.sola.length})`); }
+  if (learned) {
+    const h = a => (100 * a.filter(x => x === 1).length / a.length).toFixed(1);
+    for (const sp of ['ajuste', 'prueba']) {
+      console.log(`  fotos reales simuladas, mitad de ${sp} (hit@1: a todas · b solo la correcta · c 30 % · d ninguna · peor caso):`);
+      for (const st of ['v2.2', 'v2.3']) { const v = ['a', 'b', 'c', 'd'].map(sc => h(learned[st + ' ' + sc][sp])); console.log(`    ${st}: a ${v[0]} · b ${v[1]} · c ${v[2]} · d ${v[3]} · peor ${Math.min(...v.map(Number)).toFixed(1)} %`); }
+    }
+  }
   for (const [g, bySplit] of Object.entries(res)) {
     const f = r => { const n = r.length, h = j => (100 * r.filter(x => x[j] === 1).length / n).toFixed(1), h5 = j => (100 * r.filter(x => x[j] >= 1 && x[j] <= 5).length / n).toFixed(1); return `n=${n} hit@1 ${h(0)} % hit@5 ${h5(0)} % | categoría ${h(1)} % / ${h5(1)} %`; };
     console.log(`  ${g.padEnd(22)} prueba: ${f(bySplit.prueba || [])}   ajuste: ${f(bySplit.ajuste || [])}`);

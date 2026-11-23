@@ -2599,19 +2599,24 @@ function v2Views(eng, img, manualBox) {
 // proyección → normalizada → rellenada con ceros hasta EMB_DIM.
 function embedV2(eng, img, manualBox) { return projectV2(eng.proj, rawV2(eng, img, manualBox)); }
 // Descriptor sin proyectar (dIn números, normalizado). Con esto se aprende la proyección.
-function rawV2(eng, img, manualBox) {
+function rawV2(eng, img, manualBox) { return rawV2Both(eng, img, manualBox).all; }
+// Una sola pasada de la red: descriptor de todas las vistas (all) y solo de las vistas de la pieza
+// ('p', recortadas a la joya: ref). ref es el que se guarda como foto real aprendida (v2.3).
+function rawV2Both(eng, img, manualBox) {
   const { tf, model, proj } = eng;
+  const spec = manualBox ? MANUAL_VIEWS : eng.views;
   const views = v2Views(eng, img, manualBox);
   const out = tf.tidy(() => model.execute(tf.stack(views.map(c => tf.browser.fromPixels(c))).toFloat().div(255)));
   const raw = out.dataSync(); out.dispose();
-  const dIn = proj.dIn, acc = new Float64Array(dIn);
+  const dIn = proj.dIn, acc = new Float64Array(dIn), accP = new Float64Array(dIn);
   for (let v = 0; v < views.length; v++) {
     const f = raw.subarray(v * dIn, (v + 1) * dIn), x = new Float64Array(dIn);
     for (const [a, b] of eng.parts) { let s = 0; for (let i = a; i < b; i++) s += f[i] * f[i]; const n = Math.sqrt(s) || 1; for (let i = a; i < b; i++) x[i] = f[i] / n; }
     let s = 0; for (let i = 0; i < dIn; i++) s += x[i] * x[i]; const n = Math.sqrt(s) || 1;
     for (let i = 0; i < dIn; i++) acc[i] += x[i] / n;
+    if (spec[v][0] === 'p') for (let i = 0; i < dIn; i++) accP[i] += x[i] / n;
   }
-  return l2norm(acc);
+  return { all: l2norm(acc), ref: accP.some(Boolean) ? l2norm(accP) : l2norm(acc) };
 }
 function projectV2(proj, x) {
   const { mu, W, dIn, dOut } = proj, y = new Float64Array(dOut);
@@ -2779,7 +2784,11 @@ async function embedQueryPhoto(dataUrl, opts) {
   const eng = await loadRecognitionModel();
   const img = await loadImg(dataUrl, false);
   const box = opts && Array.isArray(opts.box) ? opts.box : null;
-  return { emb: embedPhoto(eng, img, 'query', box), color: colorDescriptor(img), kind: eng.kind, ver: eng.ver, cw: eng.cw, margin: eng.margin, pct: eng.pct, box };
+  const base = { color: colorDescriptor(img), kind: eng.kind, ver: eng.ver, cw: eng.cw, margin: eng.margin, pct: eng.pct, box };
+  if (eng.kind !== 'v2') return { ...base, emb: embedPhoto(eng, img, 'query', box) };
+  const r = rawV2Both(eng, img, box);
+  // emb: para buscar (5 vistas); embRef: para guardar como foto real (solo la pieza recortada).
+  return { ...base, emb: projectV2(eng.proj, r.all), embRef: projectV2(eng.proj, r.ref) };
 }
 // Zona automática de la pieza, tamaño y calidad de una foto (sin cargar la red).
 async function photoInfo(dataUrl) {
@@ -2810,7 +2819,7 @@ function dequantizeEmb(b64) {
 // el panel quedó en v1 de respaldo, NO se guarda nada (no mezclar huellas de dos versiones).
 function learnedRefVector(q) {
   if (!q || q.kind !== 'v2') throw new Error('El identificador mejorado no terminó de cargar (modo básico): esta foto no se guarda como referencia. Recarga la página e inténtalo de nuevo.');
-  return quantizeEmb(q.emb);
+  return quantizeEmb(q.embRef || q.emb);
 }
 // ── "Entrenamiento" con el catálogo ──
 // La red no se re-entrena (no hace falta y en el navegador sería lento): se le enseñan
@@ -2961,7 +2970,7 @@ function rankCatalog(query, items, refs, category, topN = 5) {
   for (const it of items) {
     if (catLc && String(it.p.category || '').toLowerCase() !== catLc) continue;
     let emb = dot(query.emb, it.emb);
-    if (useRefs) for (const r of (refs && refs[String(it.p.id)]) || []) emb = Math.max(emb, dot(query.emb, r));
+    if (useRefs && refs) emb = Math.max(emb, learnedScore(query, refs, String(it.p.id)));
     for (const r of it.aug || []) emb = Math.max(emb, dot(query.emb, r) - margin);
     const score = (1 - cw) * emb + cw * colorSim(query.color, it.color);
     out.push({ p: it.p, score, emb });
@@ -2990,14 +2999,55 @@ function rankCatalogMulti(queries, items, refs, category, topN = 5) {
   out.sort((a, b) => b.score - a.score);
   return out.slice(0, topN);
 }
-// ── v2.2 (23 nov) ──
-// Prototipo de fotos reales: con 3 o más fotos reales aprendidas de una pieza, su promedio
-// normalizado se suma como una referencia más (tools/eval-catalog-refs.mjs --proto, 3 fotos reales
-// simuladas por pieza, mitad de prueba: hit@1 81,6 % → 83,4 %; con variantes como reemplazo, neutro).
-function learnedRefSet(list) {
-  const v = (Array.isArray(list) ? list : []).map(dequantizeEmb).filter(Boolean);
-  if (v.length >= 3) { const m = new Float32Array(EMB_DIM); for (const x of v) for (let i = 0; i < EMB_DIM; i++) m[i] += x[i]; v.push(l2norm(m)); }
-  return v;
+// ── Fotos reales aprendidas (v2.2 + v2.3) ──
+// Prototipo (v2.2): con 3 o más fotos reales de una pieza, su promedio normalizado es una referencia más.
+// v2.3 (23 nov): como cada pieza elegida aprende sola, se juntan fotos reales de muchas piezas con
+// el MISMO fondo y la misma luz, y una foto nueva se parece a las fotos reales de otras piezas.
+// Simulado (3 fotos reales por pieza, todas con fondo compartido), mitad de ajuste: hit@1 91 % →
+// 80 %. Arreglo, elegido por el peor caso entre (a) todas con fotos, (b) solo la correcta,
+// (c) 30 % de las piezas y (d) ninguna:
+//   · la foto real se guarda solo con la pieza recortada (embRef, vistas de la pieza);
+//   · si hay fotos reales de LEARNED_BG_MIN piezas o más, se les resta el "fondo común" (promedio
+//     de todas) a ellas y a la foto a identificar antes de comparar;
+//   · margen: foto real − LEARNED_MARGIN, prototipo − PROTO_MARGIN.
+// tools/eval-catalog-refs.mjs --learned, mitad de ajuste (hit@1): peor caso 75,2 % → 90,4 % (sin
+// fotos reales: 91,2 %, igual que antes); solo la correcta con fotos: 97,8 % → 93,1 %. Prueba: peor
+// caso 80,6 % → 90,9 %. Probado y descartado: margen solo (peor caso 87–90 %), fondo común con
+// menos de 8 piezas (borra la propia pieza), márgenes mayores (0,25–0,30: casi sin ganancia en b).
+const LEARNED_MARGIN = 0.21, PROTO_MARGIN = 0.18, LEARNED_BG_MIN = 8;
+// {id: [base64 int8]} del Worker → { byId: {id: {refs, proto}}, mu, m, mp } listo para rankCatalog.
+// opts (solo para medir con tools/eval-catalog-refs.mjs --learned): { bgMin, m, mp }.
+function prepareLearnedRefs(raw, opts) {
+  const o = { bgMin: LEARNED_BG_MIN, m: LEARNED_MARGIN, mp: PROTO_MARGIN, ...(opts || {}) };
+  const lists = {};
+  for (const [id, list] of Object.entries(raw || {})) { const v = (Array.isArray(list) ? list : []).map(dequantizeEmb).filter(Boolean); if (v.length) lists[String(id)] = v; }
+  const ids = Object.keys(lists);
+  let mu = null;
+  if (ids.length >= o.bgMin) {
+    mu = new Float32Array(EMB_DIM); let n = 0;
+    for (const id of ids) for (const v of lists[id]) { for (let i = 0; i < EMB_DIM; i++) mu[i] += v[i]; n++; }
+    for (let i = 0; i < EMB_DIM; i++) mu[i] /= n;
+  }
+  const norm = v => mu ? l2norm(Float32Array.from(v, (x, i) => x - mu[i])) : v;
+  const byId = {};
+  for (const id of ids) {
+    const refs = lists[id].map(norm);
+    let proto = null;
+    if (refs.length >= 3) { const m = new Float32Array(EMB_DIM); for (const x of refs) for (let i = 0; i < EMB_DIM; i++) m[i] += x[i]; proto = l2norm(m); }
+    byId[id] = { refs, proto };
+  }
+  return { byId, mu, m: o.m, mp: o.mp };
+}
+// Mejor similitud de la foto con las fotos reales de una pieza (ya con los márgenes). -2 = no tiene.
+function learnedScore(query, learned, id) {
+  const e = learned.byId ? learned.byId[id] : null;
+  if (!e) return -2;
+  let qv = query.emb;
+  if (learned.mu) { if (!query._lrn || query._lrn.mu !== learned.mu) query._lrn = { mu: learned.mu, v: l2norm(Float32Array.from(query.emb, (x, i) => x - learned.mu[i])) }; qv = query._lrn.v; }
+  let s = -2;
+  for (const r of e.refs) s = Math.max(s, dot(qv, r) - learned.m);
+  if (e.proto) s = Math.max(s, dot(qv, e.proto) - learned.mp);
+  return s;
 }
 // Aviso de duda: si el 1ro y el 2do quedan a menos de DOUBT_MARGIN de puntaje, conviene otra foto.
 // Calibrado en la mitad de ajuste (1 foto; tools/eval-catalog-refs.mjs --doubt): avisa en el 16 %
@@ -3783,7 +3833,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
   const [confirmP, setConfirmP] = React.useState(null); // producto resuelto por código
   const [prep, setPrep]       = React.useState({ phase: 'idle', done: 0, total: 0, failed: 0 });
   const prepRef  = React.useRef(null);  // promesa: catálogo con huellas listo
-  const refsRef  = React.useRef({});    // referencias aprendidas {id: [Float32Array]}
+  const refsRef  = React.useRef(null);  // fotos reales aprendidas (prepareLearnedRefs)
   const queryRef = React.useRef(null);  // última búsqueda {keys, qs}: huellas de las fotos usadas
   const qCache   = React.useRef(new Map()); // dataUrl|zona → huella
   const extraRef = React.useRef(null);  // input de "＋ Otra foto"
@@ -3817,12 +3867,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
     })();
     prepRef.current.catch(e => { if (alive) setPrep({ phase: 'error', error: (e && e.message) || 'No se pudo preparar el reconocimiento.' }); });
     loadRefCounts(token, true).then(r => {
-      const out = {};
-      for (const [id, list] of Object.entries((r && r.refs) || {})) {
-        const v = learnedRefSet(list); // + prototipo con 3 o más fotos reales
-        if (v.length) out[id] = v;
-      }
-      refsRef.current = out;
+      refsRef.current = prepareLearnedRefs((r && r.refs) || {}); // márgenes, fondo común y prototipo (v2.3)
     }).catch(e => console.warn('identify/refs:', e && e.message));
     return () => { alive = false; };
   }, [recogOn]);

@@ -85,6 +85,20 @@ mejores), color de la zona de la pieza, más peso al color, MobileNetV3, Efficie
 - **Prototipo**: con 3 o más fotos reales de una pieza, su promedio normalizado es una referencia
   más (`learnedRefSet`; `--proto`: 81,6 % → 83,4 % hit@1 con 3 fotos simuladas por pieza).
 
+### v2.3 (23 nov): fotos reales aprendidas sin confundir piezas
+
+Cada pieza elegida aprende sola, así que se juntan fotos reales de muchas piezas con el mismo fondo
+y luz, y una foto nueva se parecía a las fotos reales de OTRAS piezas (simulado: 91 % → 80 % si
+todas tienen 3). Ahora: la foto real se guarda solo con la pieza recortada (`embRef`); con fotos
+reales de 8 piezas o más se les resta el fondo común; margen 0,21 (prototipo 0,18)
+(`prepareLearnedRefs`, `learnedScore`). `node eval-catalog-refs.mjs … --learned` (hit@1, mitad de
+ajuste; a = todas con fotos reales, b = solo la correcta, c = 30 %, d = ninguna):
+
+| | a | b | c | d | peor caso |
+|---|---|---|---|---|---|
+| v2.2 | 80,4 % | 97,8 % | 75,2 % | 91,2 % | 75,2 % |
+| v2.3 | 90,9 % | 93,1 % | 90,4 % | 91,2 % | 90,4 % |
+
 ### Regenerar (cuando haya muchos productos nuevos o fotos cambiadas)
 
 ```bash
