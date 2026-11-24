@@ -12,6 +12,7 @@
 //          [--multi] [--box] [--cache21 q21.json] (v2.1: varias fotos de la pieza y caja marcada a mano)
 //          [--quality] (calibración del aviso de foto oscura/movida)
 //          [--doubt] [--learned] (umbral del aviso de duda; fotos reales simuladas en 4 escenarios; usan --cache21)
+//          [--real <carpeta> [--tune]] (fotos reales: <carpeta>/labels.json = [{file, sku}]; ver real-eval.mjs)
 import fs from 'node:fs';
 import path from 'node:path';
 import { ADMIN_DIR, openRecognitionPage, productUrls } from './recog-page.mjs';
@@ -33,6 +34,13 @@ console.log(`Huella: ${engInfo.ver} (${engInfo.kind}), color ${engInfo.cw}, marg
 const PANEL_REFS = path.join(ADMIN_DIR, engInfo.refsUrl.replace(/\.json$/, ''));
 const REFS = path.resolve(opt('refs', PANEL_REFS));
 const COLOR_W = engInfo.cw, EMB_W = 1 - COLOR_W;
+// --real <dir> [--tune] (v2.4): fotos reales etiquetadas (<dir>/labels.json); no corre las demás fases.
+if (opt('real', false)) {
+  const { runReal } = await import('./real-eval.mjs');
+  await runReal({ pg: (await page()).page, catalog, dir: path.resolve(opt('real')), tune: !!opt('tune', false) });
+  await rp.close();
+  process.exit(0);
+}
 
 // ── Fase 1: huellas de las fotos de prueba y del catálogo (como el panel anterior) ──
 let data = CACHE && fs.existsSync(CACHE) ? JSON.parse(fs.readFileSync(CACHE, 'utf8')) : null;

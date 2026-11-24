@@ -2476,8 +2476,10 @@ async function loadV1(tf) {
   return { tf, model, kind: 'v1', ver: EMB_VERSION_V1, size: 224, cw: COLOR_W, margin: 0.03, pct: [0.35, 0.55],
            refsUrl: 'models/catalog-refs-v1.json' };
 }
+let _recogLoads = 0; // cuántas veces se cargó el motor de verdad (pruebas: la precarga no se repite)
 function loadRecognitionModel() {
   if (_modelPromise) return _modelPromise;
+  _recogLoads++;
   _modelPromise = (async () => {
     const tf = await loadTfjs();
     try { await tf.ready(); } catch (_) {}
@@ -2487,6 +2489,31 @@ function loadRecognitionModel() {
   })();
   _modelPromise.catch(() => { _modelPromise = null; });
   return _modelPromise;
+}
+// ── Precarga (v2.4) ──
+// Al abrir la pestaña Pedidos o "Registrar fotos" se carga el motor y se preparan las huellas del
+// catálogo en segundo plano, así "Identificar" no espera. Una sola vez por sesión, nunca con
+// "Ahorro de datos" (navigator.connection.saveData), sin bloquear ni mostrar errores: si falla, se
+// vuelve a intentar al usarlo de verdad. prepareCatalogShared reutiliza la misma preparación
+// (misma lista de productos) para que la precarga y el modal no calculen dos veces.
+let _prewarmState = 'idle'; // idle | running | done | failed | skipped
+function prewarmRecognition(products) {
+  if (_prewarmState !== 'idle') return;
+  try { if (navigator.connection && navigator.connection.saveData) { _prewarmState = 'skipped'; return; } } catch (_) {}
+  if (!(products || []).length) return; // sin catálogo todavía: se intenta la próxima vez
+  _prewarmState = 'running';
+  setTimeout(() => {
+    prepareCatalogShared(products).then(() => { _prewarmState = 'done'; }, () => { _prewarmState = 'failed'; });
+  }, 300);
+}
+let _prepShared = null; // { key, promise }
+function prepareCatalogShared(products, onProgress) {
+  const key = (products || []).map(p => p && (p.id + ':' + (p.available === false ? 0 : 1) + ':' + (p.imageUrl || '') + ':' + ((p.images || []).length))).join('|');
+  if (_prepShared && _prepShared.key === key) return _prepShared.promise;
+  const promise = (async () => { await loadRecognitionModel(); return prepareCatalogEmbeddings(products, onProgress); })();
+  _prepShared = { key, promise };
+  promise.catch(() => { if (_prepShared && _prepShared.promise === promise) _prepShared = null; });
+  return promise;
 }
 // Recorta un cuadrado centrado (frac = fracción del lado corto) y lo lleva a size×size.
 function squareCrop(img, frac, size) {
@@ -2524,7 +2551,10 @@ function embedCanvas(eng, canvas) {
 // (24 muestras: mediana de 6 tramos por lado), suavizado 5×5 y umbral de Otsu. La caja es la
 // del 3 %–97 % de la "masa" (distancia sobre el umbral). null si no hay una pieza clara (fondo
 // liso sin nada, o la pieza ocupa casi toda la foto): entonces se usa la foto entera.
+// Parámetros de pieceBox (el modo --real --tune de tools/eval-catalog-refs.mjs los barre con fotos reales).
+const PIECE_BOX = { floor: 18, lo: 0.03, hi: 0.97, minFrac: 0.01, maxFrac: 0.75 };
 function pieceBox(img) {
+  const P = PIECE_BOX;
   const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
   const S = 128 / Math.max(w, h);
   const W = Math.max(8, Math.round(w * S)), H = Math.max(8, Math.round(h * S));
@@ -2564,13 +2594,13 @@ function pieceBox(img) {
     sB += i * hist[i]; const mB = sB / wB, mF = (sum - sB) / wF, v = wB * wF * (mB - mF) * (mB - mF);
     if (v > best) { best = v; th = i; }
   }
-  const thr = Math.max((th + 1) / 64 * mx, 18);
+  const thr = Math.max((th + 1) / 64 * mx, P.floor);
   const px = new Float64Array(W), py = new Float64Array(H); let mass = 0, fg = 0;
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const v = bl[y * W + x]; if (v > thr) { const wgt = v - thr; px[x] += wgt; py[y] += wgt; mass += wgt; fg++; } }
   const frac = fg / tot;
-  if (!mass || frac < 0.01 || frac > 0.75) return null;
+  if (!mass || frac < P.minFrac || frac > P.maxFrac) return null;
   const pct = (arr, q) => { let c = 0; const t = mass * q; for (let i = 0; i < arr.length; i++) { c += arr[i]; if (c >= t) return i; } return arr.length - 1; };
-  return [pct(px, 0.03) / S, pct(py, 0.03) / S, (pct(px, 0.97) + 1) / S, (pct(py, 0.97) + 1) / S];
+  return [pct(px, P.lo) / S, pct(py, P.lo) / S, (pct(px, P.hi) + 1) / S, (pct(py, P.hi) + 1) / S];
 }
 // Caja → cuadrado centrado en ella (lado = lado mayor × margen, mínimo 30 % del lado corto).
 function boxSquare(img, box, margin) {
@@ -3542,7 +3572,8 @@ function EnrollPhotosModal({ products, token, onClose, onlyId = null }) {
     let alive = true;
     (async () => {
       const eng = await loadRecognitionModel();
-      const res = await prepareCatalogEmbeddings(products);
+      prewarmRecognition(products);
+      const res = await prepareCatalogShared(products);
       const t = await computeTwins(res.items, eng.ver);
       if (alive) setTwins(t);
     })().catch(e => console.warn('gemelas:', e && e.message));
@@ -3860,8 +3891,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
     let alive = true;
     setPrep({ phase: 'model', done: 0, total: 0, failed: 0 });
     prepRef.current = (async () => {
-      await loadRecognitionModel();
-      const res = await prepareCatalogEmbeddings(products, (d, t) => { if (alive) setPrep(s => ({ ...s, phase: 'catalog', done: d, total: t })); });
+      const res = await prepareCatalogShared(products, (d, t) => { if (alive) setPrep(s => ({ ...s, phase: 'catalog', done: d, total: t })); });
       if (alive) setPrep({ phase: 'ready', done: res.total, total: res.total, failed: res.failed });
       return res;
     })();
@@ -7759,6 +7789,7 @@ function App() {
   const [showMenu, setShowMenu]       = useState(false);
   const [activeTab, setActiveTab]     = useState('products');
   React.useEffect(() => { if (session && (activeTab === 'products' || activeTab === 'orders')) loadStock(); }, [activeTab]);
+  React.useEffect(() => { if (session && activeTab === 'orders') prewarmRecognition(products); }, [activeTab, products.length]); // precarga del identificador
   const [loversCount, setLoversCount] = useState(0);
   const [showOrderModal, setShowOrderModal] = useState(false);
   const [ordersView, setOrdersView]         = useState('active');

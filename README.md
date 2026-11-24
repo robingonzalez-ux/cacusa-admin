@@ -99,6 +99,18 @@ ajuste; a = todas con fotos reales, b = solo la correcta, c = 30 %, d = ninguna)
 | v2.2 | 80,4 % | 97,8 % | 75,2 % | 91,2 % | 75,2 % |
 | v2.3 | 90,9 % | 93,1 % | 90,4 % | 91,2 % | 90,4 % |
 
+### v2.4 (24 nov): precarga y evaluación con fotos reales
+
+- **Precarga**: al abrir la pestaña Pedidos o "Registrar fotos" se carga el motor y se preparan las
+  huellas del catálogo en segundo plano (`prewarmRecognition` / `prepareCatalogShared`), una vez por
+  sesión, nunca con Ahorro de datos; si falla no se muestra nada y se reintenta al usarlo.
+- **Fotos reales**: `node eval-catalog-refs.mjs --site … --real <carpeta> [--tune]`, con
+  `<carpeta>/labels.json` = `[{"file": "a.jpg", "sku": "AN001"}, …]`. Informa acierto con 1 foto
+  (total y por categoría), fusión de 2 fotos de la misma pieza, el aviso de calidad y el de duda, y
+  la simulación de "foto real aprendida" (otra foto de la pieza como referencia). `--tune` separa
+  las piezas en 2 mitades por código y barre `PIECE_BOX`, las vistas de la pieza, el peso del
+  color, el umbral de duda y el margen de las fotos reales (ajuste vs prueba).
+
 ### Regenerar (cuando haya muchos productos nuevos o fotos cambiadas)
 
 ```bash
