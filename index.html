@@ -1299,7 +1299,72 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
   const galleryFileRef = useRef();
   const nameEnRef = useRef();
   const descEnRef = useRef();
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  // Lo que la usuaria escribe o elige a mano nunca lo pisa "Sugerir datos desde la foto".
+  const touched = useRef(new Set());
+  const [sugTags, setSugTags] = useState({}); // campo → 'ia' | 'local' (etiqueta "sugerido")
+  const [sugBusy, setSugBusy] = useState(false);
+  const [sugInfo, setSugInfo] = useState(null); // { neighbors: [{ id, sku, name, img }], note }
+  const set = (k, v) => {
+    touched.current.add(k);
+    setSugTags(t => { if (!t[k]) return t; const n = { ...t }; delete n[k]; return n; });
+    setForm(f => ({ ...f, [k]: v }));
+  };
+  const SugTag = ({ k }) => sugTags[k] ? <span data-testid={'sug-' + k} style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: '#7C3AED', background: '#F1EAFB', borderRadius: 99, padding: '1px 7px', textTransform: 'none', letterSpacing: 0 }}>{sugTags[k] === 'ia' ? 'sugerido (IA)' : 'sugerido'}</span> : null;
+  // ✦ Sugerir datos desde la foto (v2.5): 1) parte gratis local (piezas parecidas → categoría,
+  // material, color, precio); 2) nombre y descripción con Claude Haiku (/product/describe); si no
+  // está disponible, plantillas. Solo completa campos vacíos o no tocados. Nunca se llama solo.
+  const suggestFromPhoto = async () => {
+    if (sugBusy || !imgPrev) return;
+    setSugBusy(true); setSugInfo(null);
+    try {
+      const img = /^(blob:|data:)/.test(imgPrev) ? await loadImg(imgPrev, false) : await loadCatalogImg(form.imageUrl || imgPrev);
+      const eng = await loadRecognitionModel();
+      const cat = await prepareCatalogShared(allProducts);
+      const items = cat.items.filter(it => String(it.p.id) !== String(product && product.id));
+      const q = { emb: embedPhoto(eng, img, 'base'), color: colorDescriptor(img), kind: eng.kind, cw: eng.cw, margin: eng.margin };
+      const sug = localProductSuggestion(q, items, { tone: photoTone(img) });
+      if (!sug) throw new Error('No hay piezas del catálogo para comparar.');
+      const top3 = sug.neighbors.slice(0, 3);
+      let ai = null, note = '';
+      try {
+        // Foto achicada (máx. 768 px, JPEG 0,8; < 600 KB) para la IA.
+        const k = Math.min(1, 768 / Math.max(img.naturalWidth || img.width, img.naturalHeight || img.height));
+        const cv = document.createElement('canvas'); cv.width = Math.round((img.naturalWidth || img.width) * k); cv.height = Math.round((img.naturalHeight || img.height) * k);
+        cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+        let qual = 0.8, b64 = cv.toDataURL('image/jpeg', qual).split(',')[1];
+        while (b64.length * 0.75 > 600 * 1024 && qual > 0.4) { qual -= 0.1; b64 = cv.toDataURL('image/jpeg', qual).split(',')[1]; }
+        const r = await apiCall('product/describe', { token, image: b64, mediaType: 'image/jpeg', neighborIds: top3.map(x => String(x.p.id)), hints: { category: sug.category, material: sug.material } });
+        ai = r && r.suggestion && typeof r.suggestion.name === 'string' && r.suggestion.name.trim() ? r.suggestion : null;
+        if (!ai) note = 'IA no disponible, sugerencia básica';
+      } catch (e) {
+        note = e && e.status === 503 ? 'Sugerencia básica (IA no activada)' : e && e.status === 429 ? 'Sugerencia básica (límite de hoy)' : 'IA no disponible, sugerencia básica';
+      }
+      // Categoría y material: el voto local manda si es claro; si no, lo de la IA (si es válido).
+      const catAi = ai && sug.catShare < SUGGEST_STRONG && cats.includes(ai.category);
+      const matAi = ai && sug.matShare < SUGGEST_STRONG && mats.includes(ai.material);
+      const category = catAi ? ai.category : sug.category, material = matAi ? ai.material : sug.material;
+      // Las plantillas usan la categoría/material que quedan en el formulario (si se eligieron a mano, esas).
+      const tpl = templateProductText(sug, touched.current.has('category') ? form.category : category, touched.current.has('material') ? form.material : material);
+      const text = k2 => (ai && String(ai[k2] || '').trim()) ? [String(ai[k2]).trim(), 'ia'] : [tpl[k2], 'local'];
+      const tags = {};
+      setForm(f => {
+        const n = { ...f };
+        const fill = (k2, v, tag, isEmpty) => { if (v == null || v === '' || touched.current.has(k2) || !isEmpty) return; n[k2] = v; tags[k2] = tag; };
+        for (const k2 of ['name', 'name_en', 'description', 'description_en']) { const [v, tag] = text(k2); fill(k2, v, tag, !String(f[k2] || '').trim()); }
+        if (cats.includes(category)) fill('category', category, catAi ? 'ia' : 'local', true);
+        if (mats.includes(material)) fill('material', material, matAi ? 'ia' : 'local', true);
+        if (sug.price) fill('price', String(sug.price), 'local', String(f.price ?? '').trim() === '');
+        if (sug.color && COLORS[sug.color]) fill('color', sug.color, 'local', true);
+        if (!touched.current.has('personalized')) n.personalized = false;
+        return n;
+      });
+      setTimeout(() => setSugTags(t => ({ ...t, ...tags })), 0);
+      setSugInfo({ note, neighbors: top3.map(x => ({ id: String(x.p.id), sku: normalizeSku(x.p.sku) || x.p.name, name: x.p.name, img: productImageUrl(x.p) })) });
+    } catch (e) {
+      setSugInfo({ note: 'No se pudo sugerir: ' + ((e && e.message) || 'error'), neighbors: [] });
+    }
+    setSugBusy(false);
+  };
   const [galleryUploading, setGalleryUploading] = useState(false);
   const [galleryMsg, setGalleryMsg] = useState('');
   const [reviews, setReviews] = useState(null);
@@ -1480,6 +1545,29 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
           <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: 'none' }} />
           {uploadMsg && <div role="status" aria-live="polite" style={{ fontSize: 12, marginTop: 6, color: uploadMsg.startsWith('✅') ? '#065F46' : '#DC2626', fontWeight: 500 }}>{uploadMsg}</div>}
           {!uploadMsg && <div style={{ fontSize: 11, color: '#767676', marginTop: 6 }}>💡 La foto se optimiza automáticamente para cargar rápido en la tienda.</div>}
+          {isNew && imgPrev && !uploading && (
+            <div data-testid="suggestBox" style={{ marginTop: 10, background: '#F7F3FA', borderRadius: 10, padding: '10px 12px' }}>
+              <button type="button" onClick={suggestFromPhoto} disabled={sugBusy} aria-busy={sugBusy}
+                style={{ width: '100%', padding: '9px 12px', borderRadius: 99, border: 'none', background: sugBusy ? '#C9B8D3' : 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', fontWeight: 700, fontSize: 13, cursor: sugBusy ? 'default' : 'pointer' }}>
+                {sugBusy ? 'Sugiriendo…' : '✦ Sugerir datos desde la foto'}
+              </button>
+              <div role="status" aria-live="polite" style={{ fontSize: 11, color: '#7A6880', marginTop: 6 }}>
+                {sugBusy ? 'Buscando piezas parecidas en el catálogo…' : sugInfo ? (sugInfo.note ? <span data-testid="sugNote" style={{ color: '#92400E' }}>{sugInfo.note}. </span> : null) : 'Completa solo los campos vacíos; revísalos antes de guardar.'}
+                {!sugBusy && sugInfo && sugInfo.neighbors.length > 0 && 'Revisa los campos marcados "sugerido" antes de guardar.'}
+              </div>
+              {!sugBusy && sugInfo && sugInfo.neighbors.length > 0 && (
+                <div data-testid="sugNeighbors" style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 6, fontSize: 11, color: '#5B4A63' }}>
+                  <span style={{ fontWeight: 700 }}>Se parece a:</span>
+                  {sugInfo.neighbors.map(nb => (
+                    <span key={nb.id} title={nb.name} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'white', borderRadius: 8, padding: 2, paddingRight: 6, border: '1px solid #EDE3F1' }}>
+                      {nb.img ? <img src={nb.img} alt="" style={{ width: 28, height: 28, borderRadius: 6, objectFit: 'cover' }} /> : null}
+                      <span style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontWeight: 800, color: '#5B3F8A' }}>{nb.sku}</span>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {imgPrev && !uploading && (
             <div style={{ marginTop: 10, background: '#FAF7FB', borderRadius: 10, padding: '10px 14px' }}>
               <div style={{ fontSize: 11, fontWeight: 600, color: '#7A6880', marginBottom: 8 }}>🎯 Ajustar posición y zoom</div>
@@ -1526,7 +1614,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
           <div style={{ gridColumn: 'span 2' }}>
-            <label htmlFor="pmName" style={lbl}>Nombre del producto *</label>
+            <label htmlFor="pmName" style={lbl}>Nombre del producto *<SugTag k="name" /></label>
             <input id="pmName" value={form.name} onChange={e => set('name', e.target.value)} placeholder="Ej: Collar con nombre personalizado" style={inp} />
           </div>
           <div style={{ gridColumn: 'span 2', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', background: '#F8F4FD', borderRadius: 10, padding: '8px 12px' }}>
@@ -1560,13 +1648,13 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
             )}
           </div>
           <div>
-            <label htmlFor="pmCategory" style={lbl}>Categoría</label>
+            <label htmlFor="pmCategory" style={lbl}>Categoría<SugTag k="category" /></label>
             <select id="pmCategory" value={form.category} onChange={e => set('category', e.target.value)} style={inp}>
               {(cats.includes(form.category) ? cats : [form.category, ...cats]).map(c => <option key={c}>{c}</option>)}
             </select>
           </div>
           <div>
-            <label htmlFor="pmMaterial" style={lbl}>Material</label>
+            <label htmlFor="pmMaterial" style={lbl}>Material<SugTag k="material" /></label>
             <select id="pmMaterial" value={form.material || mats[0]} onChange={e => set('material', e.target.value)} style={inp}>
               {mats.map(m => <option key={m}>{m}</option>)}
             </select>
@@ -1580,7 +1668,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
             </select>
           </div>
           <div>
-            <label htmlFor="pmPrice" style={lbl}>Precio USD *</label>
+            <label htmlFor="pmPrice" style={lbl}>Precio USD *<SugTag k="price" /></label>
             <input id="pmPrice" type="number" min="0" step="0.01" value={form.price} onChange={e => set('price', e.target.value)} placeholder="45" style={inp} />
           </div>
           <div>
@@ -1588,7 +1676,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
             <input id="pmOldPrice" type="number" min="0" step="0.01" value={form.oldPrice || ''} onChange={e => set('oldPrice', e.target.value)} placeholder="60" style={inp} />
           </div>
           <div style={{ gridColumn: 'span 2' }}>
-            <label htmlFor="pmDescription" style={lbl}>Descripción</label>
+            <label htmlFor="pmDescription" style={lbl}>Descripción<SugTag k="description" /></label>
             <textarea id="pmDescription" value={form.description || ''} onChange={e => set('description', e.target.value)} rows={3}
               placeholder="Describe el material, medidas y detalles especiales…" style={{ ...inp, resize: 'vertical' }} />
           </div>
@@ -1605,11 +1693,11 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
           {translateWarn && <div role="alert" aria-live="assertive" style={{ marginTop: 10, marginBottom: 4, fontSize: 12.5, color: '#92400E', background: '#FEF3C7', border: '1px solid #FDE68A', borderRadius: 8, padding: '8px 12px' }}>{translateWarn}</div>}
           <div style={{ display: 'grid', gap: 12, marginTop: 12 }}>
             <div>
-              <label htmlFor="pmNameEn" style={lbl}>Nombre en inglés</label>
+              <label htmlFor="pmNameEn" style={lbl}>Nombre en inglés<SugTag k="name_en" /></label>
               <input id="pmNameEn" ref={nameEnRef} value={form.name_en || ''} onChange={e => set('name_en', e.target.value)} placeholder="Se traduce automáticamente si lo dejas vacío" style={inp} />
             </div>
             <div>
-              <label htmlFor="pmDescriptionEn" style={lbl}>Descripción en inglés</label>
+              <label htmlFor="pmDescriptionEn" style={lbl}>Descripción en inglés<SugTag k="description_en" /></label>
               <textarea id="pmDescriptionEn" ref={descEnRef} value={form.description_en || ''} onChange={e => set('description_en', e.target.value)} rows={3}
                 placeholder="Se traduce automáticamente si la dejas vacía" style={{ ...inp, resize: 'vertical' }} />
             </div>
@@ -1629,7 +1717,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
               </select>
             </div>
             <div>
-              <label htmlFor="pmColor" style={lbl}>Color de respaldo</label>
+              <label htmlFor="pmColor" style={lbl}>Color de respaldo<SugTag k="color" /></label>
               <select id="pmColor" value={form.color} onChange={e => set('color', e.target.value)} style={inp}>
                 {Object.keys(COLORS).map(c => <option key={c} value={c}>{c}</option>)}
               </select>
@@ -3029,6 +3117,110 @@ function rankCatalogMulti(queries, items, refs, category, topN = 5) {
   out.sort((a, b) => b.score - a.score);
   return out.slice(0, topN);
 }
+// ── Autocompletar un producto nuevo desde su foto (v2.5) ──
+// Parte gratis (local): las SUGGEST_K piezas más parecidas del catálogo (misma huella del
+// identificador) votan categoría, material y color (voto pesado por similitud); precio = mediana
+// de las parecidas. Nombre y descripción: plantillas por categoría (o Claude
+// Haiku vía /product/describe, si está activado). Medido con tools/eval-catalog-refs.mjs --autofill.
+const SUGGEST_K = 7, SUGGEST_STRONG = 0.6; // voto "fuerte" = ≥ 60 % del peso
+function voteBy(list, key) {
+  const acc = new Map(); let tot = 0;
+  for (const x of list) { const v = key(x.p); if (v == null || v === '') continue; acc.set(v, (acc.get(v) || 0) + x.w); tot += x.w; }
+  let best = null, bw = 0; for (const [v, w] of acc) if (w > bw) { best = v; bw = w; }
+  return { value: best, share: tot ? bw / tot : 0 };
+}
+// Tono de la pieza (dorado / plateado) en la zona de la joya: píxeles amarillos saturados vs grises claros.
+function photoTone(img) {
+  const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height, s = Math.min(w, h);
+  const b = pieceBox(img) || [(w - s * 0.6) / 2, (h - s * 0.6) / 2, (w + s * 0.6) / 2, (h + s * 0.6) / 2];
+  const bw = b[2] - b[0], bh = b[3] - b[1];
+  const cv = document.createElement('canvas'); cv.width = 64; cv.height = 64;
+  cv.getContext('2d').drawImage(img, b[0] + bw * 0.15, b[1] + bh * 0.15, bw * 0.7, bh * 0.7, 0, 0, 64, 64);
+  const d = cv.getContext('2d').getImageData(0, 0, 64, 64).data;
+  let gold = 0, silver = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i] / 255, g = d[i + 1] / 255, bl = d[i + 2] / 255, mx = Math.max(r, g, bl), mn = Math.min(r, g, bl), c = mx - mn, sat = mx ? c / mx : 0;
+    if (mx > 0.93 && sat < 0.1) continue; // fondo blanco
+    let hue = c === 0 ? 0 : mx === r ? ((g - bl) / c) % 6 : mx === g ? (bl - r) / c + 2 : (r - g) / c + 4; hue = (hue * 60 + 360) % 360;
+    if (hue >= 25 && hue <= 60 && sat >= 0.25 && mx > 0.35) gold++;
+    else if (sat < 0.12 && mx > 0.5) silver++;
+  }
+  const n = d.length / 4;
+  if (gold / n >= 0.04 && gold >= silver * 0.5) return 'dorado';
+  if (silver / n >= 0.1 && gold / n < 0.03) return 'plateado';
+  return '';
+}
+// Palabras distintivas que comparten las parecidas (solo estas, con su traducción segura).
+const SUGGEST_WORDS = {
+  circones: ['con circones', 'with Zirconia', 1], circon: ['con circones', 'with Zirconia', 1], corazón: ['con corazón', 'Heart', 0], corazon: ['con corazón', 'Heart', 0],
+  perla: ['con perlas', 'Pearl', 0], perlas: ['con perlas', 'Pearl', 0], cruz: ['con cruz', 'Cross', 0], mariposa: ['mariposa', 'Butterfly', 0], estrella: ['estrella', 'Star', 0],
+  flor: ['de flor', 'Flower', 0], trébol: ['trébol', 'Clover', 0], trebol: ['trébol', 'Clover', 0], virgen: ['de la Virgen', 'Virgin', 0], turco: ['con ojo turco', 'Evil Eye', 0],
+  infinito: ['infinito', 'Infinity', 0], luna: ['luna', 'Moon', 0], ajustable: ['ajustable', 'Adjustable', 0],
+};
+function localProductSuggestion(q, items, opts) {
+  const o = opts || {};
+  const ranked = rankCatalog(q, items, null, 'Todas', o.k || SUGGEST_K);
+  if (!ranked.length) return null;
+  const top = ranked[0].score, nb = ranked.map(r => ({ p: r.p, score: r.score, w: Math.exp((r.score - top) / 0.05) }));
+  const cat = voteBy(nb, p => p.category), mat = voteBy(nb, p => p.material), col = voteBy(nb, p => p.color);
+  // Precio = mediana de las SUGGEST_K parecidas (todas, no solo las de la misma categoría: dejando
+  // afuera cada producto, error mediano $3 / medio $5,8, contra $5 / $7,0 solo con las de su categoría).
+  const pool = nb.filter(x => Number(x.p.price) > 0);
+  const prices = pool.map(x => Number(x.p.price)).sort((a, b) => a - b);
+  const price = prices.length ? Math.round(prices.length % 2 ? prices[(prices.length - 1) / 2] : (prices[prices.length / 2 - 1] + prices[prices.length / 2]) / 2) : null;
+  const top3 = nb.slice(0, 3), words = {};
+  for (const x of top3) for (const t of new Set(String(x.p.name || '').toLowerCase().split(/[^a-záéíóúñü]+/))) if (SUGGEST_WORDS[t]) words[t] = (words[t] || 0) + 1;
+  const word = Object.entries(words).filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1]).map(([t]) => t)[0] || '';
+  const share = re => top3.filter(x => re.test(String(x.p.description || ''))).length >= 2;
+  return { neighbors: nb, category: cat.value, catShare: cat.share, material: mat.value, matShare: mat.share, color: col.value, price,
+           tone: o.tone || '', word, adjustable: share(/ajustable/i), everyday: share(/diario|día a día/i),
+           dije: top3.filter(x => /dije|collar/i.test(String(x.p.name || ''))).length >= 2 };
+}
+const SUGGEST_NOUN = { // categoría → [nombre, género (m/f/mp/fp), nombre en inglés]
+  Anillos: ['Anillo', 'm', 'Ring'], Cadenas: ['Cadena', 'f', 'Chain'], Pulseras: ['Pulsera', 'f', 'Bracelet'], Aretes: ['Aretes', 'mp', 'Earrings'],
+  Hombres: ['Cadena para hombre', 'f', "Men's Chain"], 'Ear cuff': ['Ear cuff', 'm', 'Ear Cuff'], Parejas: ['Pulseras de pareja', 'fp', 'Couple Bracelets'],
+  Juegos: ['Set de cadena y aretes', 'm', 'Chain & Earring Set'], 'Hand chain': ['Hand chain', 'f', 'Hand Chain'],
+};
+const SUGGEST_MATERIAL = {
+  'Baño de oro 18k': ['en acero inoxidable con baño de oro 18K', 'in stainless steel with 18K gold plating'],
+  'Acero inoxidable': ['en acero inoxidable, resistente e hipoalergénico', 'in stainless steel, durable and hypoallergenic'],
+  'Gold filled': ['en gold filled, resistente y de larga duración', 'in gold filled, durable and long-lasting'],
+  'Baño de Rodio': ['con baño de rodio plateado', 'with silver rhodium plating'],
+  'Plata 925': ['en plata 925', 'in 925 silver'],
+  'Plata 925 con un baño de oro de 18k': ['en plata 925 con baño de oro 18K', 'in 925 silver with 18K gold plating'],
+};
+const SUGGEST_USE = {
+  Anillos: ['Un diseño delicado, ideal para combinar con tus otros anillos o usar solo.', 'A delicate design, perfect to stack with your other rings or wear on its own.'],
+  Cadenas: ['Un detalle elegante para llevar todos los días, sola o en capas con tus otras cadenas.', 'An elegant piece to wear every day, on its own or layered with your other necklaces.'],
+  Pulseras: ['Delicada y versátil, perfecta para combinar con tus otras pulseras.', 'Delicate and versatile, perfect to stack with your other bracelets.'],
+  Aretes: ['Livianos y cómodos, ideales para darle un toque especial a tu look.', 'Lightweight and comfortable, perfect to add a special touch to your look.'],
+  Hombres: ['Un accesorio con estilo para el hombre que cuida los detalles.', 'A stylish accessory for the man who cares about the details.'],
+  'Ear cuff': ['No requiere perforación: se coloca y se ajusta a tu oreja.', 'No piercing needed: it slips on and adjusts to your ear.'],
+  Parejas: ['Un detalle con significado para compartir con esa persona especial.', 'A meaningful detail to share with that special someone.'],
+  Juegos: ['Un set coordinado, listo para regalar o lucir completo.', 'A coordinated set, ready to gift or wear together.'],
+  'Hand chain': ['Hace que tu mano luzca femenina y delicada.', 'It makes your hand look feminine and delicate.'],
+};
+// Nombre y descripción con plantillas (sugerencia básica, sin IA). Simple y editable.
+function templateProductText(sug, category, material) {
+  const cat = category || sug.category, mat = material || sug.material;
+  let [noun, g, en] = SUGGEST_NOUN[cat] || [cat || 'Pieza', 'f', cat || 'Piece'];
+  if (cat === 'Cadenas' && sug.dije) { noun = 'Collar con dije'; g = 'm'; en = 'Charm Necklace'; }
+  const adj = (base, gg) => base.slice(0, -1) + ({ m: 'o', f: 'a', mp: 'os', fp: 'as' }[gg]);
+  const toneEs = sug.tone ? adj(sug.tone, g) : '', toneEn = sug.tone === 'dorado' ? 'Gold' : sug.tone === 'plateado' ? 'Silver' : '';
+  const wd = sug.word ? SUGGEST_WORDS[sug.word] : null;
+  const parts = noun.split(' '), head = parts[0], rest = parts.slice(1).join(' ');
+  let name = [head, toneEs, rest].filter(Boolean).join(' ');
+  if (wd && !name.toLowerCase().includes(wd[0].replace(/^(con|de la|de) /, ''))) name += ' ' + wd[0];
+  const name_en = [wd && wd[2] === 0 ? wd[1] : '', toneEn, en, wd && wd[2] === 1 ? wd[1] : ''].filter(Boolean).join(' ').replace(/\s+/g, ' ');
+  const [mEs, mEn] = SUGGEST_MATERIAL[mat] || ['', ''];
+  const [uEs, uEn] = SUGGEST_USE[cat] || ['Un detalle especial para tu look.', 'A special touch for your look.'];
+  const fem = g === 'f' || g === 'fp', plural = g === 'mp' || g === 'fp';
+  const extraEs = sug.adjustable ? (plural ? (fem ? 'Ajustables y livianas para uso diario.' : 'Ajustables y livianos para uso diario.') : (fem ? 'Ajustable y liviana para uso diario.' : 'Ajustable y liviano para uso diario.')) : sug.everyday ? 'Ideal para uso diario.' : '';
+  const extraEn = sug.adjustable ? 'Adjustable and lightweight for everyday wear.' : sug.everyday ? 'Perfect for everyday wear.' : '';
+  const description = [name + (mEs ? ' ' + mEs : '') + '.', uEs, extraEs].filter(Boolean).join(' ');
+  const description_en = [(name_en || en) + (mEn ? ' ' + mEn : '') + '.', uEn, extraEn].filter(Boolean).join(' ');
+  return { name, name_en, description, description_en };
+}
 // ── Fotos reales aprendidas (v2.2 + v2.3) ──
 // Prototipo (v2.2): con 3 o más fotos reales de una pieza, su promedio normalizado es una referencia más.
 // v2.3 (23 nov): como cada pieza elegida aprende sola, se juntan fotos reales de muchas piezas con
@@ -3083,7 +3275,10 @@ function learnedScore(query, learned, id) {
 // Calibrado en la mitad de ajuste (1 foto; tools/eval-catalog-refs.mjs --doubt): avisa en el 16 %
 // de las búsquedas y atrapa el 83 % de los errores del 1er puesto (precisión 45 %); mitad de
 // prueba: 86 % de los errores, precisión 48 %. Con 3 fotos (el máximo) no se avisa.
-const DOUBT_MARGIN = 0.04;
+// v2.5 (24 nov): 0,04 → 0,06 con las 30 fotos reales del taller (15 piezas nuevas, mitades por pieza):
+// mitad de prueba recall 50 % → 100 %, precisión 67 % → 80 %; en las fotos sintéticas avisa algo más
+// (16 % → 22 % de las búsquedas; recall 86 % → 97 %, precisión 48 % → 41 %).
+const DOUBT_MARGIN = 0.06;
 // Piezas "gemelas": para cada producto, el otro producto que más se le parece según sus
 // referencias del catálogo (las mismas que usa el identificador). Similitud = la mejor entre
 // cualquier par de referencias de los dos productos, calculada solo contra los TWIN_K más

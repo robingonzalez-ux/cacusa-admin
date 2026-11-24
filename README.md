@@ -111,6 +111,29 @@ ajuste; a = todas con fotos reales, b = solo la correcta, c = 30 %, d = ninguna)
   las piezas en 2 mitades por código y barre `PIECE_BOX`, las vistas de la pieza, el peso del
   color, el umbral de duda y el margen de las fotos reales (ajuste vs prueba).
 
+### v2.5 (24 nov): fotos reales del taller y "✦ Sugerir datos desde la foto"
+
+**Fotos reales** (30 fotos de 15 piezas nuevas, 2 por pieza; las fotos NO están en el repo):
+`node eval-catalog-refs.mjs --site … --real <carpeta> --new` inscribe la foto 1 de cada pieza por
+el mismo camino que una foto nueva del catálogo (900 px WebP + variantes en vivo) y busca con la 2
+(y al revés). Resultado: hit@1 56,7 %, hit@5 83,3 %, dentro de la categoría 66,7 %; frente → frente
+65 % vs frente → espalda/lado 40 %. 11 de las 13 confusiones son con OTRA pieza nueva (mismo mantel,
+misma mano): el fondo del taller pesa. Probado y no se cambió (n = 15, sin mejora clara en la mitad
+de prueba o con retroceso en las fotos sintéticas): peso del color, parámetros de `PIECE_BOX` y
+vistas, quitar el "fondo del taller" aprendido de los bordes, y reajustar la proyección con estas
+fotos (+3,3–6,7 pt en las reales pero −0,9 a −1,2 pt en las sintéticas). Aviso "no registrada": el
+mejor umbral atrapa 50 % de las piezas no registradas con 6 % de falsas alarmas en las reales pero
+10,1 % en las sintéticas: no se agregó. Sí cambió: `DOUBT_MARGIN` 0,04 → 0,06. El aviso de foto
+oscura/movida no dio falsas alarmas en las 30 fotos (tampoco detectó las 2 movidas: el fondo está nítido).
+
+**Sugerir datos desde la foto** (Nuevo producto): las 7 piezas más parecidas votan categoría,
+material y color; precio = mediana de esas 7; nombre y descripción con Claude Haiku
+(`/product/describe` del Worker) o, si no está disponible (503 sin clave, 429 tope diario, red),
+plantillas por categoría con un aviso. Solo completa campos vacíos o no tocados y marca cada uno
+"sugerido" / "sugerido (IA)". Dejando afuera cada producto (`--autofill`, 91): categoría 75,8 %
+(84,6 % con voto fuerte; siempre "Anillos" sería 31,9 %), material 68,1 % (siempre "Baño de oro 18k":
+61,5 %), precio error mediano $3 / medio $5,8, tono dorado/plateado 70,8 %.
+
 ### Regenerar (cuando haya muchos productos nuevos o fotos cambiadas)
 
 ```bash

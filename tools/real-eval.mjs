@@ -122,3 +122,78 @@ export async function runReal({ pg, catalog, dir, tune }) {
     console.log(`  margen de fotos reales ${m}: ajuste ${f('ajuste')} | prueba ${f('prueba')}`);
   }
 }
+
+// ── Piezas nuevas (--real <dir> --new, v2.5) ──
+// Para piezas que NO están en el catálogo (código desconocido en labels.json; opcional "category"):
+// cada pieza necesita ≥ 2 fotos. Inscripción simulada: la foto 1 entra como foto del catálogo por el
+// MISMO camino que una foto nueva en el panel (se comprime como compressImage: 900 px WebP 0,82; se
+// sirve por URL y prepareCatalogEmbeddings le calcula las variantes en vivo), junto con el catálogo
+// y las demás piezas nuevas; se busca con la foto 2 (como photoToJpegBase64: 1024 px JPEG 0,82) y
+// después al revés. "No registrada": la misma búsqueda sin la propia pieza en el catálogo.
+export async function runNewPieces({ pg, catalog, dir, SITE_ORIGIN, dump }) {
+  const labels = JSON.parse(fs.readFileSync(path.join(dir, 'labels.json'), 'utf8'));
+  const known = new Set(catalog.products.filter(p => p && p.sku).map(p => String(p.sku).trim().toUpperCase()));
+  const groups = new Map();
+  for (const l of labels) {
+    const sku = String(l.sku || '').trim();
+    if (!sku || known.has(sku.toUpperCase())) continue;
+    const f = path.join(dir, l.file);
+    if (!fs.existsSync(f)) { console.warn('  no existe:', l.file); continue; }
+    if (!groups.has(sku)) groups.set(sku, { sku, category: l.category || '', files: [] });
+    groups.get(sku).files.push({ file: l.file, src: `data:${MIME[path.extname(f).toLowerCase()] || 'image/jpeg'};base64,` + fs.readFileSync(f).toString('base64') });
+  }
+  const items = [...groups.values()].filter(g => g.files.length >= 2);
+  console.log(`\n== Piezas nuevas: ${items.length} piezas con 2 fotos o más (${dir}) ==`);
+  if (!items.length) return;
+  // Fotos procesadas como en el panel (catálogo: 900 px WebP; consulta: 1024 px JPEG).
+  const proc = await pg.evaluate(async items => {
+    const conv = async (src, maxPx, type, q) => {
+      const img = await loadImg(src, false);
+      let w = img.naturalWidth, h = img.naturalHeight;
+      if (w > maxPx || h > maxPx) { if (w >= h) { h = Math.round(h * maxPx / w); w = maxPx; } else { w = Math.round(w * maxPx / h); h = maxPx; } }
+      const cv = document.createElement('canvas'); cv.width = w; cv.height = h; cv.getContext('2d').drawImage(img, 0, 0, w, h);
+      return cv.toDataURL(type, q);
+    };
+    const out = [];
+    for (const it of items) { const fs = []; for (const f of it.files) fs.push({ cat: await conv(f.src, 900, 'image/webp', 0.82), query: await conv(f.src, 1024, 'image/jpeg', 0.82) }); out.push(fs); }
+    return out;
+  }, items);
+  const served = new Map();
+  await pg.route(SITE_ORIGIN + '/__new/**', r => {
+    const b = served.get(new URL(r.request().url()).pathname);
+    return b ? r.fulfill({ status: 200, contentType: 'image/webp', headers: { 'Access-Control-Allow-Origin': '*' }, body: b }) : r.fulfill({ status: 404 });
+  });
+  const rows = [];
+  for (const role of [0, 1]) { // 0: se inscribe la foto 1 y se busca con la 2; 1: al revés
+    const newProds = items.map((it, i) => {
+      const p = `/__new/${encodeURIComponent(it.sku)}-${role}.webp`;
+      served.set(p, Buffer.from(proc[i][role].cat.split(',')[1], 'base64'));
+      return { id: 'new:' + it.sku, sku: it.sku, name: it.sku, category: it.category, imageUrl: SITE_ORIGIN + p, available: true };
+    });
+    const r = await pg.evaluate(async ([prods, queries]) => {
+      const cat = await prepareCatalogEmbeddings(prods);
+      const out = [];
+      for (const q0 of queries) {
+        const q = await embedQueryPhoto(q0.src);
+        const all = rankCatalog(q, cat.items, null, 'Todas', Infinity);
+        const i = all.findIndex(x => String(x.p.id) === q0.id);
+        const inCat = rankCatalog(q, cat.items, null, q0.category || 'Todas', Infinity).findIndex(x => String(x.p.id) === q0.id) + 1;
+        const open = all.filter(x => String(x.p.id) !== q0.id); // la pieza todavía no está registrada
+        out.push({ ...q0, src: undefined, r: i + 1, rc: inCat, top: String(all[0].p.sku || all[0].p.id), score: all[0].score, margin: all[0].score - all[1].score,
+                   openTop: String(open[0].p.sku || open[0].p.id), openScore: open[0].score, openMargin: open[0].score - open[1].score });
+      }
+      return out;
+    }, [[...catalog.products, ...newProds], items.map((it, i) => ({ sku: it.sku, id: 'new:' + it.sku, category: it.category, k: 1 - role, file: it.files[1 - role].file, src: proc[i][1 - role].query }))]);
+    rows.push(...r.map(x => ({ ...x, enrolled: role, queryPhoto: 1 - role })));
+  }
+  const n = rows.length, h = f => rows.filter(f).length;
+  console.log(`  inscripción simulada (foto del catálogo = la otra foto; ${n} búsquedas): hit@1 ${pct(h(x => x.r === 1), n)} · hit@5 ${pct(h(x => x.r >= 1 && x.r <= 5), n)} · dentro de la categoría hit@1 ${pct(h(x => x.rc === 1), n)}`);
+  for (const k of [1, 0]) { const s = rows.filter(x => x.queryPhoto === k); console.log(`    buscando con la foto ${k + 1} (inscrita la ${2 - k}): hit@1 ${pct(s.filter(x => x.r === 1).length, s.length)} · hit@5 ${pct(s.filter(x => x.r >= 1 && x.r <= 5).length, s.length)} (n=${s.length})`); }
+  for (const x of rows.filter(x => x.r !== 1)) console.log(`    confusión: ${x.sku} (foto ${x.queryPhoto + 1}) → ${x.top}, la correcta en el puesto ${x.r}`);
+  const ok = rows.filter(x => x.r === 1);
+  const q = (a, p) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[Math.min(s.length - 1, Math.floor(p * s.length))].toFixed(3) : '—'; };
+  const sc = a => `p10 ${q(a, 0.1)} · mediana ${q(a, 0.5)} · p90 ${q(a, 0.9)}`;
+  console.log(`  "no registrada" — puntaje del 1ro: aciertos ${sc(ok.map(x => x.score))} | piezas no registradas ${sc(rows.map(x => x.openScore))}`);
+  console.log(`                    margen 1ro − 2do: aciertos ${sc(ok.map(x => x.margin))} | piezas no registradas ${sc(rows.map(x => x.openMargin))}`);
+  if (dump) fs.writeFileSync(dump, JSON.stringify(rows.map(({ src, ...x }) => x)));
+}

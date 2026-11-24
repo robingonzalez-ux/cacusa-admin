@@ -13,9 +13,11 @@
 //          [--quality] (calibración del aviso de foto oscura/movida)
 //          [--doubt] [--learned] (umbral del aviso de duda; fotos reales simuladas en 4 escenarios; usan --cache21)
 //          [--real <carpeta> [--tune]] (fotos reales: <carpeta>/labels.json = [{file, sku}]; ver real-eval.mjs)
+//          [--autofill] ("Sugerir datos desde la foto": categoría, material, precio y tono dejando afuera cada producto)
+//          [--real <carpeta> --new [--dump r.json]] (piezas que no están en el catálogo: inscripción simulada y "no registrada")
 import fs from 'node:fs';
 import path from 'node:path';
-import { ADMIN_DIR, openRecognitionPage, productUrls } from './recog-page.mjs';
+import { ADMIN_DIR, SITE_ORIGIN, openRecognitionPage, productUrls } from './recog-page.mjs';
 
 const args = process.argv.slice(2);
 const opt = (name, def) => { const i = args.indexOf('--' + name); return i >= 0 ? (args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : true) : def; };
@@ -34,10 +36,46 @@ console.log(`Huella: ${engInfo.ver} (${engInfo.kind}), color ${engInfo.cw}, marg
 const PANEL_REFS = path.join(ADMIN_DIR, engInfo.refsUrl.replace(/\.json$/, ''));
 const REFS = path.resolve(opt('refs', PANEL_REFS));
 const COLOR_W = engInfo.cw, EMB_W = 1 - COLOR_W;
+// --autofill (v2.5): "✦ Sugerir datos desde la foto" dejando afuera cada producto (leave-one-out):
+// se esconde el producto y se predicen categoría, material, precio y tono desde su foto principal.
+if (opt('autofill', false)) {
+  const { page: pg, localUrl } = await page();
+  const r = await pg.evaluate(async ([prods, locals]) => {
+    const eng = await loadRecognitionModel();
+    const cat = await prepareCatalogEmbeddings(prods);
+    const out = [];
+    for (const it of cat.items) {
+      const items = cat.items.filter(x => x !== it);
+      const img = await loadImg(locals[String(it.p.id)], false);
+      const tone = photoTone(img);
+      const sug = localProductSuggestion({ emb: it.emb, color: it.color, kind: eng.kind, cw: eng.cw, margin: eng.margin }, items, { tone });
+      const truthTone = /rodio|plata 925$/i.test(String(it.p.material || '')) || /platead|silver/i.test(String(it.p.name || '') + ' ' + String(it.p.name_en || '')) ? 'plateado' : 'dorado';
+      out.push({ cat: it.p.category, pc: sug.category, cs: sug.catShare, mat: it.p.material || '', pm: sug.material, ms: sug.matShare, price: Number(it.p.price) || 0, pp: sug.price, tone: truthTone, pt: tone, name: templateProductText(sug).name });
+    }
+    return out;
+  }, [catalog.products, Object.fromEntries(avail.map(p => [String(p.id), localUrl(productUrls(p)[0])]))]);
+  const n = r.length, pc = (a, b) => `${a}/${b} (${(100 * a / b).toFixed(1)} %)`;
+  const strong = r.filter(x => x.cs >= 0.6), mstrong = r.filter(x => x.ms >= 0.6);
+  const errs = r.filter(x => x.price > 0 && x.pp).map(x => Math.abs(x.pp - x.price)).sort((a, b) => a - b);
+  const mostCat = Object.entries(r.reduce((m, x) => (m[x.cat] = (m[x.cat] || 0) + 1, m), {})).sort((a, b) => b[1] - a[1])[0];
+  const mostMat = Object.entries(r.reduce((m, x) => (m[x.mat] = (m[x.mat] || 0) + 1, m), {})).sort((a, b) => b[1] - a[1])[0];
+  const medPrice = [...r.map(x => x.price)].sort((a, b) => a - b)[Math.floor(n / 2)];
+  console.log(`\n== Sugerir datos desde la foto (dejando afuera cada producto; ${n} productos) ==`);
+  console.log(`  categoría: ${pc(r.filter(x => x.pc === x.cat).length, n)} · con voto fuerte (≥ 60 %, ${strong.length}): ${pc(strong.filter(x => x.pc === x.cat).length, strong.length)} · siempre la más común ("${mostCat[0]}"): ${pc(mostCat[1], n)}`);
+  console.log(`  material: ${pc(r.filter(x => x.pm === x.mat).length, n)} · con voto fuerte (${mstrong.length}): ${pc(mstrong.filter(x => x.pm === x.mat).length, mstrong.length)} · siempre el más común ("${mostMat[0]}"): ${pc(mostMat[1], n)}`);
+  const base = r.filter(x => x.price > 0).map(x => Math.abs(medPrice - x.price)).sort((a, b) => a - b);
+  console.log(`  precio: error mediano $${errs[Math.floor(errs.length / 2)]} · medio $${(errs.reduce((a, b) => a + b, 0) / errs.length).toFixed(1)} · dentro de ±$5: ${pc(errs.filter(e => e <= 5).length, errs.length)} | siempre la mediana del catálogo ($${medPrice}): error mediano $${base[Math.floor(base.length / 2)]}`);
+  const tn = r.filter(x => x.pt);
+  console.log(`  tono (dorado/plateado; verdad aproximada por material/nombre): acierta ${pc(tn.filter(x => x.pt === x.tone).length, tn.length)} · sin tono claro: ${n - tn.length}`);
+  console.log('  ejemplos de nombre: ' + r.slice(0, 6).map(x => x.name).join(' · '));
+  await rp.close();
+  process.exit(0);
+}
 // --real <dir> [--tune] (v2.4): fotos reales etiquetadas (<dir>/labels.json); no corre las demás fases.
 if (opt('real', false)) {
-  const { runReal } = await import('./real-eval.mjs');
-  await runReal({ pg: (await page()).page, catalog, dir: path.resolve(opt('real')), tune: !!opt('tune', false) });
+  const { runReal, runNewPieces } = await import('./real-eval.mjs');
+  if (opt('new', false)) await runNewPieces({ pg: (await page()).page, catalog, dir: path.resolve(opt('real')), SITE_ORIGIN, dump: opt('dump', null) });
+  else await runReal({ pg: (await page()).page, catalog, dir: path.resolve(opt('real')), tune: !!opt('tune', false) });
   await rp.close();
   process.exit(0);
 }
