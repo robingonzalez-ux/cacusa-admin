@@ -134,6 +134,17 @@ plantillas por categoría con un aviso. Solo completa campos vacíos o no tocado
 (84,6 % con voto fuerte; siempre "Anillos" sería 31,9 %), material 68,1 % (siempre "Baño de oro 18k":
 61,5 %), precio error mediano $3 / medio $5,8, tono dorado/plateado 70,8 %.
 
+### v2.6 (24 nov): segunda opinión de Claude Haiku cuando el identificador duda
+
+Solo si el 1ro y el 2do quedan a menos de `DOUBT_MARGIN` (0,06), una vez por búsqueda (con varias
+fotos, la mejor: sin aviso de calidad, la más nueva), el panel llama a `/identify/rerank` del Worker
+con la foto (~512 px JPEG) y las 2–5 primeras candidatas (sus fotos del catálogo, ~384 px, exportadas
+del canvas: GitHub Pages manda `Access-Control-Allow-Origin: *` y se cargan con `crossOrigin`). Si
+la IA elige una, sube al 1er puesto con "✓ 2ª opinión (IA)" (las demás siguen); si no está segura,
+"La IA tampoco está segura: toma otra foto"; si falla (503/429/red/20 s sin respuesta), nada cambia.
+Nunca agrega la pieza sola. El registro local de acierto guarda `rr` (1 = la IA confirmó el 1ro,
+2 = lo cambió, 3 = no estaba segura) para medir el efecto real.
+
 ### Regenerar (cuando haya muchos productos nuevos o fotos cambiadas)
 
 ```bash

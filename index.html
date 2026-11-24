@@ -3327,8 +3327,10 @@ function recogStatsRead() {
   try { const a = JSON.parse(localStorage.getItem(RECOG_STATS_KEY) || '[]'); return Array.isArray(a) ? a.filter(x => x && typeof x.r === 'number') : []; }
   catch (_) { return []; }
 }
+// rr (v2.6, solo si hubo segunda opinión): 1 = la IA confirmó el 1ro, 2 = la IA cambió el 1ro,
+// 3 = la IA tampoco estaba segura. r es el puesto en la lista que se mostró (ya reordenada).
 function recogStatsAdd(e) {
-  try { const a = recogStatsRead(); a.push({ r: e.r | 0, n: e.n | 0, ms: Math.round(e.ms) || 0, t: Date.now() }); localStorage.setItem(RECOG_STATS_KEY, JSON.stringify(a.slice(-RECOG_STATS_MAX))); }
+  try { const a = recogStatsRead(), x = { r: e.r | 0, n: e.n | 0, ms: Math.round(e.ms) || 0, t: Date.now() }; if (e.rr) x.rr = e.rr | 0; a.push(x); localStorage.setItem(RECOG_STATS_KEY, JSON.stringify(a.slice(-RECOG_STATS_MAX))); }
   catch (_) {}
 }
 function recogStatsSummary() {
@@ -4069,6 +4071,8 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
   const [editShot, setEditShot] = React.useState(null); // dataUrl de la foto en "Marca la joya"
   const [okQ, setOkQ]         = React.useState({});   // dataUrl → "Seguir igual" (aviso de calidad)
   const [doubt, setDoubt]     = React.useState(false); // 1ro y 2do muy parejos → pedir otro ángulo
+  const [rerank, setRerank]   = React.useState(null);  // segunda opinión IA: { state: busy|done|null|error, choice, changed }
+  const searchRef = React.useRef(0);                  // nro. de búsqueda (respuestas viejas se ignoran)
   const msRef = React.useRef(0);                      // ms por foto de la última búsqueda (estadística local)
   const shots = photo ? [photo, ...extras] : [];
   React.useEffect(() => { setMatches(null); setErrMsg(''); setExtras([]); setBoxes({}); setEditShot(null); if (photo) { setMode('photo'); setConfirmP(null); } }, [photo && photo.dataUrl]);
@@ -4107,7 +4111,8 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
   // desempate por stock (stockTiebreak: nunca oculta piezas con stock 0).
   const identify = async () => {
     if (!photo || busy || !prepRef.current) return;
-    setBusy(true); setErrMsg(''); setMatches(null); setEditShot(null); setDoubt(false);
+    setBusy(true); setErrMsg(''); setMatches(null); setEditShot(null); setDoubt(false); setRerank(null);
+    const sid = ++searchRef.current;
     try {
       const catalog = await prepRef.current;
       const qs = [], times = [];
@@ -4115,11 +4120,56 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
       if (times.length) msRef.current = times.reduce((a, b) => a + b, 0) / times.length;
       queryRef.current = { keys: shots.map(shotKey), qs };
       const fused = rankCatalogMulti(qs, catalog.items, refsRef.current, cat, Infinity);
-      setDoubt(fused.length > 1 && fused[0].score - fused[1].score < DOUBT_MARGIN && shots.length < 3);
+      const unsure = fused.length > 1 && fused[0].score - fused[1].score < DOUBT_MARGIN;
+      setDoubt(unsure && shots.length < 3);
       const ranked = stockTiebreak(fused, id => qtyOf(id)).slice(0, 5);
-      setMatches(ranked.map(r => ({ id: String(r.p.id), name: r.p.name, sku: normalizeSku(r.p.sku), category: r.p.category, imageUrl: productImageUrl(r.p), pct: friendlyPct(r.score, qs[0].pct) })));
+      const list = ranked.map(r => ({ id: String(r.p.id), name: r.p.name, sku: normalizeSku(r.p.sku), category: r.p.category, imageUrl: productImageUrl(r.p), pct: friendlyPct(r.score, qs[0].pct) }));
+      setMatches(list);
+      if (unsure && list.length >= 2) secondOpinion(sid, list); // en segundo plano: no bloquea
     } catch (e) { setErrMsg(pieceErrMsg(e)); }
     setBusy(false);
+  };
+  // Segunda opinión de Claude Haiku (v2.6, /identify/rerank): solo cuando el identificador duda
+  // (margen < DOUBT_MARGIN), UNA vez por búsqueda (con varias fotos, la mejor: sin aviso de calidad,
+  // la más nueva). Foto ~512 px y las 2–5 candidatas ~384 px (sus fotos del catálogo, ya cargadas con
+  // CORS: GitHub Pages manda Access-Control-Allow-Origin: *, así el canvas se puede exportar). Si
+  // elige una, sube al 1er puesto con "✓ 2ª opinión (IA)"; nunca agrega la pieza sola. Errores: nada.
+  const RERANK_TIMEOUT_MS = 20000;
+  const jpegOf = (img, maxPx, maxKb) => {
+    const w0 = img.naturalWidth || img.width, h0 = img.naturalHeight || img.height, k = Math.min(1, maxPx / Math.max(w0, h0));
+    const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(w0 * k)); cv.height = Math.max(1, Math.round(h0 * k));
+    cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+    let qual = 0.8, url = cv.toDataURL('image/jpeg', qual);
+    while (url.length * 0.75 > maxKb * 1024 && qual > 0.4) { qual -= 0.1; url = cv.toDataURL('image/jpeg', qual); }
+    return url;
+  };
+  const secondOpinion = async (sid, list) => {
+    setRerank({ state: 'busy' });
+    try {
+      const good = shots.filter(sh => { const i = infos[sh.dataUrl]; return !(i && i.quality && (i.quality.dark || i.quality.blurry)); });
+      const best = (good.length ? good : shots)[(good.length ? good : shots).length - 1];
+      const image = jpegOf(await loadImg(best.dataUrl, false), 512, 280);
+      const candidates = [];
+      for (const m of list.slice(0, 5)) {
+        if (!m.imageUrl) continue;
+        try { candidates.push({ id: m.id, image: jpegOf(await loadCatalogImg(m.imageUrl), 384, 280) }); }
+        catch (_) { /* foto no disponible o canvas bloqueado: esa candidata no va */ }
+      }
+      if (candidates.length < 2) throw new Error('sin candidatas');
+      const r = await Promise.race([
+        apiCall('identify/rerank', { token, image, candidates }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), RERANK_TIMEOUT_MS)),
+      ]);
+      if (searchRef.current !== sid) return;
+      const choice = r && r.choice != null ? String(r.choice) : null;
+      if (choice && list.some(m => m.id === choice)) {
+        const changed = list[0].id !== choice;
+        setMatches(ms => (ms ? [...ms.filter(m => m.id === choice).map(m => ({ ...m, ai: true })), ...ms.filter(m => m.id !== choice)] : ms));
+        setRerank({ state: 'done', choice, changed });
+      } else setRerank({ state: 'null' });
+    } catch (e) {
+      if (searchRef.current === sid) setRerank({ state: 'error' }); // en silencio: queda la lista de siempre
+    }
   };
   const onExtraFile = async e => {
     const file = e.target.files && e.target.files[0];
@@ -4159,7 +4209,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
       // Con la foto de la joya (modo foto): aprende de esa foto (la próxima vez la reconoce
       // mejor), sin esperar ni bloquear. Si se eligió a mano sin "Identificar", igual se usa.
       if (mode === 'photo' && photo && !confirmP) {
-        if (matches && matches.length) { const r = matches.findIndex(m => String(m.id) === String(pid)) + 1; recogStatsAdd({ r, n: shots.length, ms: msRef.current }); }
+        if (matches && matches.length) { const r = matches.findIndex(m => String(m.id) === String(pid)) + 1; recogStatsAdd({ r, n: shots.length, ms: msRef.current, rr: rerank ? ({ done: rerank.changed ? 2 : 1, null: 3 })[rerank.state] : 0 }); }
         const last = queryRef.current;
         if ((last && last.keys.length) || shots.length > 1 || !onTeach) learnShots(pid, shots);
         else onTeach(pid, name, { dataUrl: photo.dataUrl });
@@ -4376,10 +4426,14 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
           {matches && matches.length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
               {doubt && shots.length < 3 && (
-                <div role="status" data-testid="doubtPrompt" style={{ fontSize: 12, fontWeight: 700, color: '#9D174D', background: '#FCE8F3', border: '1px solid #F9C6DD', borderRadius: 10, padding: '8px 10px', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                  <span>◇ Duda entre 2 piezas: toma otra foto desde otro ángulo (botón <b>＋ Otra foto</b>, arriba).</span>
+                <div role="status" data-testid="doubtPrompt" style={{ fontSize: 12, fontWeight: 700, color: rerank && rerank.state === 'done' ? '#5B3F8A' : '#9D174D', background: rerank && rerank.state === 'done' ? '#F1EAFB' : '#FCE8F3', border: '1px solid ' + (rerank && rerank.state === 'done' ? '#E2D4F5' : '#F9C6DD'), borderRadius: 10, padding: '8px 10px', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  {rerank && rerank.state === 'done'
+                    ? <span>◇ Había duda entre 2 piezas; la segunda opinión eligió la primera. Si no es, toma otra foto desde otro ángulo (<b>＋ Otra foto</b>).</span>
+                    : <span>◇ Duda entre 2 piezas: toma otra foto desde otro ángulo (botón <b>＋ Otra foto</b>, arriba).</span>}
                 </div>
               )}
+              {rerank && rerank.state === 'busy' && <div role="status" aria-live="polite" data-testid="rerankBusy" style={{ fontSize: 12, color: '#7A6880' }}>Consultando segunda opinión…</div>}
+              {rerank && rerank.state === 'null' && <div role="status" aria-live="polite" data-testid="rerankNull" style={{ fontSize: 12, fontWeight: 700, color: '#92400E', background: '#FEF3C7', borderRadius: 10, padding: '6px 10px' }}>La IA tampoco está segura: toma otra foto</div>}
               <div style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63' }}>Toca la pieza correcta:</div>
               {matches.map(m => (
                 <button type="button" key={m.id} onClick={() => pick(m.id, m.name)} disabled={!!adding} style={{ ...optBtn, opacity: adding && adding !== String(m.id) ? 0.5 : 1 }}>
@@ -4387,6 +4441,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <span style={{ display: 'block', fontWeight: 700, fontSize: 13, color: '#1A1118' }}>{m.name}</span>
                     <span style={{ display: 'block', fontSize: 11, color: '#7A6880' }}>{m.sku ? m.sku + ' · ' : ''}{m.category}</span>
+                    {m.ai && <span data-testid="aiTag" style={{ display: 'inline-block', marginTop: 2, fontSize: 10, fontWeight: 800, color: '#5B3F8A', background: '#F1EAFB', borderRadius: 99, padding: '1px 7px' }}>✓ 2ª opinión (IA)</span>}
                     {stockNote(m.id)}
                   </span>
                   <span style={{ fontWeight: 800, fontSize: 13, color: '#C0336E', flexShrink: 0 }}>{adding === String(m.id) ? '…' : m.pct + '%'}</span>
