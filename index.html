@@ -3960,9 +3960,9 @@ function EnrollPhotosModal({ products, token, onClose, onlyId = null }) {
           </div>
           <button type="button" onClick={() => fileRef.current && fileRef.current.click()} disabled={busy || cnt(cur) >= ENROLL_MAX_REFS}
             style={{ ...bigBtn, background: busy || cnt(cur) >= ENROLL_MAX_REFS ? '#C9B8D3' : 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white' }}>
-            {busy ? 'Guardando…' : cnt(cur) >= ENROLL_MAX_REFS ? 'Máximo de fotos alcanzado' : shots.length ? '📷 Tomar otra foto' : '📷 Tomar foto'}
+            {busy ? 'Guardando…' : cnt(cur) >= ENROLL_MAX_REFS ? 'Máximo de fotos alcanzado' : shots.length ? '📷 Agregar otra foto' : '📷 Tomar o elegir foto'}
           </button>
-          <input ref={fileRef} type="file" accept="image/*" capture="environment" multiple aria-label="Fotos de la pieza para registrar" style={{ display: 'none' }} onChange={onFiles} />
+          <input ref={fileRef} type="file" accept="image/*" multiple aria-label="Fotos de la pieza para registrar" style={{ display: 'none' }} onChange={onFiles} />
           <PhotoTip style={{ marginTop: 8 }} />
           <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#15803D', marginTop: 6, minHeight: 4 }}>{status}</div>
           {err && <div role="alert" style={{ fontSize: 12, color: '#DC2626', background: '#FEF2F2', borderRadius: 8, padding: '6px 10px', marginTop: 6 }}>{err}</div>}
@@ -4388,7 +4388,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
               </>
             )}
             <PhotoTip style={{ marginTop: 10 }} />
-            <input ref={teachRef} type="file" accept="image/*" capture="environment" aria-label="Foto de la joya para enseñar al identificador" style={{ display: 'none' }} onChange={onTeachFile} />
+            <input ref={teachRef} type="file" accept="image/*" aria-label="Foto de la joya para enseñar al identificador" style={{ display: 'none' }} onChange={onTeachFile} />
           </div>
         );
       })() : confirmP ? (
@@ -4471,7 +4471,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
                   </button>
                 )}
               </div>
-              <input ref={extraRef} type="file" accept="image/*" capture="environment" aria-label="Otra foto de la pieza (otro ángulo)" style={{ display: 'none' }} onChange={onExtraFile} />
+              <input ref={extraRef} type="file" accept="image/*" aria-label="Otra foto de la pieza (otro ángulo)" style={{ display: 'none' }} onChange={onExtraFile} />
               {shots.map((sh, i) => {
                 const msg = !okQ[sh.dataUrl] && infos[sh.dataUrl] ? qualityMsg(infos[sh.dataUrl].quality) : '';
                 if (!msg) return null;
@@ -4921,7 +4921,7 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
               style={{ marginTop: 8, width: '100%', padding: '8px', background: '#F3EFF5', color: '#7A5F8A', border: '1.5px dashed #C9B8D3', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
               + Agregar pieza (etiqueta QR, código o foto)
             </button>
-            <input ref={pieceInputRef} type="file" accept="image/*" capture="environment" aria-label="Foto de la pieza"
+            <input ref={pieceInputRef} type="file" accept="image/*" aria-label="Foto de la pieza"
               style={{ display: 'none' }} onChange={handlePieceFile} />
             <div role="status" aria-live="polite" style={{ fontSize: 11, color: '#15803D', marginTop: pieceMsg ? 4 : 0 }}>{pieceMsg}</div>
             {pieceErr && <div role="alert" aria-live="assertive" style={{ fontSize: 11, color: '#DC2626', marginTop: 4 }}>{pieceErr}</div>}
@@ -4966,7 +4966,7 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
             style={{ padding: '7px 10px', background: '#3B82F6', color: 'white', border: 'none', borderRadius: 8, fontSize: 14, cursor: 'pointer', flexShrink: 0 }}>
             📷
           </button>
-          <input ref={scanInputRef} type="file" accept="image/*" capture="environment"
+          <input ref={scanInputRef} type="file" accept="image/*"
             style={{ display: 'none' }} onChange={handleScanFile} />
         </div>
         {scanErr && <div style={{ fontSize: 11, color: '#EF4444', marginTop: 4 }}>{scanErr}</div>}
