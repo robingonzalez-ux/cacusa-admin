@@ -169,6 +169,24 @@ fp16 (algo mejor pero 44 MB), recorte por saliencia de DINOv2 en lugar de `piece
 los parches junto al CLS (no mejora). `tools/build-catalog-refs.mjs` genera también
 `models/recog-v3.json`, `models/recog-v3-proj-dino.bin` y `models/catalog-refs-v3.*`.
 
+### v3.1 (25 nov): segunda opinión más barata y en más casos
+
+- `/identify/rerank` recibe la foto a 448 px y las candidatas a 256 px (antes 512 / 384): ~45 %
+  menos tokens por llamada. Con ese ahorro se consulta cuando el margen 1ro − 2do es < 0,12 (antes
+  0,06; el aviso de duda sigue en 0,06). Si la 4ta candidata está a más de 0,08 del 1ro, van solo 3.
+  Con la huella v3 (Haiku 5.5: US$ 0,10 / 0,50 por millón de tokens de entrada / salida; imagen ≈
+  ancho × alto / 750 tokens; ~250 de texto y ~40 de salida por llamada, estimados):
+
+| | consultas | errores del 1ro que llegan a consulta | costo por 100 búsquedas |
+|---|---|---|---|
+| antes (sintético / real) | 25 % / 43 % | 97 % / 89 % | US$ 0,0043 / 0,0073 |
+| después (sintético / real) | 37 % / 63 % | 100 % / 100 % | US$ 0,0036 / 0,0060 |
+
+- Probado y descartado: reordenar las 5 primeras con coincidencias de parches de DINOv2 (vecinos
+  mutuos dentro de la zona de la pieza): +1 búsqueda real de 30 como mucho, no llega a la regla
+  (+2). DINOv3-small (licencia "DINOv3 License" de Meta, no Apache) en lugar de DINOv2: +1 búsqueda
+  real y −0,5 pt en la mitad de ajuste sintética; no entra.
+
 ### Regenerar (cuando haya muchos productos nuevos o fotos cambiadas)
 
 ```bash

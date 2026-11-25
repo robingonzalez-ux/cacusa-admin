@@ -4202,18 +4202,24 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
       const unsure = fused.length > 1 && fused[0].score - fused[1].score < DOUBT_MARGIN;
       setDoubt(unsure && shots.length < 3);
       const ranked = stockTiebreak(fused, id => qtyOf(id)).slice(0, 5);
-      const list = ranked.map(r => ({ id: String(r.p.id), name: r.p.name, sku: normalizeSku(r.p.sku), category: r.p.category, imageUrl: productImageUrl(r.p), pct: friendlyPct(r.score, qs[0].pct) }));
+      const list = ranked.map(r => ({ id: String(r.p.id), name: r.p.name, sku: normalizeSku(r.p.sku), category: r.p.category, imageUrl: productImageUrl(r.p), pct: friendlyPct(r.score, qs[0].pct), score: r.score }));
       setMatches(list);
-      if (unsure && list.length >= 2) secondOpinion(sid, list); // en segundo plano: no bloquea
+      if (fused.length > 1 && fused[0].score - fused[1].score < RERANK_MARGIN && list.length >= 2) secondOpinion(sid, list); // en segundo plano: no bloquea
     } catch (e) { setErrMsg(pieceErrMsg(e)); }
     setBusy(false);
   };
   // Segunda opinión de Claude Haiku (v2.6, /identify/rerank): solo cuando el identificador duda
-  // (margen < DOUBT_MARGIN), UNA vez por búsqueda (con varias fotos, la mejor: sin aviso de calidad,
+  // (margen < RERANK_MARGIN), UNA vez por búsqueda (con varias fotos, la mejor: sin aviso de calidad,
   // la más nueva). Foto ~512 px y las 2–5 candidatas ~384 px (sus fotos del catálogo, ya cargadas con
   // CORS: GitHub Pages manda Access-Control-Allow-Origin: *, así el canvas se puede exportar). Si
   // elige una, sube al 1er puesto con "✓ 2ª opinión (IA)"; nunca agrega la pieza sola. Errores: nada.
   const RERANK_TIMEOUT_MS = 20000;
+  // v3.1 (25 nov): fotos más chicas (consulta 448 px, candidatas 256 px: ~45 % menos tokens por
+  // llamada) y con ese ahorro se consulta en más casos: margen < RERANK_MARGIN (antes 0,06). Con la
+  // huella v3: sintético 25 % → 37 % de las búsquedas, real 43 % → 63 %, y los errores del 1er puesto
+  // que llegan a consulta pasan de 97 % / 89 % a 100 %; tokens × llamadas = 0,72–0,77 de antes.
+  // Si la 4ta candidata ya está a más de RERANK_FAR del 1ro, se mandan solo 3.
+  const RERANK_MARGIN = 0.12, RERANK_FAR = 0.08;
   const jpegOf = (img, maxPx, maxKb) => {
     const w0 = img.naturalWidth || img.width, h0 = img.naturalHeight || img.height, k = Math.min(1, maxPx / Math.max(w0, h0));
     const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(w0 * k)); cv.height = Math.max(1, Math.round(h0 * k));
@@ -4227,11 +4233,12 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
     try {
       const good = shots.filter(sh => { const i = infos[sh.dataUrl]; return !(i && i.quality && (i.quality.dark || i.quality.blurry)); });
       const best = (good.length ? good : shots)[(good.length ? good : shots).length - 1];
-      const image = jpegOf(await loadImg(best.dataUrl, false), 512, 280);
+      const image = jpegOf(await loadImg(best.dataUrl, false), 448, 280);
+      const nCand = list.length >= 4 && list[0].score - list[3].score > RERANK_FAR ? 3 : 5;
       const candidates = [];
-      for (const m of list.slice(0, 5)) {
+      for (const m of list.slice(0, nCand)) {
         if (!m.imageUrl) continue;
-        try { candidates.push({ id: m.id, image: jpegOf(await loadCatalogImg(m.imageUrl), 384, 280) }); }
+        try { candidates.push({ id: m.id, image: jpegOf(await loadCatalogImg(m.imageUrl), 256, 280) }); }
         catch (_) { /* foto no disponible o canvas bloqueado: esa candidata no va */ }
       }
       if (candidates.length < 2) throw new Error('sin candidatas');
