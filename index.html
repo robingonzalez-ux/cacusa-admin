@@ -1304,6 +1304,10 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
   const [sugTags, setSugTags] = useState({}); // campo → 'ia' | 'local' (etiqueta "sugerido")
   const [sugBusy, setSugBusy] = useState(false);
   const [sugInfo, setSugInfo] = useState(null); // { neighbors: [{ id, sku, name, img }], note }
+  const [sugPhase, setSugPhase] = useState(''); // texto de avance mientras sugiere
+  // Al abrir "Nuevo producto" se precarga el reconocimiento en segundo plano (misma precarga que
+  // Pedidos: una vez por sesión, nunca con Ahorro de datos), así "Sugerir datos" responde rápido.
+  useEffect(() => { if (isNew) prewarmRecognition(allProducts); }, []);
   const set = (k, v) => {
     touched.current.add(k);
     setSugTags(t => { if (!t[k]) return t; const n = { ...t }; delete n[k]; return n; });
@@ -1318,8 +1322,11 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
     setSugBusy(true); setSugInfo(null);
     try {
       const img = /^(blob:|data:)/.test(imgPrev) ? await loadImg(imgPrev, false) : await loadCatalogImg(form.imageUrl || imgPrev);
+      setSugPhase(_prewarmState === 'done' ? 'Buscando piezas parecidas en el catálogo…' : 'Cargando el reconocimiento (la primera vez descarga ~55 MB; conviene wifi)…');
       const eng = await loadRecognitionModel();
+      setSugPhase('Preparando el catálogo…');
       const cat = await prepareCatalogShared(allProducts);
+      setSugPhase('Buscando piezas parecidas en el catálogo…');
       const items = cat.items.filter(it => String(it.p.id) !== String(product && product.id));
       const q = { emb: await embedPhoto(eng, img, 'base'), color: colorDescriptor(img), kind: eng.kind, cw: eng.cw, margin: eng.margin };
       const sug = localProductSuggestion(q, items, { tone: photoTone(img) });
@@ -1333,6 +1340,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
         cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
         let qual = 0.8, b64 = cv.toDataURL('image/jpeg', qual).split(',')[1];
         while (b64.length * 0.75 > 600 * 1024 && qual > 0.4) { qual -= 0.1; b64 = cv.toDataURL('image/jpeg', qual).split(',')[1]; }
+        setSugPhase('Escribiendo nombre y descripción…');
         const r = await apiCall('product/describe', { token, image: b64, mediaType: 'image/jpeg', neighborIds: top3.map(x => String(x.p.id)), hints: { category: sug.category, material: sug.material } });
         ai = r && r.suggestion && typeof r.suggestion.name === 'string' && r.suggestion.name.trim() ? r.suggestion : null;
         if (!ai) note = 'IA no disponible, sugerencia básica';
@@ -1363,7 +1371,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
     } catch (e) {
       setSugInfo({ note: 'No se pudo sugerir: ' + ((e && e.message) || 'error'), neighbors: [] });
     }
-    setSugBusy(false);
+    setSugBusy(false); setSugPhase('');
   };
   const [galleryUploading, setGalleryUploading] = useState(false);
   const [galleryMsg, setGalleryMsg] = useState('');
@@ -1552,7 +1560,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
                 {sugBusy ? 'Sugiriendo…' : '✦ Sugerir datos desde la foto'}
               </button>
               <div role="status" aria-live="polite" style={{ fontSize: 11, color: '#7A6880', marginTop: 6 }}>
-                {sugBusy ? 'Buscando piezas parecidas en el catálogo…' : sugInfo ? (sugInfo.note ? <span data-testid="sugNote" style={{ color: '#92400E' }}>{sugInfo.note}. </span> : null) : 'Completa solo los campos vacíos; revísalos antes de guardar.'}
+                {sugBusy ? (sugPhase || 'Buscando piezas parecidas en el catálogo…') : sugInfo ? (sugInfo.note ? <span data-testid="sugNote" style={{ color: '#92400E' }}>{sugInfo.note}. </span> : null) : 'Completa solo los campos vacíos; revísalos antes de guardar.'}
                 {!sugBusy && sugInfo && sugInfo.neighbors.length > 0 && 'Revisa los campos marcados "sugerido" antes de guardar.'}
               </div>
               {!sugBusy && sugInfo && sugInfo.neighbors.length > 0 && (
