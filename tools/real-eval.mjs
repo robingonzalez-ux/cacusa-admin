@@ -39,14 +39,15 @@ export async function runReal({ pg, catalog, dir, tune }) {
     const imgs = []; for (const p of photos) imgs.push(await loadImg(p.src, false));
     const quality = imgs.map(img => { const q = photoQuality(img); return { dark: q.dark, blurry: q.blurry }; });
     const defBox = { ...PIECE_BOX };
-    const embedAll = cfg => imgs.map(img => {
+    const embedAll = async cfg => { const out = []; for (const img of imgs) {
       Object.assign(PIECE_BOX, defBox, cfg.box || {});
       const e = cfg.views ? { ...eng, views: cfg.views } : eng;
       const base = { color: colorDescriptor(img), kind: eng.kind, cw: eng.cw, margin: eng.margin };
-      if (eng.kind !== 'v2') return { ...base, emb: embedPhoto(eng, img, 'query') };
+      if (eng.kind === 'v3') { const r3 = await embedV3Both(e, img, null); out.push({ ...base, emb: r3.all, embRef: r3.ref }); continue; }
+      if (eng.kind !== 'v2') { out.push({ ...base, emb: await embedPhoto(eng, img, 'query') }); continue; }
       const r = rawV2Both(e, img, null);
-      return { ...base, emb: projectV2(eng.proj, r.all), embRef: projectV2(eng.proj, r.ref) };
-    });
+      out.push({ ...base, emb: projectV2(eng.proj, r.all), embRef: projectV2(eng.proj, r.ref) });
+    } return out; };
     const rankOf = (qs, id, category, refs) => {
       const r = rankCatalogMulti(qs, cat.items, refs || null, 'Todas', Infinity);
       const i = r.findIndex(x => String(x.p.id) === id);
@@ -55,7 +56,7 @@ export async function runReal({ pg, catalog, dir, tune }) {
     };
     const res = [];
     for (const cfg of embCfgs) {
-      const Q = embedAll(cfg);
+      const Q = await embedAll(cfg);
       const cws = cfg.name === 'actual' && tune ? [0, 0.05, 0.1, 0.15] : [eng.cw];
       for (const cw of cws) {
         const Qc = Q.map(q => ({ ...q, cw }));

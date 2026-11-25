@@ -92,7 +92,7 @@ if (!data) {
     const r = await pg.evaluate(async ([main, extras, id, keep]) => {
       const eng = await loadRecognitionModel();
       const img = await loadImg(main, false);
-      const cat = { emb: Array.from(embedPhoto(eng, img, 'base')), color: Array.from(colorDescriptor(img)) };
+      const cat = { emb: Array.from(await embedPhoto(eng, img, 'base')), color: Array.from(colorDescriptor(img)) };
       const qs = [];
       for (const mode of ['A', 'B']) {
         const dataUrl = makeTestPhoto(img, strHash('eval|' + id + '|' + mode), mode);

@@ -40,7 +40,7 @@ export async function openRecognitionPage({ siteDir, tfjsFile, extraJs = '', war
     const f = path.join(root, rel);
     if (!f.startsWith(root) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) { res.writeHead(404); return res.end(); }
     const ext = path.extname(f);
-    const type = { '.json': 'application/json', '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.js': 'application/javascript', '.wasm': 'application/wasm' }[ext] || 'application/octet-stream';
+    const type = { '.json': 'application/json', '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.js': 'application/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm' }[ext] || 'application/octet-stream';
     res.writeHead(200, { 'Content-Type': type, ...iso }); res.end(fs.readFileSync(f));
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));

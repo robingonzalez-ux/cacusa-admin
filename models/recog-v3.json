@@ -1,0 +1,86 @@
+{
+ "format": "cacusa-recog",
+ "version": 3,
+ "emb": "effv2b0-dinov2s-int8-a045-v3",
+ "views": [
+  [
+   "c",
+   1
+  ],
+  [
+   "c",
+   0.8
+  ],
+  [
+   "c",
+   0.6
+  ],
+  [
+   "p",
+   1.25
+  ],
+  [
+   "p",
+   1.6
+  ]
+ ],
+ "alpha": 0.45,
+ "dOut": 896,
+ "cw": 0.05,
+ "margin": 0.03,
+ "pct": [
+  0.15,
+  0.65
+ ],
+ "refs": "models/catalog-refs-v3.json",
+ "eff": {
+  "emb": "effv2b0-288-gem2-iso5-lw512-v2",
+  "model": "models/effv2b0_288/model.json",
+  "size": 288,
+  "dIn": 1952,
+  "parts": [
+   [
+    0,
+    1280
+   ],
+   [
+    1280,
+    1952
+   ]
+  ],
+  "dOut": 512,
+  "proj": {
+   "bin": "recog-v2-proj.bin",
+   "binBytes": 1009280,
+   "binSha256": "7ee65fc193bd70f7e499c71a4cb3b761af1d1565b1d1af2f0da6b9bf279425e5",
+   "method": "learned-whitening",
+   "eps": 0.01,
+   "layout": "mu float32[dIn] · escala float32[dOut] · W int8[dIn×dOut] por filas (W real = int8 × escala de su columna)",
+   "trainedOn": {
+    "photos": 157,
+    "productPhotos": 131,
+    "otherSitePhotos": 26,
+    "variantsPerPhoto": 12,
+    "vectors": 2041
+   }
+  }
+ },
+ "dino": {
+  "model": "models/dinov2-small/model_quantized.onnx",
+  "sha256": "c179f8f7f592449c4c1bca4cd124a7538021428c5ffb89afde9503935b197efb",
+  "bytes": 24446700,
+  "size": 224,
+  "registers": 0,
+  "dIn": 384,
+  "dOut": 384,
+  "proj": {
+   "bin": "recog-v3-proj-dino.bin",
+   "binBytes": 150528,
+   "binSha256": "b1f95e37ffc1949e203f57e5f3617913932803009e18ed9fb84c3b55183172b8",
+   "method": "learned-whitening",
+   "eps": 0.01
+  }
+ },
+ "layout": "huella = [√α · v2 proyectada (512) ; √(1−α) · DINOv2 proyectada (384)], rellenada con ceros hasta 1280",
+ "generated": "2026-11-25T07:26:34.231Z"
+}

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob: https://cacusabytaitus.com; connect-src 'self' https://identitytoolkit.googleapis.com https://cacusa-pos-default-rtdb.firebaseio.com https://cacusa-admin.facturacioncacusa.workers.dev https://cacusa-lovers-webhook.facturacioncacusa.workers.dev https://api.mymemory.translated.net https://photon.komoot.io; object-src 'none'; base-uri 'self'; form-action 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://unpkg.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob: https://cacusabytaitus.com; connect-src 'self' https://identitytoolkit.googleapis.com https://cacusa-pos-default-rtdb.firebaseio.com https://cacusa-admin.facturacioncacusa.workers.dev https://cacusa-lovers-webhook.facturacioncacusa.workers.dev https://api.mymemory.translated.net https://photon.komoot.io; object-src 'none'; base-uri 'self'; form-action 'self'">
 <script>
 // Anti-clickjacking: el panel nunca debe mostrarse dentro de un iframe ajeno
 if (window.top !== window.self) {
@@ -1321,7 +1321,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
       const eng = await loadRecognitionModel();
       const cat = await prepareCatalogShared(allProducts);
       const items = cat.items.filter(it => String(it.p.id) !== String(product && product.id));
-      const q = { emb: embedPhoto(eng, img, 'base'), color: colorDescriptor(img), kind: eng.kind, cw: eng.cw, margin: eng.margin };
+      const q = { emb: await embedPhoto(eng, img, 'base'), color: colorDescriptor(img), kind: eng.kind, cw: eng.cw, margin: eng.margin };
       const sug = localProductSuggestion(q, items, { tone: photoTone(img) });
       if (!sug) throw new Error('No hay piezas del catálogo para comparar.');
       const top3 = sug.neighbors.slice(0, 3);
@@ -2494,8 +2494,11 @@ function pieceErrMsg(e) {
 // huella): la primera vez tarda, después solo calcula las fotos nuevas.
 const TFJS_URL = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js';
 const TFJS_SRI = 'sha384-vE8hbVJ4lezako5rlvE7bY0BVzWlFhZncPlckrqNwcUQpVtgbENTgZ8TBbnPjZre';
-const RECOG_VERSION = 2;        // sube cuando las huellas dejan de ser comparables con las anteriores
-const RECOG_V2_URL = 'models/recog-v2.json'; // manifiesto de v2 (lo genera tools/build-catalog-refs.mjs)
+const RECOG_VERSION = 3;        // sube cuando las huellas dejan de ser comparables con las anteriores
+const RECOG_KIND = 'v3';        // las fotos reales aprendidas (Worker) son de esta versión
+const RECOG_V3_URL = 'models/recog-v3.json'; // manifiesto de v3 (lo genera tools/build-catalog-refs.mjs)
+const RECOG_V2_URL = 'models/recog-v2.json'; // v2: respaldo si ONNX Runtime / DINOv2 no carga
+const ORT_DIR = 'vendor/onnxruntime-web/';  // onnxruntime-web 1.31.1 (solo WebAssembly), en el repo
 const MNV2_URL = 'models/mobilenet_v2/model.json';
 const MNV2_IDB = 'indexeddb://cacusa-mobilenet-v2-v1';
 const MNV2_NODE = 'module_apply_default/MobilenetV2/Logits/AvgPool'; // [1,1,1,1280]
@@ -2531,20 +2534,21 @@ async function loadGraphCached(tf, url, idbKey) {
 }
 // Proyección v2 (models/recog-v2-proj.bin): mu float32[dIn] · escala float32[dOut] · W int8[dIn×dOut]
 // (por filas). Se guarda en IndexedDB por hash, igual que las referencias precalculadas.
-async function loadV2Projection(man) {
-  const db = await embDb();
-  const key = 'proj|' + man.proj.binSha256;
-  let buf = null;
+async function loadV2Projection(man) { return loadProjection(man.proj, man.dIn, man.dOut, RECOG_V2_URL); }
+// Archivo binario guardado en IndexedDB por hash (se baja una sola vez mientras no cambie).
+async function fetchCachedBin(url, sha, bytes) {
+  const db = await embDb(), key = 'bin|' + sha;
   const cached = await embDbGet(db, key);
-  if (cached instanceof ArrayBuffer && cached.byteLength === man.proj.binBytes) buf = cached;
-  if (!buf) {
-    const r = await fetch(new URL(man.proj.bin, new URL(RECOG_V2_URL, location.href)).href + '?h=' + String(man.proj.binSha256).slice(0, 12));
-    if (!r.ok) throw new Error('proyección v2: HTTP ' + r.status);
-    buf = await r.arrayBuffer();
-    if (buf.byteLength !== man.proj.binBytes) throw new Error('proyección v2: tamaño inesperado');
-    await embDbPut(db, key, buf);
-  }
-  const dIn = man.dIn, dOut = man.dOut;
+  if (cached instanceof ArrayBuffer && cached.byteLength === bytes) return cached;
+  const r = await fetch(url + (url.includes('?') ? '&' : '?') + 'h=' + String(sha).slice(0, 12));
+  if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + url);
+  const buf = await r.arrayBuffer();
+  if (buf.byteLength !== bytes) throw new Error('tamaño inesperado: ' + url);
+  await embDbPut(db, key, buf);
+  return buf;
+}
+async function loadProjection(meta, dIn, dOut, baseUrl) {
+  const buf = await fetchCachedBin(new URL(meta.bin, new URL(baseUrl, location.href)).href, meta.binSha256, meta.binBytes);
   const mu = new Float32Array(buf, 0, dIn), sc = new Float32Array(buf, dIn * 4, dOut), q = new Int8Array(buf, (dIn + dOut) * 4, dIn * dOut);
   const W = new Float32Array(dIn * dOut);
   for (let i = 0; i < dIn; i++) for (let j = 0; j < dOut; j++) W[i * dOut + j] = q[i * dOut + j] * sc[j];
@@ -2554,9 +2558,45 @@ async function loadV2(tf) {
   const res = await fetch(RECOG_V2_URL, { cache: 'no-cache' });
   if (!res.ok) throw new Error('manifiesto v2: HTTP ' + res.status);
   const man = await res.json();
-  if (!man || man.version !== RECOG_VERSION || !man.proj || !man.model || man.dOut > EMB_DIM) throw new Error('manifiesto v2 inválido');
+  if (!man || man.version !== 2 || !man.proj || !man.model || man.dOut > EMB_DIM) throw new Error('manifiesto v2 inválido');
   const [proj, model] = await Promise.all([loadV2Projection(man), loadGraphCached(tf, man.model, 'indexeddb://cacusa-' + man.emb)]);
   return { tf, model, kind: 'v2', ver: man.emb, size: man.size, proj, parts: man.parts, views: man.views,
+           cw: man.cw, margin: man.margin, pct: man.pct, refsUrl: man.refs };
+}
+// ── v3 (25 nov): EfficientNetV2-B0 (v2) + DINOv2-small (ONNX int8, ONNX Runtime Web en wasm) ──
+// Huella = [√α · v2 (512) ; √(1−α) · DINOv2 (384)], 896 números rellenados con ceros hasta 1280
+// (el Worker sigue igual). DINOv2: CLS de las mismas 5 vistas a 224 px, proyección propia.
+let _ortPromise = null;
+function loadOrt() {
+  if (window.ort && window.ort.InferenceSession) return Promise.resolve(window.ort);
+  if (_ortPromise) return _ortPromise;
+  _ortPromise = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = ORT_DIR + 'ort.wasm.min.js'; s.async = true;
+    s.onload = () => (window.ort && window.ort.InferenceSession ? resolve(window.ort) : reject(new Error('ONNX Runtime no se inicializó')));
+    s.onerror = () => { _ortPromise = null; reject(new Error('No se pudo cargar ONNX Runtime')); };
+    document.head.appendChild(s);
+  });
+  return _ortPromise;
+}
+async function loadV3(tf) {
+  const res = await fetch(RECOG_V3_URL, { cache: 'no-cache' });
+  if (!res.ok) throw new Error('manifiesto v3: HTTP ' + res.status);
+  const man = await res.json();
+  if (!man || man.version !== 3 || !man.eff || !man.dino || man.dOut > EMB_DIM) throw new Error('manifiesto v3 inválido');
+  const ort = await loadOrt();
+  ort.env.wasm.wasmPaths = new URL(ORT_DIR, location.href).href;
+  ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1; // GitHub Pages: 1 hilo
+  const base = new URL(RECOG_V3_URL, location.href).href;
+  const [effProj, dinoProj, model, bytes] = await Promise.all([
+    loadProjection(man.eff.proj, man.eff.dIn, man.eff.dOut, RECOG_V3_URL),
+    loadProjection(man.dino.proj, man.dino.dIn, man.dino.dOut, RECOG_V3_URL),
+    loadGraphCached(tf, man.eff.model, 'indexeddb://cacusa-' + man.eff.emb),
+    fetchCachedBin(new URL(man.dino.model, new URL('..', base)).href, man.dino.sha256, man.dino.bytes),
+  ]);
+  const sess = await ort.InferenceSession.create(new Uint8Array(bytes), { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+  return { tf, model, kind: 'v3', ver: man.emb, size: man.eff.size, proj: effProj, parts: man.eff.parts, views: man.views,
+           dino: { ort, sess, size: man.dino.size, proj: dinoProj, nreg: man.dino.registers || 0 }, alpha: man.alpha,
            cw: man.cw, margin: man.margin, pct: man.pct, refsUrl: man.refs };
 }
 async function loadV1(tf) {
@@ -2571,6 +2611,8 @@ function loadRecognitionModel() {
   _modelPromise = (async () => {
     const tf = await loadTfjs();
     try { await tf.ready(); } catch (_) {}
+    try { return await loadV3(tf); }
+    catch (e) { console.warn('reconocimiento v3 no disponible, se usa v2:', e && e.message); }
     try { return await loadV2(tf); }
     catch (e) { console.warn('reconocimiento v2 no disponible, se usa v1:', e && e.message); }
     return await loadV1(tf);
@@ -2705,13 +2747,47 @@ function boxSquare(img, box, margin) {
 // las vistas pasan a MANUAL_VIEWS (centro 80/60 % + la zona con margen 1, 1,25 y 1,6; elegido con
 // tools/eval-catalog-refs.mjs --box sobre la mitad de ajuste).
 const MANUAL_VIEWS = [['c', 0.8], ['c', 0.6], ['p', 1], ['p', 1.25], ['p', 1.6]];
-function v2Views(eng, img, manualBox) {
+function viewSquares(eng, img, manualBox) {
   const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height, s = Math.min(w, h);
   const box = manualBox || pieceBox(img);
-  return (manualBox ? MANUAL_VIEWS : eng.views).map(([t, f]) => {
-    const q = t === 'p' && box ? boxSquare(img, box, f) : [(w - s * (t === 'c' ? f : 1)) / 2, (h - s * (t === 'c' ? f : 1)) / 2, s * (t === 'c' ? f : 1)];
-    return cropSquare(img, q[0], q[1], q[2], eng.size);
+  return (manualBox ? MANUAL_VIEWS : eng.views).map(([t, f]) => (t === 'p' && box ? boxSquare(img, box, f) : [(w - s * (t === 'c' ? f : 1)) / 2, (h - s * (t === 'c' ? f : 1)) / 2, s * (t === 'c' ? f : 1)]));
+}
+function v2Views(eng, img, manualBox, size) {
+  return viewSquares(eng, img, manualBox).map(q => cropSquare(img, q[0], q[1], q[2], size || eng.size));
+}
+// v3: CLS de DINOv2 en las mismas vistas (224 px, normalización ImageNet). Promesa (ONNX Runtime).
+async function rawDinoBoth(eng, img, manualBox) {
+  const { ort, sess, size, nreg } = eng.dino;
+  const spec = manualBox ? MANUAL_VIEWS : eng.views, views = v2Views(eng, img, manualBox, size);
+  const n = views.length, hw = size * size, data = new Float32Array(n * 3 * hw), M = [0.485, 0.456, 0.406], SD = [0.229, 0.224, 0.225];
+  views.forEach((cv, v) => {
+    const d = cv.getContext('2d').getImageData(0, 0, size, size).data, o = v * 3 * hw;
+    for (let p = 0; p < hw; p++) for (let c = 0; c < 3; c++) data[o + c * hw + p] = (d[p * 4 + c] / 255 - M[c]) / SD[c];
   });
+  const out = await sess.run({ pixel_values: new ort.Tensor('float32', data, [n, 3, size, size]) });
+  const t = out.last_hidden_state, L = t.dims[1], D = t.dims[2], h = t.data;
+  const acc = new Float64Array(D), accP = new Float64Array(D);
+  for (let v = 0; v < n; v++) {
+    const cls = h.subarray(v * L * D, v * L * D + D); let s = 0; for (let i = 0; i < D; i++) s += cls[i] * cls[i]; s = Math.sqrt(s) || 1;
+    for (let i = 0; i < D; i++) { acc[i] += cls[i] / s; if (spec[v][0] === 'p') accP[i] += cls[i] / s; }
+  }
+  void nreg; // con "registers" el CLS sigue siendo el token 0
+  return { all: l2norm(acc), ref: accP.some(Boolean) ? l2norm(accP) : l2norm(acc) };
+}
+function projectRaw(proj, x) { // como projectV2 pero sin rellenar (dOut números, normalizado)
+  const { mu, W, dIn, dOut } = proj, y = new Float64Array(dOut);
+  for (let i = 0; i < dIn; i++) { const xi = x[i] - mu[i]; if (!xi) continue; const r = i * dOut; for (let j = 0; j < dOut; j++) y[j] += xi * W[r + j]; }
+  return l2norm(y);
+}
+function fuseV3(eng, e, d) {
+  const out = new Float32Array(EMB_DIM), a = Math.sqrt(eng.alpha), b = Math.sqrt(1 - eng.alpha), pe = projectRaw(eng.proj, e), pd = projectRaw(eng.dino.proj, d);
+  for (let i = 0; i < pe.length; i++) out[i] = a * pe[i];
+  for (let i = 0; i < pd.length; i++) out[pe.length + i] = b * pd[i];
+  return out;
+}
+async function embedV3Both(eng, img, manualBox) {
+  const e = rawV2Both(eng, img, manualBox), d = await rawDinoBoth(eng, img, manualBox);
+  return { all: fuseV3(eng, e.all, d.all), ref: fuseV3(eng, e.ref, d.ref) };
 }
 // v2: huella de una foto = promedio de las vistas (cada vista: partes normalizadas) →
 // proyección → normalizada → rellenada con ceros hasta EMB_DIM.
@@ -2745,7 +2821,9 @@ function projectV2(proj, x) {
 // Huella de una foto. role 'base' = foto del catálogo; 'query' = foto a identificar o variante
 // de entrenamiento. En v2 son la misma; en v1 la del catálogo es solo el recorte completo.
 // manualBox: zona marcada a mano (solo v2; en el modo de respaldo v1 se ignora).
+// v3 devuelve una promesa (DINOv2 corre en ONNX Runtime): siempre usar con await.
 function embedPhoto(eng, img, role, manualBox) {
+  if (eng.kind === 'v3') return embedV3Both(eng, img, manualBox || null).then(r => r.all);
   if (eng.kind === 'v2') return embedV2(eng, img, manualBox || null);
   return role === 'base' ? embedCanvas(eng, squareCrop(img, 1, 224)) : embedMultiCrop(eng, img);
 }
@@ -2863,8 +2941,8 @@ async function prepareCatalogEmbeddings(products, onProgress) {
       if ((!okRec && !(rec && rec.fromStatic)) || needLive) {
         try {
           const img = await loadCatalogImg(url);
-          rec = okRec ? { ...rec } : { emb: embedPhoto(eng, img, 'base'), color: colorDescriptor(img), at: Date.now() };
-          if (needLive) { rec.aug = augmentEmbeddings(eng, img, url, AUG_LIVE_N); rec.augV = AUG_VERSION; }
+          rec = okRec ? { ...rec } : { emb: await embedPhoto(eng, img, 'base'), color: colorDescriptor(img), at: Date.now() };
+          if (needLive) { rec.aug = await augmentEmbeddings(eng, img, url, AUG_LIVE_N); rec.augV = AUG_VERSION; }
           computed++;
           await embDbPut(db, key, rec);
         } catch (e) {
@@ -2903,6 +2981,7 @@ async function embedQueryPhoto(dataUrl, opts) {
   const img = await loadImg(dataUrl, false);
   const box = opts && Array.isArray(opts.box) ? opts.box : null;
   const base = { color: colorDescriptor(img), kind: eng.kind, ver: eng.ver, cw: eng.cw, margin: eng.margin, pct: eng.pct, box };
+  if (eng.kind === 'v3') { const r3 = await embedV3Both(eng, img, box); return { ...base, emb: r3.all, embRef: r3.ref }; }
   if (eng.kind !== 'v2') return { ...base, emb: embedPhoto(eng, img, 'query', box) };
   const r = rawV2Both(eng, img, box);
   // emb: para buscar (5 vistas); embRef: para guardar como foto real (solo la pieza recortada).
@@ -2936,7 +3015,7 @@ function dequantizeEmb(b64) {
 // versión: las que hay se tratan como de la versión actual (RECOG_VERSION). Si v2 no cargó y
 // el panel quedó en v1 de respaldo, NO se guarda nada (no mezclar huellas de dos versiones).
 function learnedRefVector(q) {
-  if (!q || q.kind !== 'v2') throw new Error('El identificador mejorado no terminó de cargar (modo básico): esta foto no se guarda como referencia. Recarga la página e inténtalo de nuevo.');
+  if (!q || q.kind !== RECOG_KIND) throw new Error('El identificador mejorado no terminó de cargar (modo básico): esta foto no se guarda como referencia. Recarga la página e inténtalo de nuevo.');
   return quantizeEmb(q.embRef || q.emb);
 }
 // ── "Entrenamiento" con el catálogo ──
@@ -3016,9 +3095,9 @@ function augmentPhoto(img, seed, size = 320) {
   }
   return cv;
 }
-function augmentEmbeddings(eng, img, url, n) {
+async function augmentEmbeddings(eng, img, url, n) {
   const out = [];
-  for (let k = 0; k < n; k++) out.push(embedPhoto(eng, augmentPhoto(img, augSeed(url, k)), 'query'));
+  for (let k = 0; k < n; k++) out.push(await embedPhoto(eng, augmentPhoto(img, augSeed(url, k)), 'query'));
   return out;
 }
 // Referencias precalculadas (models/catalog-refs-v2.json + .bin, o v1 en modo de respaldo; ver
@@ -3083,7 +3162,7 @@ function friendlyPct(score, pct) { const [lo, span] = pct || [0.35, 0.55]; retur
 function rankCatalog(query, items, refs, category, topN = 5) {
   const catLc = category && category !== 'Todas' ? String(category).toLowerCase() : '';
   const cw = query.cw != null ? query.cw : COLOR_W, margin = query.margin != null ? query.margin : 0.03;
-  const useRefs = query.kind !== 'v1';
+  const useRefs = query.kind === RECOG_KIND; // fotos reales aprendidas: solo con la huella de su versión
   const out = [];
   for (const it of items) {
     if (catLc && String(it.p.category || '').toLowerCase() !== catLc) continue;
@@ -4410,7 +4489,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
           </div>
           <div style={{ fontSize: 11, color: '#7A6880', marginBottom: 6 }}>💡 Elegir la categoría ayuda a acertar.</div>
           <div style={{ fontSize: 11, color: '#7A6880', marginBottom: 10 }} aria-live="polite">
-            {prep.phase === 'model' && 'Cargando el reconocimiento (la primera vez descarga ~15 MB)…'}
+            {prep.phase === 'model' && 'Cargando el reconocimiento (la primera vez descarga ~55 MB; conviene wifi)…'}
             {prep.phase === 'catalog' && `Preparando el catálogo… ${prep.done}/${prep.total}`}
             {prep.phase === 'ready' && (prep.failed ? `✓ Catálogo listo · ${prep.failed} pieza${prep.failed === 1 ? '' : 's'} sin foto utilizable` : '✓ Catálogo listo')}
           </div>

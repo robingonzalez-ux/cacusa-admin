@@ -39,6 +39,14 @@ const SPEC = {
   pct: [0.15, 0.65],                                   // friendlyPct: puntaje que da 0 % y rango hasta 100 % (calibrado: acierto típico ≈ 0,53 → ~60 %, mejor error típico ≈ 0,29 → ~20 %)
 };
 
+// v3 (25 nov): v2 + DINOv2-small (ONNX int8) fusionados: [√α · v2 (512) ; √(1−α) · DINOv2 (384)].
+// α elegido con la mitad de ajuste sintética y las 30 fotos reales (ver README, v3).
+const SPEC3 = {
+  emb: 'effv2b0-dinov2s-int8-a045-v3', alpha: 0.45,
+  dino: { model: 'models/dinov2-small/model_quantized.onnx', size: 224, dIn: 384, dOut: 384, eps: 0.01 },
+  cw: 0.05, margin: 0.03,
+  pct: [0.15, 0.65],
+};
 const args = process.argv.slice(2);
 const opt = (name, def) => { const i = args.indexOf('--' + name); return i >= 0 ? (args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : true) : def; };
 const N = Number(opt('n', 12));
@@ -54,6 +62,8 @@ const used = new Set(products.flatMap(productUrls).map(u => new URL(u).pathname)
 const imgDir = path.join(siteDir, 'ui_kits', 'store', 'images');
 const orphans = fs.existsSync(imgDir) ? fs.readdirSync(imgDir).sort().filter(f => /\.(webp|jpe?g|png)$/i.test(f) && !used.has('/ui_kits/store/images/' + f)).map(f => SITE_ORIGIN + '/ui_kits/store/images/' + f) : [];
 
+// base64 → Float32Array (copia exacta: Buffer.from puede compartir un bloque más grande)
+const f32of = b => { const u = Buffer.from(b, 'base64'); return new Float32Array(u.buffer.slice(u.byteOffset, u.byteOffset + u.length)); };
 const t0 = Date.now();
 const secs = () => ((Date.now() - t0) / 1000).toFixed(0) + ' s';
 const extraJs = `
@@ -82,7 +92,7 @@ for (const [i, job] of jobs.entries()) {
   if (!fs.existsSync(file)) { skipped++; console.warn('\n  sin archivo local:', job.url); continue; }
   const fsha = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex').slice(0, 16), ckey = `${job.url}|${fsha}|${N}`;
   if (rawCache[ckey]) {
-    photos.push({ ...job, sha: fsha, color: rawCache[ckey].color, raws: rawCache[ckey].raws.map(b => new Float32Array(Buffer.from(b, 'base64').buffer.slice(0))) });
+    photos.push({ ...job, sha: fsha, color: rawCache[ckey].color, raws: rawCache[ckey].raws.map(b => f32of(b)) });
     continue;
   }
   const calc = () => rp.page.evaluate(async ([src, url, n, spec]) => {
@@ -102,7 +112,7 @@ for (const [i, job] of jobs.entries()) {
     }
   }
   if (!res) { skipped++; continue; }
-  const raws = res.raws.map(b => new Float32Array(Buffer.from(b, 'base64').buffer.slice(0)));
+  const raws = res.raws.map(b => f32of(b));
   if (raws.some(v => v.length !== SPEC.dIn)) throw new Error('dimensión inesperada del descriptor');
   photos.push({ ...job, sha: fsha, color: res.color, raws });
   rawCache[ckey] = res;
@@ -114,45 +124,52 @@ const nProd = photos.filter(p => p.id).length, nOrph = photos.length - nProd;
 console.log(`\n  fotos usadas para aprender la proyección: ${photos.length} (${nProd} de productos + ${nOrph} sueltas) × ${N + 1} = ${photos.length * (N + 1)} vectores`);
 
 // ── 2) Proyección (learned whitening) ──
-const D = SPEC.dIn, X = photos.flatMap(p => p.raws), nX = X.length;
-const mu64 = new Float64Array(D);
-for (const x of X) for (let i = 0; i < D; i++) mu64[i] += x[i] / nX;
-const mu = Float32Array.from(mu64); // lo que usa el panel
-// Covarianza dentro de cada grupo (foto + sus variantes).
-const Cw = new Float64Array(D * D);
-for (const p of photos) {
-  const g = new Float64Array(D); for (const x of p.raws) for (let i = 0; i < D; i++) g[i] += x[i] / p.raws.length;
-  for (const x of p.raws) {
-    const d = new Float64Array(D); for (let i = 0; i < D; i++) d[i] = x[i] - g[i];
-    for (let i = 0; i < D; i++) { const di = d[i]; if (!di) continue; const r = i * D; for (let j = i; j < D; j++) Cw[r + j] += di * d[j]; }
+// groups: [[Float32Array]] (cada foto con sus variantes es un grupo). Devuelve el binario
+// (mu f32 · escala f32 · W int8) y project(x) = mismo cálculo que el panel (sin relleno).
+function fitLW(groups, D, dOut, eps, label) {
+  const X = groups.flat(), nX = X.length;
+  const mu64 = new Float64Array(D);
+  for (const x of X) for (let i = 0; i < D; i++) mu64[i] += x[i] / nX;
+  const mu = Float32Array.from(mu64); // lo que usa el panel
+  const Cw = new Float64Array(D * D); // covarianza dentro de cada grupo
+  for (const raws of groups) {
+    const g = new Float64Array(D); for (const x of raws) for (let i = 0; i < D; i++) g[i] += x[i] / raws.length;
+    for (const x of raws) {
+      const d = new Float64Array(D); for (let i = 0; i < D; i++) d[i] = x[i] - g[i];
+      for (let i = 0; i < D; i++) { const di = d[i]; if (!di) continue; const r = i * D; for (let j = i; j < D; j++) Cw[r + j] += di * d[j]; }
+    }
   }
+  const CwM = new Matrix(D, D);
+  for (let i = 0; i < D; i++) for (let j = i; j < D; j++) { const v = Cw[i * D + j] / nX; CwM.set(i, j, v); CwM.set(j, i, v); }
+  process.stdout.write(`  2/3 proyección ${label}: autovalores (1 de 2)… ${secs()}\n`);
+  const e1 = new EigenvalueDecomposition(CwM, { assumeSymmetric: true });
+  const w1 = e1.realEigenvalues, V1 = e1.eigenvectorMatrix, wmax = Math.max(...w1);
+  const Wi = new Matrix(D, D); // Cw^-1/2 (en la base de autovectores)
+  for (let j = 0; j < D; j++) { const s = 1 / Math.sqrt(Math.max(w1[j], 0) + eps * wmax); for (let i = 0; i < D; i++) Wi.set(i, j, V1.get(i, j) * s); }
+  const Xc = new Matrix(nX, D); X.forEach((x, r) => { for (let i = 0; i < D; i++) Xc.set(r, i, x[i] - mu64[i]); });
+  const Xw = Xc.mmul(Wi);
+  const Cb = Xw.transpose().mmul(Xw).div(nX);
+  process.stdout.write(`  2/3 proyección ${label}: autovalores (2 de 2)… ${secs()}\n`);
+  const e2 = new EigenvalueDecomposition(Cb, { assumeSymmetric: true });
+  const dO = Math.min(dOut, D);
+  const order = e2.realEigenvalues.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]).slice(0, dO).map(x => x[1]);
+  const V2 = new Matrix(D, dO); order.forEach((c, j) => { for (let i = 0; i < D; i++) V2.set(i, j, e2.eigenvectorMatrix.get(i, c)); });
+  const Wf = Wi.mmul(V2); // D × dO
+  const scale = new Float32Array(dO), Wq = new Int8Array(D * dO); // cuantización por columna a int8
+  for (let j = 0; j < dO; j++) { let m = 0; for (let i = 0; i < D; i++) m = Math.max(m, Math.abs(Wf.get(i, j))); scale[j] = m / 127 || 1; }
+  for (let i = 0; i < D; i++) for (let j = 0; j < dO; j++) Wq[i * dO + j] = Math.max(-127, Math.min(127, Math.round(Wf.get(i, j) / scale[j])));
+  const projBin = Buffer.concat([Buffer.from(mu.buffer), Buffer.from(scale.buffer), Buffer.from(Wq.buffer)]);
+  const Wdq = Float32Array.from(Wq, (q, k) => q * scale[k % dO]);
+  const project = x => {
+    const y = new Float64Array(dO);
+    for (let i = 0; i < D; i++) { const xi = x[i] - mu[i]; if (!xi) continue; const r = i * dO; for (let j = 0; j < dO; j++) y[j] += xi * Wdq[r + j]; }
+    let s = 0; for (const v of y) s += v * v; s = Math.sqrt(s) || 1; return y.map(v => v / s);
+  };
+  return { projBin, project, dOut: dO, nX };
 }
-const CwM = new Matrix(D, D);
-for (let i = 0; i < D; i++) for (let j = i; j < D; j++) { const v = Cw[i * D + j] / nX; CwM.set(i, j, v); CwM.set(j, i, v); }
-process.stdout.write(`  2/3 proyección: autovalores (1 de 2)… ${secs()}\n`);
-const e1 = new EigenvalueDecomposition(CwM, { assumeSymmetric: true });
-const w1 = e1.realEigenvalues, V1 = e1.eigenvectorMatrix, wmax = Math.max(...w1);
-const Wi = new Matrix(D, D); // Cw^-1/2 (en la base de autovectores)
-for (let j = 0; j < D; j++) { const s = 1 / Math.sqrt(Math.max(w1[j], 0) + SPEC.eps * wmax); for (let i = 0; i < D; i++) Wi.set(i, j, V1.get(i, j) * s); }
-const Xc = new Matrix(nX, D); X.forEach((x, r) => { for (let i = 0; i < D; i++) Xc.set(r, i, x[i] - mu64[i]); });
-const Xw = Xc.mmul(Wi);
-const Cb = Xw.transpose().mmul(Xw).div(nX);
-process.stdout.write(`  2/3 proyección: autovalores (2 de 2)… ${secs()}\n`);
-const e2 = new EigenvalueDecomposition(Cb, { assumeSymmetric: true });
-const order = e2.realEigenvalues.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]).slice(0, SPEC.dOut).map(x => x[1]);
-const V2 = new Matrix(D, SPEC.dOut); order.forEach((c, j) => { for (let i = 0; i < D; i++) V2.set(i, j, e2.eigenvectorMatrix.get(i, c)); });
-const Wf = Wi.mmul(V2); // D × dOut
-// Cuantización por columna a int8.
-const dO = SPEC.dOut, scale = new Float32Array(dO), Wq = new Int8Array(D * dO);
-for (let j = 0; j < dO; j++) { let m = 0; for (let i = 0; i < D; i++) m = Math.max(m, Math.abs(Wf.get(i, j))); scale[j] = m / 127 || 1; }
-for (let i = 0; i < D; i++) for (let j = 0; j < dO; j++) Wq[i * dO + j] = Math.max(-127, Math.min(127, Math.round(Wf.get(i, j) / scale[j])));
-const projBin = Buffer.concat([Buffer.from(mu.buffer), Buffer.from(scale.buffer), Buffer.from(Wq.buffer)]);
-const Wdq = Float32Array.from(Wq, (q, k) => q * scale[k % dO]);
-const project = x => { // mismo cálculo que projectV2 del panel (sin el relleno con ceros)
-  const y = new Float64Array(dO);
-  for (let i = 0; i < D; i++) { const xi = x[i] - mu[i]; if (!xi) continue; const r = i * dO; for (let j = 0; j < dO; j++) y[j] += xi * Wdq[r + j]; }
-  let s = 0; for (const v of y) s += v * v; s = Math.sqrt(s) || 1; return y.map(v => v / s);
-};
+const D = SPEC.dIn;
+const effLW = fitLW(photos.map(p => p.raws), D, SPEC.dOut, SPEC.eps, 'EfficientNetV2');
+const { projBin, project } = effLW, dO = effLW.dOut, nX = effLW.nX;
 const q8 = y => { let m = 0; for (const v of y) m = Math.max(m, Math.abs(v)); const k = m ? 127 / m : 0; return Int8Array.from(y, v => Math.max(-127, Math.min(127, Math.round(v * k)))); };
 
 // ── 3) Referencias precalculadas de los productos ──
@@ -191,4 +208,72 @@ fs.writeFileSync(path.join(MODELS, 'catalog-refs-v2.json'), JSON.stringify(refsO
 fs.writeFileSync(path.join(MODELS, 'recog-v2.json'), JSON.stringify(manifest, null, 1) + '\n');
 console.log(`  3/3 listo en ${secs()}: ${Object.keys(index).length} productos, ${nProd} fotos, ${offset} vectores.`);
 for (const f of ['recog-v2.json', 'recog-v2-proj.bin', 'catalog-refs-v2.bin', 'catalog-refs-v2.json']) console.log(`  models/${f}  ${(fs.statSync(path.join(MODELS, f)).size / 1024).toFixed(0)} KB`);
+
+// ── 4) v3: DINOv2-small (ONNX Runtime Web, wasm con hilos en Chromium headless) ──
+const dinoFile = path.join(ADMIN_DIR, SPEC3.dino.model), dinoBuf = fs.readFileSync(dinoFile), dinoSha = sha(dinoBuf);
+const CACHE3 = path.join(ADMIN_DIR, 'tools', '.cache', `raw-dino-${dinoSha.slice(0, 12)}.json`);
+let cache3 = {}; try { cache3 = JSON.parse(fs.readFileSync(CACHE3, 'utf8')); } catch (_) {}
+const dinoJs = extraJs + `
+async function __dinoEngine(spec, spec3) {
+  if (window.__deng) return window.__deng;
+  await new Promise((ok, ko) => { const s = document.createElement('script'); s.src = '/vendor/onnxruntime-web/ort.wasm.min.js'; s.onload = ok; s.onerror = ko; document.head.appendChild(s); });
+  ort.env.wasm.wasmPaths = location.origin + '/vendor/onnxruntime-web/'; ort.env.wasm.numThreads = self.crossOriginIsolated ? 4 : 1;
+  const sess = await ort.InferenceSession.create('/' + spec3.dino.model, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+  window.__deng = { views: spec.views, dino: { ort, sess, size: spec3.dino.size, nreg: 0 } };
+  return window.__deng;
+}`;
+let rp3 = null;
+const open3 = async () => { const r = await openRecognitionPage({ siteDir, tfjsFile: opt('tfjs', null), extraJs: dinoJs, warmup: false }); r.page.on('crash', () => console.error('\n  Chromium se cayó: se reabre')); return r; };
+for (const [i, p] of photos.entries()) {
+  const ckey = `${p.url}|${p.sha}|${N}`;
+  if (!cache3[ckey]) {
+    rp3 ||= await open3();
+    let res = null;
+    for (let attempt = 0; attempt < 2 && !res; attempt++) {
+      try {
+        res = await rp3.page.evaluate(async ([src, url, n, spec, spec3]) => {
+          const eng = await __dinoEngine(spec, spec3);
+          const img = await loadImg(src, false);
+          const raws = [(await rawDinoBoth(eng, img)).all];
+          for (let k = 0; k < n; k++) raws.push((await rawDinoBoth(eng, augmentPhoto(img, augSeed(url, k)))).all);
+          return raws.map(__b64f32);
+        }, [rp3.localUrl(p.url), p.url, N, SPEC, SPEC3]);
+      } catch (e) { console.warn('\n  error DINOv2 con', p.url, e.message); try { await rp3.close(); } catch (_) {} rp3 = await open3(); }
+    }
+    if (!res) throw new Error('DINOv2 falló con ' + p.url);
+    cache3[ckey] = res;
+  }
+  p.draws = cache3[ckey].map(b => f32of(b));
+  if (p.draws.some(v => v.length !== SPEC3.dino.dIn)) throw new Error('dimensión inesperada de DINOv2');
+  process.stdout.write(`\r  4/4 DINOv2: ${i + 1}/${photos.length} fotos · ${secs()}   `);
+}
+if (rp3) await rp3.close();
+fs.writeFileSync(CACHE3, JSON.stringify(cache3));
+console.log('');
+const dinoLW = fitLW(photos.map(p => p.draws), SPEC3.dino.dIn, SPEC3.dino.dOut, SPEC3.dino.eps, 'DINOv2');
+const a3 = Math.sqrt(SPEC3.alpha), b3 = Math.sqrt(1 - SPEC3.alpha), dim3 = dO + dinoLW.dOut;
+const fuse3 = (e, d) => { const pe = project(e), pd = dinoLW.project(d), y = new Float64Array(dim3); pe.forEach((v, i) => { y[i] = a3 * v; }); pd.forEach((v, i) => { y[dO + i] = b3 * v; }); return y; };
+const chunks3 = [], index3 = {}; let off3 = 0;
+for (const p of photos) {
+  if (!p.id) continue;
+  p.raws.forEach((x, k) => chunks3.push(Buffer.from(q8(fuse3(x, p.draws[k])).buffer)));
+  (index3[p.id] ||= []).push({ url: p.url, sha256: p.sha, offset: off3, n: p.raws.length - 1, color: p.color });
+  off3 += p.raws.length;
+}
+const bin3 = Buffer.concat(chunks3), dinoProjBin = dinoLW.projBin;
+const refs3 = { ...refsOut, version: 3, model: SPEC3.emb, dim: dim3, bin: 'catalog-refs-v3.bin', binBytes: bin3.length, binSha256: sha(bin3), vectors: off3, products: index3 };
+const man3 = {
+  format: 'cacusa-recog', version: 3, emb: SPEC3.emb, views: SPEC.views, alpha: SPEC3.alpha, dOut: dim3,
+  cw: SPEC3.cw, margin: SPEC3.margin, pct: SPEC3.pct, refs: 'models/catalog-refs-v3.json',
+  eff: { emb: SPEC.emb, model: SPEC.model, size: SPEC.size, dIn: SPEC.dIn, parts: SPEC.parts, dOut: dO, proj: manifest.proj },
+  dino: { model: SPEC3.dino.model, sha256: dinoSha, bytes: dinoBuf.length, size: SPEC3.dino.size, registers: 0, dIn: SPEC3.dino.dIn, dOut: dinoLW.dOut,
+          proj: { bin: 'recog-v3-proj-dino.bin', binBytes: dinoProjBin.length, binSha256: sha(dinoProjBin), method: 'learned-whitening', eps: SPEC3.dino.eps } },
+  layout: 'huella = [√α · v2 proyectada (512) ; √(1−α) · DINOv2 proyectada (384)], rellenada con ceros hasta 1280',
+  generated,
+};
+fs.writeFileSync(path.join(MODELS, 'recog-v3-proj-dino.bin'), dinoProjBin);
+fs.writeFileSync(path.join(MODELS, 'catalog-refs-v3.bin'), bin3);
+fs.writeFileSync(path.join(MODELS, 'catalog-refs-v3.json'), JSON.stringify(refs3));
+fs.writeFileSync(path.join(MODELS, 'recog-v3.json'), JSON.stringify(man3, null, 1) + '\n');
+for (const f of ['recog-v3.json', 'recog-v3-proj-dino.bin', 'catalog-refs-v3.bin', 'catalog-refs-v3.json']) console.log(`  models/${f}  ${(fs.statSync(path.join(MODELS, f)).size / 1024).toFixed(0)} KB`);
 if (skipped) console.log(`  ${skipped} foto(s) omitidas (sin archivo o ilegibles).`);

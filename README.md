@@ -145,6 +145,30 @@ la IA elige una, sube al 1er puesto con "✓ 2ª opinión (IA)" (las demás sigu
 Nunca agrega la pieza sola. El registro local de acierto guarda `rr` (1 = la IA confirmó el 1ro,
 2 = lo cambió, 3 = no estaba segura) para medir el efecto real.
 
+### v3 (25 nov, `RECOG_VERSION = 3`): EfficientNetV2-B0 + DINOv2-small
+
+Huella = `[√α · v2 (512) ; √(1−α) · DINOv2 (384)]` con α = 0,45, rellenada con ceros hasta 1280
+(el Worker no cambia). DINOv2-small (Meta, Apache-2.0; ONNX int8 de onnx-community, 24 MB, ver
+`models/dinov2-small/SOURCE.md`) corre con ONNX Runtime Web 1.31.1 **en el repo**
+(`vendor/onnxruntime-web/`: `ort.wasm.min.js` + wasm de 14,8 MB, sin CDN). El CSP suma
+`'wasm-unsafe-eval'` en `script-src` (sin eso el navegador no compila WebAssembly); no hizo falta
+tocar `connect-src`. GitHub Pages no aísla el origen, así que corre con 1 hilo. Si ONNX Runtime o
+DINOv2 no cargan, el panel usa v2 (y si tampoco, v1) y en ese modo no guarda fotos reales.
+
+| | v2.5/v2.6 | v3 |
+|---|---|---|
+| Fotos reales, piezas nuevas (30), hit@1 / hit@5 | 56,7 / 83,3 % | 70,0 / 93,3 % |
+| … dentro de la categoría | 66,7 % | 76,7 % |
+| Sintético, mitad de ajuste A+B hit@1 | 90,9 % | 91,4 % |
+| Sintético, mitad de prueba A+B hit@1 | 90,6 % | 91,2 % |
+| Descarga la primera vez | ~13,5 MB | ~53 MB (+ DINOv2 24 MB + wasm 15 MB) |
+| DINOv2 por foto (5 vistas, wasm 1 hilo, CPU de escritorio) | — | ~1,8 s |
+
+Probado y descartado: DINOv2 solo (real 80 % pero sintético −4,4 pt), con "registers" (peor),
+fp16 (algo mejor pero 44 MB), recorte por saliencia de DINOv2 en lugar de `pieceBox` (peor), GeM de
+los parches junto al CLS (no mejora). `tools/build-catalog-refs.mjs` genera también
+`models/recog-v3.json`, `models/recog-v3-proj-dino.bin` y `models/catalog-refs-v3.*`.
+
 ### Regenerar (cuando haya muchos productos nuevos o fotos cambiadas)
 
 ```bash
