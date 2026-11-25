@@ -1434,7 +1434,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
     uploadFile(e.dataTransfer.files[0]);
   };
 
-  const uploadGalleryFile = async file => {
+  const uploadGalleryFile = async (file, total = 1) => {
     if (!file) return;
     if (!file.type.startsWith('image/')) { setGalleryMsg('❌ No es una imagen válida.'); return; }
     if (file.size > 10 * 1024 * 1024) { setGalleryMsg('❌ Muy pesada (máx 10MB).'); return; }
@@ -1445,7 +1445,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
       const fname = `${Date.now()}_${slug}.webp`;
       const res = await apiUpload(token, `${IMAGES_PATH}/${fname}`, b64, `Imagen galería: ${fname}`);
       setForm(f => ({ ...f, images: [...(f.images || []), res.url] }));
-      setGalleryMsg('✅ Foto agregada a la galería');
+      setGalleryMsg(total > 1 ? '✅ Fotos agregadas a la galería' : '✅ Foto agregada a la galería');
     } catch (e) {
       setGalleryMsg('❌ Error al subir: ' + e.message);
     } finally { setGalleryUploading(false); }
@@ -1608,7 +1608,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
 
         {/* Additional gallery images */}
         <details style={{ marginTop: 4, marginBottom: 20, background: '#FAF7FB', borderRadius: 12, padding: '10px 14px' }}
-          open={(form.images || []).length > 0}>
+          open={(form.images || []).length > 0 || (isNew && !!imgPrev)}>
           <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600, color: '#7A6880', listStyle: 'none', display: 'flex', alignItems: 'center', gap: 6 }}>
             🖼️ Galería de fotos adicionales — {(form.images || []).length === 0 ? 'ninguna' : `${(form.images || []).length} foto${(form.images || []).length > 1 ? 's' : ''}`}
             <span style={{ fontSize: 10, fontWeight: 400, color: '#767676' }}>para el carrusel en la tienda</span>
@@ -1626,13 +1626,13 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
                 ))}
               </div>
             )}
-            <input ref={galleryFileRef} type="file" accept="image/*"
-              onChange={e => { uploadGalleryFile(e.target.files[0]); e.target.value = ''; }}
+            <input ref={galleryFileRef} type="file" accept="image/*" multiple
+              onChange={async e => { const fs = Array.from(e.target.files || []); e.target.value = ''; for (const f of fs) await uploadGalleryFile(f, fs.length); }}
               style={{ display: 'none' }} />
             <button onClick={() => !galleryUploading && galleryFileRef.current.click()}
               disabled={galleryUploading}
               style={{ width: '100%', padding: '9px', border: '2px dashed #C4A6E8', borderRadius: 10, background: 'white', color: '#9B5DE5', fontSize: 13, fontWeight: 600, cursor: galleryUploading ? 'wait' : 'pointer', opacity: galleryUploading ? 0.6 : 1 }}>
-              {galleryUploading ? '⏳ Subiendo…' : '+ Agregar otra foto al carrusel'}
+              {galleryUploading ? '⏳ Subiendo…' : '+ Agregar más fotos (vista lateral, con modelo…)'}
             </button>
             {galleryMsg && <div role="status" aria-live="polite" style={{ fontSize: 12, marginTop: 6, color: galleryMsg.startsWith('✅') ? '#065F46' : '#DC2626', fontWeight: 500 }}>{galleryMsg}</div>}
           </div>
