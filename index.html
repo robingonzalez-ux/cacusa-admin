@@ -414,6 +414,26 @@ async function translateToEnDetailed(text) {
 async function translateToEn(text) {
   return (await translateToEnDetailed(text)).text;
 }
+// Nombre/descripción de un producto al inglés (25 nov): primero el Worker (/product/translate,
+// Claude Haiku), y ante cualquier error (503 sin clave, 429 tope diario, red) MyMemory como antes,
+// en silencio. Solo traduce los campos que se piden (los vacíos). → { name: {text, ok}, description: {text, ok} }
+async function translateProductEn(token, { name, description }) {
+  const want = { name: !!(name && name.trim()), description: !!(description && description.trim()) };
+  const out = { name: { text: '', ok: true }, description: { text: '', ok: true } };
+  if (!want.name && !want.description) return out;
+  try {
+    const body = { token }; if (want.name) body.name = name.trim(); if (want.description) body.description = description.trim();
+    const r = await apiCall('product/translate', body);
+    const n = r && typeof r.name_en === 'string' ? r.name_en.trim() : '', d = r && typeof r.description_en === 'string' ? r.description_en.trim() : '';
+    if ((!want.name || n) && (!want.description || d)) {
+      if (want.name) out.name = { text: n, ok: true };
+      if (want.description) out.description = { text: d, ok: true };
+      return out;
+    }
+  } catch (_) { /* respaldo: MyMemory */ }
+  const [nr, dr] = await Promise.all([want.name ? translateToEnDetailed(name) : out.name, want.description ? translateToEnDetailed(description) : out.description]);
+  return { name: nr, description: dr };
+}
 // Traduce el bloque "texts" (cabecera de la tienda) al inglés
 async function translateTextsBlock(texts) {
   const t = async s => s ? await translateToEn(s) : '';
@@ -1481,10 +1501,8 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
     if (needName || needDesc) {
       setTranslating(true);
       try {
-        const [nRes, dRes] = await Promise.all([
-          needName ? translateToEnDetailed(form.name) : Promise.resolve({ text: name_en, ok: true }),
-          needDesc ? translateToEnDetailed(form.description || '') : Promise.resolve({ text: description_en, ok: true })
-        ]);
+        const tr = await translateProductEn(token, { name: needName ? form.name : '', description: needDesc ? (form.description || '') : '' });
+        const nRes = needName ? tr.name : { text: name_en, ok: true }, dRes = needDesc ? tr.description : { text: description_en, ok: true };
         name_en = nRes.text; description_en = dRes.text;
         if (!nRes.ok || !dRes.ok) {
           setTranslating(false);
@@ -2645,10 +2663,42 @@ function prewarmRecognition(products) {
   }, 300);
 }
 let _prepShared = null; // { key, promise }
+let _prepLast = null;   // última preparación terminada (para "similar" al publicar sin bajar nada)
+// Vector de cada producto = promedio normalizado de sus referencias (foto(s) del catálogo y
+// variantes). Sirve para "similar" (También te puede gustar) y para las sugerencias de Lovers.
+function productVectors(items) {
+  const m = new Map();
+  for (const it of items || []) {
+    const refs = [it.emb, ...(it.aug || [])], v = new Float32Array(EMB_DIM);
+    for (const r of refs) for (let i = 0; i < EMB_DIM; i++) v[i] += r[i];
+    m.set(String(it.p.id), l2norm(v));
+  }
+  return m;
+}
+// Hasta k productos más parecidos a cada uno (coseno entre vectores de producto). → Map id → [ids]
+const SIMILAR_K = 8;
+function computeSimilarMap(items, k = SIMILAR_K) {
+  const vecs = productVectors(items), ids = [...vecs.keys()], out = new Map();
+  for (const a of ids) {
+    const va = vecs.get(a), sc = [];
+    for (const b of ids) if (b !== a) sc.push([dot(va, vecs.get(b)), b]);
+    sc.sort((x, y) => y[0] - x[0]);
+    out.set(a, sc.slice(0, k).map(x => x[1]));
+  }
+  return out;
+}
+// Aplica "similar" a la lista de productos (solo los que tienen vector; el resto queda igual).
+function withSimilar(products, simMap) {
+  const byStr = new Map((products || []).map(p => [String(p.id), p.id]));
+  return (products || []).map(p => {
+    const s = simMap.get(String(p.id));
+    return s ? { ...p, similar: s.filter(id => byStr.has(id)).map(id => byStr.get(id)) } : p;
+  });
+}
 function prepareCatalogShared(products, onProgress) {
   const key = (products || []).map(p => p && (p.id + ':' + (p.available === false ? 0 : 1) + ':' + (p.imageUrl || '') + ':' + ((p.images || []).length))).join('|');
   if (_prepShared && _prepShared.key === key) return _prepShared.promise;
-  const promise = (async () => { await loadRecognitionModel(); return prepareCatalogEmbeddings(products, onProgress); })();
+  const promise = (async () => { await loadRecognitionModel(); const r = await prepareCatalogEmbeddings(products, onProgress); _prepLast = r; return r; })();
   _prepShared = { key, promise };
   promise.catch(() => { if (_prepShared && _prepShared.promise === promise) _prepShared = null; });
   return promise;
@@ -4579,12 +4629,87 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
   );
 }
 
-function OrderCard({ order, token, uspsDefault, products, categories, stock, onStockRefresh, onStatusChange, onDelete, onTrackingChange, onCarrierChange, onClienteUpdate, onLabelGenerated, onProductsChange }) {
+// ── Cacusa Lovers: sugerir las piezas de la caja (25 nov) ──
+// Candidatas: con stock > 0, de acero inoxidable (las cajas son "2 piezas de acero inoxidable"; si
+// no alcanzan, cualquiera, con aviso). Se descartan las que ya recibió la suscriptora (pedidos de
+// Lovers anteriores con su mismo email, o su teléfono si no hay email) y las MUY parecidas a esas
+// (coseno de la huella v3 > LOVERS_SIM_MAX). Se eligen distintas: otra categoría si se puede y
+// poco parecidas entre sí. Nunca se agregan solas.
+const LOVERS_SIM_MAX = 0.8, LOVERS_STEEL_RE = /acero/i;
+function loversSubscriberKey(o) {
+  const c = (o && o.cliente) || {}, email = String(c.email || '').trim().toLowerCase();
+  if (email) return 'e:' + email;
+  const tel = String(c.telefono || '').replace(/\D/g, '');
+  return tel.length >= 7 ? 't:' + tel : '';
+}
+function suggestLoversPieces(order, orders, products, stock, vecs, n) {
+  const key = loversSubscriberKey(order);
+  const prevOrders = key ? (orders || []).filter(o => o && o.id !== order.id && isLoversBox(o) && loversSubscriberKey(o) === key) : [];
+  const prevIds = new Set(prevOrders.flatMap(o => (o.productos || []).map(x => String(x && x.id)).filter(Boolean)));
+  const curIds = new Set((order.productos || []).map(x => String(x && x.id)).filter(Boolean));
+  const byId = new Map((products || []).map(p => [String(p.id), p]));
+  const prevProds = [...prevIds].map(id => byId.get(id)).filter(Boolean), curProds = [...curIds].map(id => byId.get(id)).filter(Boolean);
+  const prevCats = new Set(prevProds.map(p => p.category)), curCats = new Set(curProds.map(p => p.category));
+  const qty = id => (stock ? stockOf(stock, id) : null);
+  let cands = (products || []).filter(p => p && p.available !== false && productImageUrl(p) && !prevIds.has(String(p.id)) && !curIds.has(String(p.id)) && (qty(p.id) || 0) > 0);
+  const steel = cands.filter(p => LOVERS_STEEL_RE.test(String(p.material || '')));
+  const notes = [];
+  if (steel.length >= n) cands = steel; else notes.push('No hay suficientes piezas de acero inoxidable con stock: se sugieren de otros materiales.');
+  const v = id => (vecs ? vecs.get(String(id)) : null);
+  const simTo = (p, list) => { const a = v(p.id); let m = 0; if (!a) return 0; for (const q of list) { const b = v(q.id); if (b) m = Math.max(m, dot(a, b)); } return m; };
+  const prevVecs = [...prevProds, ...curProds];
+  let pool = cands.map(p => ({ p, simPrev: simTo(p, prevProds), simCur: simTo(p, curProds) }));
+  const far = pool.filter(x => x.simPrev <= LOVERS_SIM_MAX && x.simCur <= LOVERS_SIM_MAX);
+  if (far.length >= n) pool = far; else if (vecs && prevVecs.length) notes.push('Quedan pocas piezas distintas de lo que ya recibió.');
+  const picks = [];
+  for (let k = 0; k < n && pool.length; k++) {
+    const used = new Set([...curCats, ...picks.map(x => x.p.category)]);
+    const score = x => (prevCats.has(x.p.category) ? 1 : 0) + (used.has(x.p.category) ? 2 : 0) + x.simPrev + x.simCur + (picks.length ? simTo(x.p, picks.map(y => y.p)) : 0);
+    pool.sort((a, b) => score(a) - score(b) || String(a.p.sku || '').localeCompare(String(b.p.sku || '')));
+    const best = pool.shift(); picks.push(best);
+  }
+  const catLabel = c => String(c || 'esa categoría').toLowerCase();
+  return {
+    first: !prevOrders.length, notes,
+    picks: picks.map((x, i) => {
+      const parts = [];
+      parts.push(!prevOrders.length ? 'Primera caja de esta suscriptora' : prevCats.has(x.p.category) ? `Ya recibió ${catLabel(x.p.category)}, pero distinta` : `Nunca le enviaste ${catLabel(x.p.category)}`);
+      if (vecs && prevProds.length) parts.push(x.simPrev < 0.5 ? 'no se parece a lo de meses anteriores' : 'distinta de lo que ya recibió');
+      if (i > 0) parts.push('distinta de la otra sugerida');
+      if (LOVERS_STEEL_RE.test(String(x.p.material || ''))) parts.push('acero inoxidable');
+      return { p: x.p, line: parts.join(' · ') };
+    }),
+  };
+}
+function OrderCard({ order, token, uspsDefault, products, categories, stock, onStockRefresh, onStatusChange, onDelete, onTrackingChange, onCarrierChange, onClienteUpdate, onLabelGenerated, onProductsChange, orders = [] }) {
   const [showLabelModal, setShowLabelModal] = React.useState(false);
   // ── Agregar pieza con foto ──
   const canLoadPieces = orderAllowsPieceLoad(order);
   const pieceInputRef = React.useRef(null);
   const [piecePhoto, setPiecePhoto]   = React.useState(null); // { base64, dataUrl }
+  const [lovSug, setLovSug]           = React.useState(null); // ✦ Sugerir piezas (Lovers): { busy, picks, notes, error }
+  const [lovAdding, setLovAdding]     = React.useState(null);
+  const suggestLovers = async () => {
+    const n = loversMissingPieces(order);
+    if (!n || (lovSug && lovSug.busy)) return;
+    setLovSug({ busy: true });
+    let vecs = null, notes = [];
+    try { const r = await prepareCatalogShared(products); vecs = productVectors(r.items); }
+    catch (_) { notes = ['El identificador no cargó: se sugiere sin comparar parecidos.']; }
+    const res = suggestLoversPieces(order, orders, products, stock, vecs, n);
+    setLovSug({ busy: false, picks: res.picks, notes: [...notes, ...res.notes] });
+  };
+  const addLoversPick = async p => {
+    if (lovAdding) return;
+    setLovAdding(String(p.id));
+    try {
+      const res = await apiCall('order/update', { token, id: order.id, patch: { addProductIds: [String(p.id)] } });
+      if (res.order && Array.isArray(res.order.productos)) onProductsChange && onProductsChange(order, res.order.productos);
+      setLovSug(s => (s ? { ...s, picks: (s.picks || []).filter(x => String(x.p.id) !== String(p.id)) } : s));
+      onStockRefresh && onStockRefresh();
+    } catch (e) { setLovSug(s => ({ ...(s || {}), error: pieceErrMsg(e) })); }
+    setLovAdding(null);
+  };
   const [pieceOpen, setPieceOpen]     = React.useState(false);
   const [pieceMsg, setPieceMsg]       = React.useState('');
   const [pieceErr, setPieceErr]       = React.useState('');
@@ -4945,6 +5070,30 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
       {loversMissingPieces(order) > 0 && estado !== 'Cancelado' && (
         <div role="status" style={{ fontSize: 12, fontWeight: 600, color: '#92400E', background: '#FEF3C7', borderRadius: 8, padding: '6px 10px' }}>
           Faltan {loversMissingPieces(order)} de {LOVERS_PIECES_REQUIRED} joyas por cargar antes de enviar.
+          <button type="button" onClick={suggestLovers} disabled={lovSug && lovSug.busy} data-testid="loversSuggest"
+            style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 99, border: 'none', background: '#1A1118', color: 'white', fontWeight: 700, fontSize: 11, cursor: 'pointer' }}>
+            {lovSug && lovSug.busy ? 'Buscando…' : '✦ Sugerir ' + loversMissingPieces(order) + ' pieza' + (loversMissingPieces(order) === 1 ? '' : 's')}
+          </button>
+        </div>
+      )}
+      {lovSug && !lovSug.busy && (
+        <div data-testid="loversPicks" style={{ background: '#F7F3FA', borderRadius: 10, padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {lovSug.error && <div role="alert" style={{ fontSize: 12, color: '#DC2626' }}>{lovSug.error}</div>}
+          {(lovSug.notes || []).map((t, i) => <div key={i} style={{ fontSize: 11, color: '#92400E' }}>{t}</div>)}
+          {lovSug.picks && !lovSug.picks.length && !lovSug.error && <div style={{ fontSize: 12, color: '#7A6880' }}>No hay piezas con stock para sugerir.</div>}
+          {(lovSug.picks || []).map(x => (
+            <div key={x.p.id} data-testid="loversPick" style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'white', borderRadius: 8, padding: 6 }}>
+              <img src={productImageUrl(x.p)} alt="" style={{ width: 44, height: 44, borderRadius: 8, objectFit: 'cover', flexShrink: 0 }} />
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#1A1118' }}>{x.p.name} <SkuChip sku={normalizeSku(x.p.sku)} /></span>
+                <span style={{ display: 'block', fontSize: 11, color: '#5B3F8A' }}>{x.line}</span>
+              </span>
+              <button type="button" onClick={() => addLoversPick(x.p)} disabled={!!lovAdding} aria-label={'Agregar ' + x.p.name + ' a la caja'}
+                style={{ padding: '6px 12px', borderRadius: 99, border: 'none', background: 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', fontWeight: 700, fontSize: 12, cursor: 'pointer', flexShrink: 0 }}>
+                {lovAdding === String(x.p.id) ? '…' : 'Agregar'}
+              </button>
+            </div>
+          ))}
         </div>
       )}
       {order.notas && <div style={{ fontSize: 12, color: '#7A6880', fontStyle: 'italic' }}>📝 {order.notas}</div>}
@@ -8148,6 +8297,8 @@ function App() {
   const [skuSeq, setSkuSeq]                 = useState({}); // config.skuSeq: último número entregado por prefijo
   const [showLabels, setShowLabels]         = useState(false);
   const [showEnroll, setShowEnroll]         = useState(false);
+  const [recoBusy, setRecoBusy]             = useState(false); // "También te puede gustar" (similar)
+  const [recoMsg, setRecoMsg]               = useState('');
   const [enrollOnly, setEnrollOnly]         = useState(null); // id: "Registrar fotos" de una sola pieza
   const refCounts = useRefCounts(session && session.token);
   const [tiktokExportBusy, setTiktokExportBusy] = useState(false);
@@ -8344,6 +8495,20 @@ function App() {
     setLoading(false);
   };
 
+  // ✦ Actualizar recomendaciones (25 nov): para cada producto, hasta 8 parecidos por la huella v3 →
+  // campo "similar" (la tienda los muestra en "También te puede gustar"). Con el botón sí se prepara
+  // el identificador (y se baja la primera vez); al publicar solo si ya estaba preparado.
+  const updateSimilar = async () => {
+    if (recoBusy) return;
+    setRecoBusy(true); setRecoMsg('Preparando las huellas del catálogo (la primera vez descarga ~55 MB)…');
+    try {
+      const r = await prepareCatalogShared(products);
+      const sim = computeSimilarMap(r.items);
+      setProducts(ps => withSimilar(ps, sim)); setDirty(true);
+      setRecoMsg(`✓ Recomendaciones listas para ${sim.size} productos. Publica los cambios para subirlas a la tienda.`);
+    } catch (e) { setRecoMsg('No se pudieron calcular las recomendaciones: ' + ((e && e.message) || 'error')); }
+    setRecoBusy(false);
+  };
   const publish = async () => {
     const campProblems = campaignDateProblems(campaign);
     if (campProblems.length) {
@@ -8379,10 +8544,8 @@ function App() {
         prodsOut = [];
         for (const p of products) {
           if (p.name && (!p.name_en || !p.description_en)) {
-            const [nRes, dRes] = await Promise.all([
-              p.name_en ? Promise.resolve({ text: p.name_en, ok: true }) : translateToEnDetailed(p.name),
-              p.description_en ? Promise.resolve({ text: p.description_en, ok: true }) : translateToEnDetailed(p.description || '')
-            ]);
+            const tr = await translateProductEn(session.token, { name: p.name_en ? '' : p.name, description: p.description_en ? '' : (p.description || '') });
+            const nRes = p.name_en ? { text: p.name_en, ok: true } : tr.name, dRes = p.description_en ? { text: p.description_en, ok: true } : tr.description;
             if (!nRes.ok || !dRes.ok) failedTr.push(p.name);
             prodsOut.push({ ...p, name_en: nRes.text, description_en: dRes.text });
           } else prodsOut.push(p);
@@ -8399,6 +8562,11 @@ function App() {
       const seqOut = { ...asg.seq };
       prodsOut.forEach(p => { const s = normalizeSku(p.sku); if (SKU_RE.test(s)) { const k = s.slice(0, 2), n = parseInt(s.slice(2), 10); if (!(seqOut[k] >= n)) seqOut[k] = n; } });
       setSkuSeq(seqOut);
+      // "similar" (También te puede gustar): solo si el identificador ya preparó el catálogo en esta
+      // sesión (nunca se fuerza la descarga al publicar); si no, quedan los valores que ya tenían.
+      if (_prepLast && Array.isArray(_prepLast.items) && _prepLast.items.length > 1) {
+        prodsOut = withSimilar(prodsOut, computeSimilarMap(_prepLast.items)); setProducts(prodsOut);
+      }
       setSyncMsg('☁️ Guardando de forma segura…');
       const json = JSON.stringify({
         version: '1.0',
@@ -8675,7 +8843,12 @@ function App() {
                 style={{ padding: '10px 16px', background: 'white', color: '#5B3F8A', border: '1.5px solid #D9C9EE', borderRadius: 99, fontWeight: 700, fontSize: 13, whiteSpace: 'nowrap', cursor: 'pointer' }}>
                 📸 Registrar fotos
               </button>
+              <button onClick={updateSimilar} disabled={recoBusy} aria-busy={recoBusy} data-testid="updateSimilar"
+                style={{ padding: '10px 16px', background: 'white', color: '#5B3F8A', border: '1.5px solid #D9C9EE', borderRadius: 99, fontWeight: 700, fontSize: 13, whiteSpace: 'nowrap', cursor: recoBusy ? 'default' : 'pointer', opacity: recoBusy ? .7 : 1 }}>
+                {recoBusy ? 'Calculando…' : '✦ Actualizar recomendaciones'}
+              </button>
             </div>
+            {recoMsg && <div role="status" aria-live="polite" data-testid="recoMsg" style={{ fontSize: 12, color: recoMsg.startsWith('✓') ? '#15803D' : '#7A6880', margin: '-6px 0 10px' }}>{recoMsg}</div>}
             {showLabels && <LabelsModal products={products} categories={categories} stock={stock} onClose={() => setShowLabels(false)} />}
             {showEnroll && !enrollOnly && <EnrollPhotosModal products={products} token={session.token} onClose={() => setShowEnroll(false)} />}
 
@@ -8854,7 +9027,7 @@ function App() {
                           </div>
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 14 }}>
                             {grupo.map(o => (
-                              <OrderCard key={o.id} order={o} token={session.token} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
+                              <OrderCard key={o.id} order={o} orders={orders} token={session.token} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
                                 products={products} categories={categories} stock={stock} onStockRefresh={loadStock}
                                 onProductsChange={(ord, productos) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, productos } : x)); }}
                                 onStatusChange={(ord, newState) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, estado: newState } : x)); updateOrderRemote(ord.id, { estado: newState }); if (newState === 'Cancelado') setTimeout(loadStock, 1500); }}
@@ -8926,7 +9099,7 @@ function App() {
                             </div>
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 14 }}>
                               {grupo.map(o => (
-                                <OrderCard key={o.id} order={o} token={session.token} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
+                                <OrderCard key={o.id} order={o} orders={orders} token={session.token} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
                                   products={products} categories={categories} stock={stock} onStockRefresh={loadStock}
                                   onProductsChange={(ord, productos) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, productos } : x)); }}
                                   onStatusChange={(ord, newState) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, estado: newState } : x)); updateOrderRemote(ord.id, { estado: newState }); if (newState === 'Cancelado') setTimeout(loadStock, 1500); }}

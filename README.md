@@ -187,6 +187,22 @@ los parches junto al CLS (no mejora). `tools/build-catalog-refs.mjs` genera tamb
   (+2). DINOv3-small (licencia "DINOv3 License" de Meta, no Apache) en lugar de DINOv2: +1 búsqueda
   real y −0,5 pt en la mitad de ajuste sintética; no entra.
 
+### Panel con IA (25 nov)
+
+- **"También te puede gustar"**: cada producto activo guarda `similar` (hasta 8 ids, por coseno
+  entre los vectores de producto de la huella v3: promedio de sus referencias). Se calcula con
+  "✦ Actualizar recomendaciones" (Productos) o al publicar, solo si el identificador ya preparó el
+  catálogo en esa sesión (nunca fuerza la descarga); si no, quedan los valores anteriores.
+- **Lovers, "✦ Sugerir 2 piezas"**: candidatas con stock y de acero inoxidable (si no alcanzan,
+  cualquiera, con aviso), sin repetir lo que ya recibió la suscriptora (pedidos de Lovers con su
+  mismo email, o teléfono) ni piezas muy parecidas (coseno > 0,8); distintas entre sí (otra
+  categoría si se puede). Cada una con una línea de por qué y "Agregar"; nunca se agregan solas.
+- **Traducción ES→EN de fichas**: `/product/translate` del Worker (Claude Haiku); ante cualquier
+  error (503, 429, red) MyMemory como antes, en silencio. Solo traduce campos vacíos.
+- **Fondo parejo**: evaluado con u2netp (Apache-2.0, 4,6 MB) y no se agregó: recorta bien piezas
+  sueltas sobre fondo liso, pero con la mano, el mantel estampado, cadenas finas o bandejas se
+  queda con la mano o el fondo.
+
 ### Regenerar (cuando haya muchos productos nuevos o fotos cambiadas)
 
 ```bash
