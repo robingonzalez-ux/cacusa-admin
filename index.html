@@ -1410,6 +1410,8 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
       const sug = localProductSuggestion(q, items, { tone: photoTone(img) });
       if (!sug) throw new Error('No hay piezas del catálogo para comparar.');
       const top3 = sug.neighbors.slice(0, 3);
+      const close = sug.neighbors.filter(x => x.score >= SUGGEST_MIN);
+      const hasClose = close.length > 0;
       let ai = null, note = '';
       try {
         // Foto achicada (máx. 768 px, JPEG 0,8; < 600 KB) para la IA.
@@ -1419,15 +1421,16 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
         let qual = 0.8, b64 = cv.toDataURL('image/jpeg', qual).split(',')[1];
         while (b64.length * 0.75 > 600 * 1024 && qual > 0.4) { qual -= 0.1; b64 = cv.toDataURL('image/jpeg', qual).split(',')[1]; }
         setSugPhase('Escribiendo nombre y descripción…');
-        const r = await apiCall('product/describe', { token, image: b64, mediaType: 'image/jpeg', neighborIds: top3.map(x => String(x.p.id)), hints: { category: sug.category, material: sug.material } });
+        const r = await apiCall('product/describe', { token, image: b64, mediaType: 'image/jpeg', neighborIds: top3.map(x => String(x.p.id)), hints: hasClose ? { category: sug.category, material: sug.material } : {} });
         ai = r && r.suggestion && typeof r.suggestion.name === 'string' && r.suggestion.name.trim() ? r.suggestion : null;
         if (!ai) note = 'IA no disponible, sugerencia básica';
       } catch (e) {
         note = e && e.status === 503 ? 'Sugerencia básica (IA no activada)' : e && e.status === 429 ? 'Sugerencia básica (límite de hoy)' : 'IA no disponible, sugerencia básica';
       }
       // Categoría y material: el voto local manda si es claro; si no, lo de la IA (si es válido).
-      const catAi = ai && sug.catShare < SUGGEST_STRONG && cats.includes(ai.category);
-      const matAi = ai && sug.matShare < SUGGEST_STRONG && mats.includes(ai.material);
+      // Sin piezas parecidas de verdad, la categoría y el material los decide la IA (mira la foto).
+      const catAi = ai && (!hasClose || sug.catShare < SUGGEST_STRONG) && cats.includes(ai.category);
+      const matAi = ai && (!hasClose || sug.matShare < SUGGEST_STRONG) && mats.includes(ai.material);
       const category = catAi ? ai.category : sug.category, material = matAi ? ai.material : sug.material;
       // Las plantillas usan la categoría/material que quedan en el formulario (si se eligieron a mano, esas).
       const tpl = templateProductText(sug, touched.current.has('category') ? form.category : category, touched.current.has('material') ? form.material : material);
@@ -1439,13 +1442,14 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
         for (const k2 of ['name', 'name_en', 'description', 'description_en']) { const [v, tag] = text(k2); fill(k2, v, tag, !String(f[k2] || '').trim()); }
         if (cats.includes(category)) fill('category', category, catAi ? 'ia' : 'local', true);
         if (mats.includes(material)) fill('material', material, matAi ? 'ia' : 'local', true);
-        if (sug.price) fill('price', String(sug.price), 'local', String(f.price ?? '').trim() === '');
-        if (sug.color && COLORS[sug.color]) fill('color', sug.color, 'local', true);
+        if (hasClose && sug.price) fill('price', String(sug.price), 'local', String(f.price ?? '').trim() === '');
+        if (hasClose && sug.color && COLORS[sug.color]) fill('color', sug.color, 'local', true);
         if (!touched.current.has('personalized')) n.personalized = false;
         return n;
       });
       setTimeout(() => setSugTags(t => ({ ...t, ...tags })), 0);
-      setSugInfo({ note, neighbors: top3.map(x => ({ id: String(x.p.id), sku: normalizeSku(x.p.sku) || x.p.name, name: x.p.name, img: productImageUrl(x.p) })) });
+      if (!hasClose) note = (note ? note + '. ' : '') + 'No encontré piezas parecidas en tu catálogo (diseño nuevo): revisa el precio';
+      setSugInfo({ note, neighbors: close.slice(0, 3).map(x => ({ id: String(x.p.id), sku: normalizeSku(x.p.sku) || x.p.name, name: x.p.name, img: productImageUrl(x.p) })) });
     } catch (e) {
       setSugInfo({ note: 'No se pudo sugerir: ' + ((e && e.message) || 'error'), neighbors: [] });
     }
@@ -3356,6 +3360,10 @@ function rankCatalogMulti(queries, items, refs, category, topN = 5) {
 // de las parecidas. Nombre y descripción: plantillas por categoría (o Claude
 // Haiku vía /product/describe, si está activado). Medido con tools/eval-catalog-refs.mjs --autofill.
 const SUGGEST_K = 7, SUGGEST_STRONG = 0.6; // voto "fuerte" = ≥ 60 % del peso
+// Por debajo de este puntaje una pieza del catálogo NO se considera parecida: no se muestra en
+// "Se parece a" ni se usa para el precio/categoría (las piezas nuevas reales del taller dieron
+// máx. 0,369 contra el catálogo, ver DUP_*). Así un diseño nuevo no se fuerza a parecerse a nada.
+const SUGGEST_MIN = 0.33;
 function voteBy(list, key) {
   const acc = new Map(); let tot = 0;
   for (const x of list) { const v = key(x.p); if (v == null || v === '') continue; acc.set(v, (acc.get(v) || 0) + x.w); tot += x.w; }
