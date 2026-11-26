@@ -34,6 +34,12 @@ a{text-decoration:none;color:inherit}
 *:focus-visible{outline:2px solid #E85D8A!important;outline-offset:2px!important}
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes sheetUp{from{transform:translateY(40px);opacity:.6}to{transform:translateY(0);opacity:1}}
+/* Rediseño (27 nov): navegación, chips desplazables y números sin flechas */
+.adm-scrollx{scrollbar-width:none}.adm-scrollx::-webkit-scrollbar{display:none}
+@media (hover:hover){.adm-side button:not([aria-current]):hover{background:#F6EEF4}}
+input[type=number].adm-nospin::-webkit-inner-spin-button,input[type=number].adm-nospin::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+@media (prefers-reduced-motion: reduce){*{animation-duration:.01ms!important;transition-duration:.01ms!important}}
 </style>
 </head>
 <body>
@@ -995,7 +1001,7 @@ function StockBadge({ qty, style }) {
   const out = qty <= 0;
   return <span style={{ background: out ? '#DC2626' : '#F59E0B', color: 'white', fontSize: 9, fontWeight: 800, padding: '3px 8px', borderRadius: 99, ...style }}>{out ? 'Agotado (stock 0)' : `Quedan ${qty}`}</span>;
 }
-function StockEditor({ productId, sku, qty, onSave }) {
+function StockEditor({ productId, sku, qty, onSave, hintId }) {
   const [draft, setDraft] = React.useState(String(qty));
   const [state, setState] = React.useState(''); // '' | 'saving' | 'ok' | mensaje de error
   React.useEffect(() => { setDraft(String(qty)); }, [qty]);
@@ -1016,13 +1022,13 @@ function StockEditor({ productId, sku, qty, onSave }) {
         <input id={inputId} type="number" inputMode="numeric" min={0} max={9999} step={1} value={draft}
           onChange={e => setDraft(e.target.value)} onBlur={commit}
           onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur(); } }}
-          aria-describedby={`${inputId}-hint`}
+          aria-describedby={hintId || `${inputId}-hint`}
           style={{ width: 64, padding: '4px 6px', border: '1.5px solid #E5DDEA', borderRadius: 6, fontSize: 12, outline: 'none' }} />
         <span role="status" aria-live="polite" style={{ fontSize: 10, color: state === 'ok' ? '#15803D' : state === 'saving' ? '#7A6880' : '#DC2626' }}>
           {state === 'saving' ? 'Guardando…' : state === 'ok' ? '✓ Guardado' : state}
         </span>
       </div>
-      <div id={`${inputId}-hint`} style={{ fontSize: 9, color: '#7A6880', marginTop: 2 }}>Por defecto 1 unidad; súbelo si tienes más.</div>
+      {!hintId && <div id={`${inputId}-hint`} style={{ fontSize: 9, color: '#7A6880', marginTop: 2 }}>Por defecto 1 unidad; súbelo si tienes más.</div>}
     </div>
   );
 }
@@ -1216,7 +1222,7 @@ function RefBadge({ n, style }) {
     style={{ fontSize: 10, fontWeight: 800, color: n ? '#15803D' : '#B45309', background: n ? '#DCFCE7' : '#FEF3C7', padding: '2px 7px', borderRadius: 99, whiteSpace: 'nowrap', ...style }}>◇ {n} foto{n === 1 ? '' : 's'} real{n === 1 ? '' : 'es'}</span>;
 }
 
-function ProductCard({ p, onEdit, onDelete, onToggle, onMoveUp, onMoveDown, canUp, canDown, stockQty, onStockSave, refN, select }) {
+function ProductCard({ p, onEdit, onDelete, onToggle, onMoveUp, onMoveDown, canUp, canDown, stockQty, onStockSave, refN, select, sortMode, hintId }) {
   const active = p.available !== false;
   return (
     <div data-testid="productCard" style={{ background: 'white', borderRadius: 18, overflow: 'hidden', boxShadow: select && select.checked ? '0 0 0 3px #9B5DE5' : '0 2px 14px rgba(0,0,0,.07)', opacity: active || select ? 1 : .52, transition: 'all .25s', display: 'flex', flexDirection: 'column', animation: 'fadeIn .3s ease' }}>
@@ -1234,12 +1240,12 @@ function ProductCard({ p, onEdit, onDelete, onToggle, onMoveUp, onMoveDown, canU
         {p.tag && <span style={{ position: 'absolute', top: 9, left: 9, background: '#E85D8A', color: 'white', fontSize: 9, fontWeight: 700, padding: '3px 9px', borderRadius: 99, letterSpacing: '.1em', textTransform: 'uppercase' }}>{p.tag}</span>}
         <span style={{ position: 'absolute', top: 9, right: 9, background: active ? '#D1FAE5' : '#FEE2E2', color: active ? '#065F46' : '#DC2626', fontSize: 9, fontWeight: 700, padding: '3px 9px', borderRadius: 99 }}>{active ? 'ACTIVO' : 'INACTIVO'}</span>
         {stockQty != null && <StockBadge qty={stockQty} style={{ position: 'absolute', bottom: 8, left: 9 }} />}
-        <div style={{ position: 'absolute', bottom: 6, right: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <button onClick={e => { e.stopPropagation(); onMoveUp(p); }} disabled={!canUp}
-            style={{ width: 20, height: 18, background: 'rgba(0,0,0,.4)', color: 'white', borderRadius: 4, fontSize: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: canUp ? 1 : .3, border: 'none', cursor: canUp ? 'pointer' : 'default' }}>▲</button>
-          <button onClick={e => { e.stopPropagation(); onMoveDown(p); }} disabled={!canDown}
-            style={{ width: 20, height: 18, background: 'rgba(0,0,0,.4)', color: 'white', borderRadius: 4, fontSize: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: canDown ? 1 : .3, border: 'none', cursor: canDown ? 'pointer' : 'default' }}>▼</button>
-        </div>
+        {sortMode && <div style={{ position: 'absolute', bottom: 6, right: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <button onClick={e => { e.stopPropagation(); onMoveUp(p); }} disabled={!canUp} aria-label={'Subir ' + p.name}
+            style={{ width: 40, height: 36, background: 'rgba(26,17,36,.7)', color: 'white', borderRadius: 8, fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: canUp ? 1 : .3, border: 'none', cursor: canUp ? 'pointer' : 'default' }}>▲</button>
+          <button onClick={e => { e.stopPropagation(); onMoveDown(p); }} disabled={!canDown} aria-label={'Bajar ' + p.name}
+            style={{ width: 40, height: 36, background: 'rgba(26,17,36,.7)', color: 'white', borderRadius: 8, fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: canDown ? 1 : .3, border: 'none', cursor: canDown ? 'pointer' : 'default' }}>▼</button>
+        </div>}
       </div>
       <div style={{ padding: '12px 14px', flex: 1, display: 'flex', flexDirection: 'column', gap: 5 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
@@ -1252,21 +1258,23 @@ function ProductCard({ p, onEdit, onDelete, onToggle, onMoveUp, onMoveDown, canU
           <span style={{ fontWeight: 800, color: '#C9A84C', fontSize: 15 }}>${p.price}</span>
           {p.oldPrice && <span style={{ fontSize: 12, color: '#707070', textDecoration: 'line-through' }}>${p.oldPrice}</span>}
         </div>
-        {onStockSave && stockQty != null && <StockEditor productId={p.id} sku={p.sku} qty={stockQty} onSave={onStockSave} />}
+        {onStockSave && stockQty != null && <StockEditor productId={p.id} sku={p.sku} qty={stockQty} onSave={onStockSave} hintId={hintId} />}
         <div style={{ display: 'flex', gap: 5, marginTop: 4 }}>
-          <button onClick={() => onToggle(p)} style={{ flex: 1, padding: '5px 0', background: active ? '#FEE2E2' : '#D1FAE5', color: active ? '#DC2626' : '#065F46', borderRadius: 8, fontSize: 11, fontWeight: 600, border: 'none', cursor: 'pointer' }}>
+          <button onClick={() => onToggle(p)} style={{ flex: 1, minHeight: 36, padding: '5px 0', background: active ? '#FEE2E2' : '#D1FAE5', color: active ? '#DC2626' : '#065F46', borderRadius: 8, fontSize: 11, fontWeight: 600, border: 'none', cursor: 'pointer' }}>
             {active ? 'Pausar' : 'Activar'}
           </button>
-          <button onClick={() => onEdit(p)} style={{ flex: 1, padding: '5px 0', background: '#EDE9FE', color: '#7C3AED', borderRadius: 8, fontSize: 11, fontWeight: 600, border: 'none', cursor: 'pointer' }}>Editar</button>
-          <button onClick={() => onDelete(p)} style={{ width: 28, height: 28, background: '#FEE2E2', color: '#DC2626', borderRadius: 8, fontSize: 14, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', cursor: 'pointer' }}>✕</button>
+          <button onClick={() => onEdit(p)} style={{ flex: 1, minHeight: 36, padding: '5px 0', background: '#EDE9FE', color: '#7C3AED', borderRadius: 8, fontSize: 11, fontWeight: 600, border: 'none', cursor: 'pointer' }}>Editar</button>
+          <button onClick={() => onDelete(p)} aria-label={'Eliminar ' + p.name} style={{ width: 36, height: 36, background: '#FEE2E2', color: '#DC2626', borderRadius: 8, fontSize: 14, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', cursor: 'pointer' }}>✕</button>
         </div>
       </div>
     </div>
   );
 }
 
-// ── Image Editor (drag to pan + +/- zoom) ──────────────────────────────────
-function ImageEditor({ imgSrc, focalX, focalY, zoom, onChange }) {
+// ── Foto del producto: vista previa con el encuadre de la tienda (focal + zoom) ──
+// Una sola foto (27 nov): se ve como en la tarjeta de la tienda (cuadrada, con focalX/focalY/zoom).
+// Con "Ajustar encuadre" (adjust) la misma vista se arrastra (mouse, dedo o flechas) y aparecen − / +.
+function ImageEditor({ imgSrc, focalX, focalY, zoom, onChange, adjust = true, children }) {
   const ref  = React.useRef(null);
   const drag = React.useRef(null);
   const fx = focalX ?? 50, fy = focalY ?? 50, z = zoom ?? 1;
@@ -1281,35 +1289,44 @@ function ImageEditor({ imgSrc, focalX, focalY, zoom, onChange }) {
     });
   };
   const endDrag = () => { drag.current = null; };
-
-  const btnStyle = { width: 40, height: 40, borderRadius: 10, border: '1.5px solid #e0e0e0', background: 'white', fontSize: 22, fontWeight: 700, color: '#555', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, userSelect: 'none' };
+  const onKey = e => {
+    const d = { ArrowLeft: [-3, 0], ArrowRight: [3, 0], ArrowUp: [0, -3], ArrowDown: [0, 3] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    onChange({ focalX: Math.max(0, Math.min(100, fx + d[0])), focalY: Math.max(0, Math.min(100, fy + d[1])) });
+  };
+  const btnStyle = { width: 44, height: 44, borderRadius: 12, border: '1.5px solid #e0e0e0', background: 'white', fontSize: 22, fontWeight: 700, color: '#555', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, userSelect: 'none' };
+  const handlers = adjust ? {
+    onMouseDown: e => { startDrag(e.clientX, e.clientY); e.preventDefault(); },
+    onMouseMove: e => moveDrag(e.clientX, e.clientY),
+    onMouseUp: endDrag, onMouseLeave: endDrag,
+    onTouchStart: e => { startDrag(e.touches[0].clientX, e.touches[0].clientY); e.preventDefault(); },
+    onTouchMove: e => { moveDrag(e.touches[0].clientX, e.touches[0].clientY); e.preventDefault(); },
+    onTouchEnd: endDrag,
+    tabIndex: 0, onKeyDown: onKey, role: 'group',
+    'aria-label': 'Encuadre de la foto: arrastra o usa las flechas para mover'
+  } : {};
 
   return (
     <div>
-      <div ref={ref}
-        style={{ width: '100%', height: 220, overflow: 'hidden', borderRadius: 12, cursor: drag.current ? 'grabbing' : 'grab', touchAction: 'none', userSelect: 'none', position: 'relative', background: '#eee' }}
-        onMouseDown={e => { startDrag(e.clientX, e.clientY); e.preventDefault(); }}
-        onMouseMove={e => moveDrag(e.clientX, e.clientY)}
-        onMouseUp={endDrag} onMouseLeave={endDrag}
-        onTouchStart={e => { startDrag(e.touches[0].clientX, e.touches[0].clientY); e.preventDefault(); }}
-        onTouchMove={e => { moveDrag(e.touches[0].clientX, e.touches[0].clientY); e.preventDefault(); }}
-        onTouchEnd={endDrag}
-      >
-        <img src={imgSrc} draggable={false}
+      <div ref={ref} data-testid="photoPreview" data-adjust={adjust ? '1' : '0'} {...handlers}
+        style={{ width: '100%', aspectRatio: '1 / 1', overflow: 'hidden', borderRadius: 14, cursor: adjust ? (drag.current ? 'grabbing' : 'grab') : 'default', touchAction: adjust ? 'none' : 'auto', userSelect: 'none', position: 'relative', background: '#eee', boxShadow: adjust ? '0 0 0 3px #9B5DE5' : 'none' }}>
+        <img src={imgSrc} draggable={false} alt="Vista previa: así se ve en la tienda"
           style={{ width: '100%', height: '100%', objectFit: 'cover', objectPosition: `${fx}% ${fy}%`, transform: `scale(${z})`, transformOrigin: `${fx}% ${fy}%`, pointerEvents: 'none', display: 'block' }}
         />
-        <div style={{ position: 'absolute', top: 8, right: 8, background: 'rgba(0,0,0,.45)', color: 'white', fontSize: 11, borderRadius: 6, padding: '3px 8px', fontFamily: 'sans-serif', fontWeight: 600 }}>
+        {adjust && <div style={{ position: 'absolute', top: 8, left: 8, background: 'rgba(0,0,0,.45)', color: 'white', fontSize: 11, borderRadius: 6, padding: '3px 8px', fontWeight: 600 }}>
           {Math.round(z * 100)}%
-        </div>
-        <div style={{ position: 'absolute', bottom: 8, left: 0, right: 0, textAlign: 'center', color: 'rgba(255,255,255,.8)', fontSize: 10, fontFamily: 'sans-serif', pointerEvents: 'none' }}>
+        </div>}
+        {adjust && <div style={{ position: 'absolute', bottom: 8, left: 0, right: 0, textAlign: 'center', color: 'white', textShadow: '0 1px 3px rgba(0,0,0,.6)', fontSize: 11, fontWeight: 600, pointerEvents: 'none' }}>
           ✥ Arrastra para mover
-        </div>
+        </div>}
+        {children}
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
-        <button style={btnStyle} onClick={() => onChange({ zoom: Math.max(0.5, parseFloat((z - 0.15).toFixed(2))) })}>−</button>
-        <div style={{ flex: 1, textAlign: 'center', fontSize: 12, color: '#888' }}>🔍 Zoom</div>
-        <button style={btnStyle} onClick={() => onChange({ zoom: Math.min(3, parseFloat((z + 0.15).toFixed(2))) })}>+</button>
-      </div>
+      {adjust && <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+        <button type="button" style={btnStyle} aria-label="Alejar (menos zoom)" onClick={() => onChange({ zoom: Math.max(0.5, parseFloat((z - 0.15).toFixed(2))) })}>−</button>
+        <div style={{ flex: 1, textAlign: 'center', fontSize: 12, color: '#7A6880' }}>Zoom</div>
+        <button type="button" style={btnStyle} aria-label="Acercar (más zoom)" onClick={() => onChange({ zoom: Math.min(3, parseFloat((z + 0.15).toFixed(2))) })}>+</button>
+      </div>}
     </div>
   );
 }
@@ -1345,6 +1362,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
   const [dragOver, setDragOver] = useState(false);
+  const [photoAdjust, setPhotoAdjust] = useState(false); // "Ajustar encuadre" sobre la misma vista previa
   const [translating, setTranslating] = useState(false);
   const [translateWarn, setTranslateWarn] = useState('');
   const fileRef = useRef();
@@ -1637,32 +1655,58 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
           <button onClick={confirmClose} aria-label="Cerrar" style={{ width: 34, height: 34, borderRadius: '50%', background: '#f0f0f0', color: '#666', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', cursor: 'pointer' }}>✕</button>
         </div>
 
-        {/* Image upload */}
+        {/* Foto del producto (27 nov): un solo bloque — vista previa con el encuadre de la tienda,
+            "Cambiar foto", ✕ y "Ajustar encuadre" sobre la misma foto. Soltar un archivo sigue funcionando. */}
         <div style={{ marginBottom: 20 }}>
-          <label style={lbl}>Foto del Producto</label>
-          <div onClick={() => !uploading && fileRef.current.click()}
-            role="button" tabIndex={0} aria-label="Foto del producto — toca o arrastra una foto"
-            onKeyDown={e => { if ((e.key === 'Enter' || e.key === ' ') && !uploading) { e.preventDefault(); fileRef.current.click(); } }}
-            onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-            onDragLeave={e => { e.preventDefault(); setDragOver(false); }}
-            onDrop={handleDrop}
-            style={{ height: 160, borderRadius: 14, border: dragOver ? '2px dashed #9B5DE5' : '2px dashed #e0e0e0', cursor: uploading ? 'wait' : 'pointer', overflow: 'hidden', background: dragOver ? '#F6F0FE' : '#fafafa', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', transition: 'border-color .2s, background .2s' }}>
-            {imgPrev
-              ? <img src={imgPrev} style={{ width: '100%', height: '100%', objectFit: 'cover', objectPosition: `${form.focalX ?? 50}% ${form.focalY ?? 50}%`, transform: `scale(${form.zoom ?? 1})`, transformOrigin: `${form.focalX ?? 50}% ${form.focalY ?? 50}%` }} alt="preview" />
-              : <div style={{ textAlign: 'center', color: dragOver ? '#9B5DE5' : '#707070', pointerEvents: 'none' }}>
-                  <div style={{ fontSize: 40, marginBottom: 6 }}>{dragOver ? '⬇️' : '📸'}</div>
-                  <div style={{ fontSize: 14, fontWeight: 600 }}>{dragOver ? 'Suelta la foto aquí' : 'Toca para elegir una foto'}</div>
-                  <div style={{ fontSize: 12, marginTop: 3 }}>o arrástrala aquí · JPG · PNG · WebP</div>
-                </div>}
-            {imgPrev && !uploading &&
-              <button onClick={e => { e.stopPropagation(); setImgPrev(''); set('imageUrl', ''); setUploadMsg(''); }}
-                style={{ position: 'absolute', top: 8, right: 8, width: 30, height: 30, borderRadius: '50%', background: 'rgba(26,17,36,.7)', color: 'white', fontSize: 15, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', cursor: 'pointer' }}
-                title="Quitar foto">✕</button>}
-            {uploading && <div style={{ position: 'absolute', inset: 0, background: 'rgba(255,255,255,.88)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, color: '#9B5DE5', fontWeight: 600 }}>⏳ Subiendo foto…</div>}
-          </div>
-          <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: 'none' }} />
+          <label style={lbl} id="pmPhotoLbl">Foto del Producto</label>
+          <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: 'none' }} aria-labelledby="pmPhotoLbl" />
+          {!imgPrev ? (
+            <div onClick={() => !uploading && fileRef.current.click()}
+              role="button" tabIndex={0} aria-label="Foto del producto — toca o arrastra una foto"
+              onKeyDown={e => { if ((e.key === 'Enter' || e.key === ' ') && !uploading) { e.preventDefault(); fileRef.current.click(); } }}
+              onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={e => { e.preventDefault(); setDragOver(false); }}
+              onDrop={handleDrop}
+              style={{ height: 160, borderRadius: 14, border: dragOver ? '2px dashed #9B5DE5' : '2px dashed #e0e0e0', cursor: uploading ? 'wait' : 'pointer', overflow: 'hidden', background: dragOver ? '#F6F0FE' : '#fafafa', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', transition: 'border-color .2s, background .2s' }}>
+              <div style={{ textAlign: 'center', color: dragOver ? '#9B5DE5' : '#707070', pointerEvents: 'none' }}>
+                <div style={{ fontSize: 40, marginBottom: 6 }}>{dragOver ? '⬇️' : '📸'}</div>
+                <div style={{ fontSize: 14, fontWeight: 600 }}>{dragOver ? 'Suelta la foto aquí' : 'Toca para elegir una foto'}</div>
+                <div style={{ fontSize: 12, marginTop: 3 }}>o arrástrala aquí · JPG · PNG · WebP</div>
+              </div>
+              {uploading && <div style={{ position: 'absolute', inset: 0, background: 'rgba(255,255,255,.88)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, color: '#9B5DE5', fontWeight: 600 }}>⏳ Subiendo foto…</div>}
+            </div>
+          ) : (
+            <div data-testid="photoBlock"
+              onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={e => { e.preventDefault(); setDragOver(false); }}
+              onDrop={handleDrop}
+              style={{ borderRadius: 16, padding: 10, background: dragOver ? '#F6F0FE' : '#FAF7FB', border: dragOver ? '2px dashed #9B5DE5' : '2px solid transparent', transition: 'background .2s' }}>
+              <div style={{ maxWidth: 300, margin: '0 auto' }}>
+                <ImageEditor imgSrc={imgPrev} adjust={photoAdjust && !uploading}
+                  focalX={form.focalX} focalY={form.focalY} zoom={form.zoom}
+                  onChange={vals => setForm(f => ({ ...f, ...vals }))}>
+                  {!uploading && !photoAdjust &&
+                    <button type="button" onClick={e => { e.stopPropagation(); setImgPrev(''); set('imageUrl', ''); setUploadMsg(''); setPhotoAdjust(false); }}
+                      style={{ position: 'absolute', top: 8, right: 8, width: 36, height: 36, borderRadius: '50%', background: 'rgba(26,17,36,.7)', color: 'white', fontSize: 15, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', cursor: 'pointer' }}
+                      title="Quitar foto" aria-label="Quitar foto">✕</button>}
+                  {dragOver && <div style={{ position: 'absolute', inset: 0, background: 'rgba(246,240,254,.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, color: '#9B5DE5', fontWeight: 700, pointerEvents: 'none' }}>Suelta la foto aquí</div>}
+                  {uploading && <div style={{ position: 'absolute', inset: 0, background: 'rgba(255,255,255,.88)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, color: '#9B5DE5', fontWeight: 600 }}>⏳ Subiendo foto…</div>}
+                </ImageEditor>
+                <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                  <button type="button" onClick={() => !uploading && fileRef.current.click()} disabled={uploading}
+                    style={{ flex: 1, minHeight: 44, borderRadius: 99, border: '1.5px solid #D9C9EE', background: 'white', color: '#5B3F8A', fontWeight: 700, fontSize: 13, cursor: uploading ? 'wait' : 'pointer' }}>
+                    Cambiar foto
+                  </button>
+                  <button type="button" onClick={() => setPhotoAdjust(v => !v)} aria-pressed={photoAdjust} disabled={uploading} data-testid="photoAdjustToggle"
+                    style={{ flex: 1, minHeight: 44, borderRadius: 99, border: '1.5px solid ' + (photoAdjust ? '#5B3F8A' : '#D9C9EE'), background: photoAdjust ? '#5B3F8A' : 'white', color: photoAdjust ? 'white' : '#5B3F8A', fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
+                    {photoAdjust ? '✓ Listo' : 'Ajustar encuadre'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
           {uploadMsg && <div role="status" aria-live="polite" style={{ fontSize: 12, marginTop: 6, color: uploadMsg.startsWith('✅') ? '#065F46' : '#DC2626', fontWeight: 500 }}>{uploadMsg}</div>}
-          {!uploadMsg && <div style={{ fontSize: 11, color: '#767676', marginTop: 6 }}>💡 La foto se optimiza automáticamente para cargar rápido en la tienda.</div>}
+          {!uploadMsg && <div style={{ fontSize: 11, color: '#767676', marginTop: 6 }}>{imgPrev ? 'Así se verá en la tarjeta de la tienda. ' : ''}La foto se optimiza automáticamente para cargar rápido en la tienda.</div>}
           {isNew && imgPrev && !uploading && dup && dup.status === 'checking' && <div role="status" aria-live="polite" data-testid="dupChecking" style={{ fontSize: 11, color: '#7A6880', marginTop: 8 }}>Revisando si ya existe…</div>}
           {isNew && imgPrev && !uploading && dup && dup.status === 'done' && dup.level && (() => {
             const c = dup.cands[dup.idx], gal = (c.p.images || []).filter(u => typeof u === 'string' && /^https:/.test(u)).slice(0, 3), cur = stockOf(dup.stock, c.p.id);
@@ -1722,16 +1766,6 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
                   ))}
                 </div>
               )}
-            </div>
-          )}
-          {imgPrev && !uploading && (
-            <div style={{ marginTop: 10, background: '#FAF7FB', borderRadius: 10, padding: '10px 14px' }}>
-              <div style={{ fontSize: 11, fontWeight: 600, color: '#7A6880', marginBottom: 8 }}>🎯 Ajustar posición y zoom</div>
-              <ImageEditor
-                imgSrc={imgPrev}
-                focalX={form.focalX} focalY={form.focalY} zoom={form.zoom}
-                onChange={vals => setForm(f => ({ ...f, ...vals }))}
-              />
             </div>
           )}
         </div>
@@ -5582,7 +5616,7 @@ function ListEditor({ title, hint, items, onChange, onRename, usageCount, emptyO
       </div>
       <div style={{ display: 'flex', gap: 8 }}>
         <input value={draft} onChange={e => setDraft(e.target.value)} onKeyDown={e => e.key === 'Enter' && add()}
-          placeholder="Agregar nuevo…" style={inp} />
+          placeholder="Agregar nuevo…" style={{ ...inp, flex: 1, minWidth: 0 }} />
         <button onClick={add} style={{ padding: '9px 18px', background: 'linear-gradient(135deg,#C0336E,#9B5DE5)', color: 'white', borderRadius: 9, fontWeight: 700, fontSize: 13, border: 'none', cursor: 'pointer', whiteSpace: 'nowrap' }}>+ Agregar</button>
       </div>
       {err && <div style={{ fontSize: 12, color: '#DC2626', fontWeight: 500, marginTop: 8 }}>{err}</div>}
@@ -7985,7 +8019,7 @@ function SettingsTab({ categories, setCategories, materials, setMaterials, shipp
       </div>
       <div style={{ background: 'white', borderRadius: 16, padding: '20px 22px', boxShadow: '0 1px 6px rgba(0,0,0,.06)', marginBottom: 16 }}>
         <div style={{ fontWeight: 800, fontSize: 15, color: '#1A1118', marginBottom: 4 }}>✦ Campaña de temporada (Navidad)</div>
-        <div style={{ fontSize: 12, color: '#7A6B85', marginBottom: 16 }}>Banner y fechas límite de pedido para recibir antes de Navidad. Se muestra en la tienda, el home y la guía de regalos mientras esté activa y hasta la fecha de fin. Si el banner lleva {fecha} y no se sabe el país de la visitante, se ponen las 2 fechas: "14 de diciembre (EE.UU.) o hasta el 18 de diciembre (Ecuador)".</div>
+        <div style={{ fontSize: 12, color: '#7A6B85', marginBottom: 16 }}>Banner y fechas límite de pedido para recibir antes de Navidad. Se muestra en la tienda, el home y la guía de regalos mientras esté activa y hasta la fecha de fin. Si el banner lleva {'{fecha}'} y no se sabe el país de la visitante, se ponen las 2 fechas: "14 de diciembre (EE.UU.) o hasta el 18 de diciembre (Ecuador)".</div>
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, fontWeight: 600, color: '#1A1118', marginBottom: 16, cursor: 'pointer' }}>
           <input type="checkbox" checked={camp.enabled !== false} onChange={e => setCamp('enabled', e.target.checked)} />
           Campaña activa
@@ -9278,6 +9312,240 @@ function BulkEditModal({ products, categories, stock, onApply, onSaveStock, onCl
   );
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// Navegación y pantalla de Inicio (27 nov): barra inferior en el teléfono (Inicio · Productos ·
+// Pedidos · Ventas · Más), barra lateral en escritorio, "Más" agrupado, vista de lista de productos.
+// ════════════════════════════════════════════════════════════════════════════
+const MOBILE_MQ = '(max-width: 767px)';
+function useIsMobile() {
+  const get = () => { try { return window.matchMedia(MOBILE_MQ).matches; } catch (_) { return window.innerWidth < 768; } };
+  const [m, setM] = useState(get);
+  useEffect(() => {
+    let mq; try { mq = window.matchMedia(MOBILE_MQ); } catch (_) { return; }
+    const f = () => setM(mq.matches);
+    if (mq.addEventListener) mq.addEventListener('change', f); else mq.addListener(f);
+    return () => { if (mq.removeEventListener) mq.removeEventListener('change', f); else mq.removeListener(f); };
+  }, []);
+  return m;
+}
+function lsGet(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (_) {} }
+
+// Íconos monocromáticos (heredan el color con currentColor), sin emojis de color.
+function NavIcon({ name, size = 22 }) {
+  const p = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, focusable: 'false' };
+  if (name === 'home') return <svg {...p}><path d="M3 10.5 12 3l9 7.5" /><path d="M5 9.5V20h5v-6h4v6h5V9.5" /></svg>;
+  if (name === 'products') return <svg {...p}><path d="M6 3h12l3 6-9 12L3 9z" /><path d="M3 9h18M9 3l3 6 3-6M12 9v12" /></svg>;
+  if (name === 'orders') return <svg {...p}><path d="M21 8 12 3 3 8v8l9 5 9-5z" /><path d="m3 8 9 5 9-5M12 13v8" /></svg>;
+  if (name === 'ventas') return <svg {...p}><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" /></svg>;
+  if (name === 'more') return <svg {...p}><circle cx="5" cy="12" r="1.3" fill="currentColor" /><circle cx="12" cy="12" r="1.3" fill="currentColor" /><circle cx="19" cy="12" r="1.3" fill="currentColor" /></svg>;
+  if (name === 'tools') return <svg {...p}><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" /><circle cx="16" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" /></svg>;
+  if (name === 'list') return <svg {...p}><path d="M9 6h12M9 12h12M9 18h12" /><rect x="3" y="4.5" width="3" height="3" rx=".6" /><rect x="3" y="10.5" width="3" height="3" rx=".6" /><rect x="3" y="16.5" width="3" height="3" rx=".6" /></svg>;
+  if (name === 'grid') return <svg {...p}><rect x="3" y="3" width="7.5" height="7.5" rx="1.5" /><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5" /><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5" /><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5" /></svg>;
+  if (name === 'plus') return <svg {...p} strokeWidth={2.4}><path d="M12 5v14M5 12h14" /></svg>;
+  if (name === 'search') return <svg {...p}><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>;
+  return null;
+}
+
+// Secciones. Las 4 primeras van en la barra inferior; el resto en "Más" (y todas en la barra lateral).
+const NAV_PRIMARY = [['home', 'Inicio'], ['products', 'Productos'], ['orders', 'Pedidos'], ['ventas', 'Ventas']];
+const NAV_GROUPS = [
+  { title: 'Clientas', items: [['clientas', 'Clientas', '♡'], ['lovers', 'Cacusa Lovers', '♡'], ['leads', 'Leads 10%', '✧'], ['carts', 'Carritos abandonados', '▤']] },
+  { title: 'Marketing', items: [['descuentos', 'Descuentos', '%'], ['cupones', 'Cupones', '✦'], ['giftcards', 'Gift Cards', '◈'], ['marketing', 'Correos de marketing', '◎']] },
+  { title: 'Tienda', items: [['landing', 'Landing (portada)', '⌂'], ['pages', 'Páginas de ayuda', '▤'], ['lovers-page', 'Página de Lovers', '♡'], ['mercado', 'Mercado EC / US', '○']] },
+  { title: 'Ajustes', items: [['settings', 'Ajustes y WhatsApp', '◇'], ['@notif', 'Avisos de pedidos', '◎']] },
+];
+const NAV_MORE_TABS = NAV_GROUPS.flatMap(g => g.items.map(i => i[0])).filter(t => t[0] !== '@');
+const NAV_LABEL = Object.fromEntries([...NAV_PRIMARY, ...NAV_GROUPS.flatMap(g => g.items)].map(i => [i[0], i[1]]));
+
+function NavBadge({ n, active, light }) {
+  if (!(n > 0)) return null;
+  return <span style={{ background: active ? '#E8508A' : light ? '#C4B5C8' : '#E8508A', color: 'white', borderRadius: 99, fontSize: 11, lineHeight: '16px', minWidth: 18, padding: '0 6px', fontWeight: 800, textAlign: 'center' }}>{n}</span>;
+}
+
+// Hoja (sheet) inferior en el teléfono / ventana centrada en escritorio — usa el Modal compartido
+// (role=dialog, foco atrapado, Escape, devuelve el foco).
+function Sheet({ title, onClose, children, mobile, testid, maxWidth = 520 }) {
+  const tid = 'sheetTitle-' + (testid || 'x');
+  return (
+    <Modal onClose={onClose} labelledBy={tid}
+      overlayStyle={mobile ? { alignItems: 'flex-end', padding: 0, zIndex: 1100 } : { zIndex: 1100 }}
+      boxStyle={{ maxWidth, padding: mobile ? '10px 16px calc(16px + env(safe-area-inset-bottom))' : 22, borderRadius: mobile ? '20px 20px 0 0' : 20, maxHeight: mobile ? '86vh' : '84vh', overflowY: 'auto', animation: mobile ? 'sheetUp .22s ease' : 'fadeIn .2s ease' }}>
+      <div data-testid={testid}>
+        {mobile && <div aria-hidden="true" style={{ width: 40, height: 4, borderRadius: 99, background: '#E5DDEA', margin: '0 auto 10px' }} />}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 12 }}>
+          <h2 id={tid} style={{ fontSize: 17, fontWeight: 800, color: '#1A1118' }}>{title}</h2>
+          <button type="button" onClick={onClose} aria-label="Cerrar" style={{ width: 44, height: 44, borderRadius: '50%', background: '#F3EFF5', color: '#5B4A63', fontSize: 16, flexShrink: 0 }}>✕</button>
+        </div>
+        {children}
+      </div>
+    </Modal>
+  );
+}
+const SHEET_ITEM = { display: 'flex', alignItems: 'center', gap: 12, width: '100%', minHeight: 48, padding: '10px 12px', borderRadius: 12, background: '#FAF7FB', color: '#1A1118', fontSize: 14, fontWeight: 700, textAlign: 'left', fontFamily: 'inherit' };
+const SHEET_GLYPH = { width: 28, height: 28, borderRadius: 8, background: 'white', color: '#C0336E', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, flexShrink: 0 };
+const SHEET_GROUP_H = { fontSize: 11, fontWeight: 800, color: '#7A6880', letterSpacing: '.08em', textTransform: 'uppercase', margin: '14px 4px 6px' };
+
+// Lo que necesita atención hoy (Inicio). Todo sale de datos ya cargados.
+const PREP_STATES = ['Nuevo', 'Confirmado', 'En proceso'];
+const LOW_SOLD_DAYS = 30;
+function computeAttention(orders, products, stock, now = new Date()) {
+  const prep = { Nuevo: 0, Confirmado: 0, 'En proceso': 0 };
+  let loversMissing = 0;
+  for (const o of orders || []) {
+    const st = o.estado || 'Nuevo';
+    if (!PREP_STATES.includes(st)) continue;
+    prep[st]++;
+    if (loversMissingPieces(o) > 0) loversMissing++;
+  }
+  // Vendidas en los últimos 30 días (para "Se están acabando": stock 1 de piezas que se venden)
+  const since = now.getTime() - LOW_SOLD_DAYS * 86400000;
+  const sold = new Set();
+  for (const o of orders || []) {
+    if (!orderIsSale(o)) continue;
+    const t = orderTime(o);
+    if (!(t >= since)) continue;
+    for (const l of o.productos || []) if (l && l.id != null && !l.isCombo) sold.add(String(l.id));
+  }
+  const active = (products || []).filter(p => p.available !== false);
+  const outIds = stock ? active.filter(p => stockOf(stock, p.id) <= 0).map(p => String(p.id)) : [];
+  const lowIds = stock ? active.filter(p => stockOf(stock, p.id) === 1 && sold.has(String(p.id))).map(p => String(p.id)) : [];
+  return { prep, prepTotal: prep.Nuevo + prep.Confirmado + prep['En proceso'], loversMissing, outIds, lowIds, stockReady: !!stock };
+}
+
+function HomeTab({ name, attention, sales, onGo, mobile, productsCount }) {
+  const a = attention, today = sales.periods.today;
+  const d = deltaText(Math.round(today.cur.revenue * 100) / 100, Math.round(today.prev.revenue * 100) / 100, true);
+  const card = (key, { n, label, sub, accent, wide, testid }) => (
+    <button key={key} type="button" onClick={() => onGo(key)} data-testid={testid}
+      style={{ gridColumn: wide ? '1 / -1' : undefined, background: 'white', borderRadius: 16, padding: mobile ? '12px 14px' : '16px 18px', textAlign: 'left', boxShadow: '0 1px 6px rgba(26,17,36,.06)', borderLeft: '4px solid ' + accent, display: 'flex', flexDirection: 'column', gap: 2, minHeight: mobile ? 92 : 112, fontFamily: 'inherit', color: '#1A1118' }}>
+      <span style={{ fontSize: mobile ? 26 : 30, fontWeight: 800, color: accent, lineHeight: 1.1 }}>{n}</span>
+      <span style={{ fontSize: 13, fontWeight: 800 }}>{label}</span>
+      {sub && <span style={{ fontSize: 11.5, color: '#7A6880', lineHeight: 1.35 }}>{sub}</span>}
+    </button>
+  );
+  const prepSub = a.prepTotal ? PREP_STATES.filter(s => a.prep[s]).map(s => a.prep[s] + ' ' + s.toLowerCase()).join(' · ') : 'Todo al día';
+  const action = (key, label, icon, primary) => (
+    <button key={key} type="button" onClick={() => onGo(key)}
+      style={{ minHeight: 48, padding: '10px 14px', borderRadius: 14, fontWeight: 700, fontSize: 13.5, display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'inherit', textAlign: 'left',
+        background: primary ? 'linear-gradient(135deg,#C0336E,#9B5DE5)' : 'white', color: primary ? 'white' : '#5B3F8A', border: primary ? 'none' : '1.5px solid #E5DDEA', boxShadow: primary ? '0 4px 14px rgba(155,93,229,.28)' : 'none' }}>
+      <span aria-hidden="true" style={{ fontSize: 16, width: 18, textAlign: 'center' }}>{icon}</span>{label}
+    </button>
+  );
+  const dt = new Date().toLocaleDateString('es-EC', { weekday: 'long', day: 'numeric', month: 'long' });
+  return (
+    <section data-testid="homeTab" data-products={productsCount} aria-labelledby="homeTitle">
+      <div style={{ marginBottom: 12 }}>
+        <h1 id="homeTitle" style={{ fontSize: mobile ? 20 : 24, fontWeight: 800, color: '#1A1118' }}>Hola, {name} <span aria-hidden="true" style={{ color: '#E8508A' }}>♡</span></h1>
+        <div style={{ fontSize: 13, color: '#7A6880', marginTop: 2 }}>{dt.charAt(0).toUpperCase() + dt.slice(1)} · esto necesita tu atención</div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr 1fr' : 'repeat(auto-fit,minmax(165px,1fr))', gap: mobile ? 10 : 14, marginBottom: 16 }}>
+        {card('prep', { n: a.prepTotal, label: 'Pedidos por preparar', sub: prepSub, accent: '#E8508A', testid: 'homePrep' })}
+        {card('lovers', { n: a.loversMissing, label: 'Cajas Lovers sin piezas', sub: a.loversMissing ? 'Carga sus 2 joyas' : 'Todas completas', accent: '#9B5DE5', testid: 'homeLovers' })}
+        {card('out', { n: a.stockReady ? a.outIds.length : '—', label: 'Agotados', sub: 'Activos con stock 0', accent: '#DC2626', testid: 'homeOut' })}
+        {card('low', { n: a.stockReady ? a.lowIds.length : '—', label: 'Se están acabando', sub: 'Queda 1 y se vendió en 30 días', accent: '#D97706', testid: 'homeLow' })}
+        {card('ventas', { n: fmtUsd(today.cur.revenue), label: 'Ventas de hoy', sub: today.cur.count + ' pedido' + (today.cur.count === 1 ? '' : 's') + ' · vs. ayer: ' + d.txt, accent: '#A8862F', wide: mobile, testid: 'homeSales' })}
+      </div>
+      <h2 style={{ fontSize: 12, fontWeight: 800, color: '#7A6880', letterSpacing: '.08em', textTransform: 'uppercase', margin: '0 2px 8px' }}>Accesos rápidos</h2>
+      <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr 1fr' : 'repeat(4, minmax(0, 1fr))', gap: 10 }}>
+        {action('new', '+ Nuevo producto', '✦', true)}
+        {action('addpiece', 'Agregar pieza (foto/QR)', '◇')}
+        {action('enroll', 'Registrar fotos', '◈')}
+        {action('board', 'Preparar pedidos', '▦')}
+      </div>
+    </section>
+  );
+}
+
+// Stock con − / + (lista de productos): guarda con /stock/set igual que el campo de la tarjeta,
+// un instante después del último toque (varios toques seguidos = un solo guardado).
+function StockStepper({ productId, name, sku, qty, onSave, hintId }) {
+  const [val, setVal] = useState(qty);
+  const [state, setState] = useState(''); // '' | 'saving' | 'ok' | error
+  const timer = useRef(null), dirtyV = useRef(false);
+  useEffect(() => { if (!dirtyV.current) setVal(qty); }, [qty]);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const commit = async n => {
+    dirtyV.current = false;
+    if (n === qty) { setState(''); return; }
+    setState('saving');
+    try { await onSave(productId, n); setState('ok'); setTimeout(() => setState(s => s === 'ok' ? '' : s), 1500); }
+    catch (e) { setState((e && e.message) || 'No se guardó'); setVal(qty); }
+  };
+  const schedule = n => { dirtyV.current = true; setVal(n); clearTimeout(timer.current); timer.current = setTimeout(() => commit(n), 600); };
+  const step = d => schedule(Math.max(0, Math.min(9999, (Number(val) || 0) + d)));
+  const out = Number(val) <= 0, low = Number(val) > 0 && Number(val) <= 2;
+  const b = { width: 32, height: 44, borderRadius: 10, background: '#F3EFF5', color: '#5B3F8A', fontSize: 20, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 };
+  const inputId = 'stock-' + productId;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 2, position: 'relative' }} onClick={e => e.stopPropagation()}>
+      <button type="button" style={{ ...b, opacity: out ? .45 : 1 }} disabled={out} aria-label={'Restar 1 al stock de ' + name} onClick={() => step(-1)}>−</button>
+      <label htmlFor={inputId} style={SR_ONLY}>Stock de {name}{sku ? ' · ' + sku : ''}</label>
+      <input id={inputId} className="adm-nospin" type="number" inputMode="numeric" min={0} max={9999} value={val} aria-describedby={hintId}
+        onChange={e => { const t = e.target.value; dirtyV.current = true; setVal(t === '' ? '' : Number(t)); clearTimeout(timer.current); }}
+        onBlur={() => { const n = Number(val); if (val === '' || !Number.isInteger(n) || n < 0 || n > 9999) { setVal(qty); dirtyV.current = false; setState('Entero de 0 a 9999'); return; } if (dirtyV.current) { clearTimeout(timer.current); commit(n); } }}
+        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur(); } }}
+        style={{ width: 34, height: 34, textAlign: 'center', border: 'none', borderRadius: 8, fontSize: 15, padding: 0, fontWeight: 800, outline: 'none', MozAppearance: 'textfield', background: out ? '#FEE2E2' : low ? '#FEF3C7' : 'transparent', color: out ? '#B91C1C' : low ? '#92400E' : '#1A1118' }} />
+      <button type="button" style={b} aria-label={'Sumar 1 al stock de ' + name} onClick={() => step(1)}>+</button>
+      <span role="status" aria-live="polite" style={{ position: 'absolute', top: -4, right: -2, fontSize: 10, fontWeight: 800, color: state === 'ok' ? '#15803D' : state === 'saving' ? '#7A6880' : '#DC2626', pointerEvents: 'none', whiteSpace: 'nowrap' }}>
+        {state === 'saving' ? '…' : state === 'ok' ? '✓' : state ? <span style={SR_ONLY}>{state}</span> : ''}
+      </span>
+      {state && state !== 'saving' && state !== 'ok' && <span aria-hidden="true" style={{ position: 'absolute', top: -6, right: -4, color: '#DC2626', fontWeight: 900 }} title={state}>!</span>}
+    </div>
+  );
+}
+
+// Fila compacta (vista de lista, ~68 px): miniatura, nombre, código, precio (con oferta), stock − / +,
+// punto de estado y "⋯". Tocar la fila abre Editar (en selección múltiple, la elige).
+function ProductRow({ p, onEdit, onMenu, stockQty, onStockSave, refN, select, sortMode, onMoveUp, onMoveDown, canUp, canDown, hintId }) {
+  const active = p.available !== false;
+  const promo = promoIsActive(p);
+  const img = productImageUrl(p);
+  const mainClick = () => { if (select) select.onChange(); else onEdit(p); };
+  const arrow = { width: 44, height: 44, borderRadius: 10, background: '#F3EFF5', color: '#5B3F8A', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' };
+  return (
+    <li data-testid="productRow" data-id={p.id} style={{ display: 'flex', alignItems: 'center', gap: 6, minHeight: 68, padding: '6px 6px 6px 8px', background: select && select.checked ? '#F7F1FD' : 'white', borderBottom: '1px solid #F1ECF3', listStyle: 'none' }}>
+      {select && (
+        <label style={{ width: 36, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, cursor: 'pointer' }}>
+          <input type="checkbox" checked={select.checked} onChange={select.onChange} style={{ width: 20, height: 20, accentColor: '#9B5DE5' }} />
+          <span style={SR_ONLY}>Elegir {p.name}</span>
+        </label>
+      )}
+      <button type="button" onClick={mainClick} data-testid="rowMain"
+        style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 9, textAlign: 'left', padding: '4px 2px', minHeight: 56, fontFamily: 'inherit', color: '#1A1118', opacity: active ? 1 : .55 }}>
+        <span style={SR_ONLY}>{select ? 'Elegir ' : 'Editar '}</span>
+        <span style={{ width: 48, height: 48, borderRadius: 10, overflow: 'hidden', flexShrink: 0, background: '#F3EFF5', position: 'relative' }}>
+          {img ? <ZoomImg src={img} inButton title={normalizeSku(p.sku)} sub={p.name} style={{ width: '100%', height: '100%', objectFit: 'cover', objectPosition: `${p.focalX ?? 50}% ${p.focalY ?? 50}%`, display: 'block' }} />
+            : <Illustration type={p.img} color={p.color} />}
+        </span>
+        <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <span style={{ fontSize: 14, fontWeight: 700, lineHeight: 1.2, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', wordBreak: 'break-word' }}>{p.name}</span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            <span aria-hidden="true" title={active ? 'Activo' : 'Pausado'} style={{ width: 8, height: 8, borderRadius: '50%', background: active ? '#10B981' : '#B8AEBF', flexShrink: 0 }} />
+            <span style={SR_ONLY}>{active ? 'Activo' : 'Pausado'}.</span>
+            <SkuChip sku={p.sku} />
+            {promo ? <span style={{ fontSize: 13, whiteSpace: 'nowrap' }}><b style={{ color: '#C0336E' }}>${p.promo.price}</b> <s style={{ color: '#8A7F90', fontSize: 11 }}>${p.price}</s></span>
+              : <b style={{ fontSize: 13, color: '#A8862F', whiteSpace: 'nowrap' }}>${p.price}</b>}
+            {refN > 0 && <span data-refs={refN} title={refN + ' foto' + (refN === 1 ? '' : 's') + ' real' + (refN === 1 ? '' : 'es') + ' aprendida' + (refN === 1 ? '' : 's') + ' por el identificador'} style={{ fontSize: 10, fontWeight: 800, color: '#15803D', background: '#DCFCE7', padding: '1px 6px', borderRadius: 99, whiteSpace: 'nowrap' }}>◇ {refN}<span style={SR_ONLY}> fotos reales</span></span>}
+          </span>
+        </span>
+      </button>
+      {sortMode ? (
+        <span style={{ display: 'flex', gap: 4 }}>
+          <button type="button" style={{ ...arrow, opacity: canUp ? 1 : .35 }} disabled={!canUp} onClick={() => onMoveUp(p)} aria-label={'Subir ' + p.name}>▲</button>
+          <button type="button" style={{ ...arrow, opacity: canDown ? 1 : .35 }} disabled={!canDown} onClick={() => onMoveDown(p)} aria-label={'Bajar ' + p.name}>▼</button>
+        </span>
+      ) : (onStockSave && stockQty != null
+        ? <StockStepper productId={p.id} name={p.name} sku={p.sku} qty={stockQty} onSave={onStockSave} hintId={hintId} />
+        : null)}
+      {!sortMode && !select && (
+        <button type="button" onClick={() => onMenu(p)} aria-label={'Más acciones para ' + p.name} aria-haspopup="dialog" data-testid="rowMenu"
+          style={{ width: 32, height: 44, borderRadius: 10, color: '#5B4A63', fontSize: 20, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>⋯</button>
+      )}
+    </li>
+  );
+}
+
 function App() {
   const [session, setSession]         = useState(() => {
     try { const s = sessionStorage.getItem('cacusa_session'); return s ? JSON.parse(s) : null; }
@@ -9310,8 +9578,22 @@ function App() {
   const [delConfirm, setDelConfirm]   = useState(null);
   const [showPwd, setShowPwd]         = useState(false);
   const [showMenu, setShowMenu]       = useState(false);
-  const [activeTab, setActiveTab]     = useState('products');
-  React.useEffect(() => { if (session && (activeTab === 'products' || activeTab === 'orders')) loadStock(); }, [activeTab]);
+  const [activeTab, setActiveTab]     = useState('home'); // Inicio (27 nov): pantalla por defecto
+  React.useEffect(() => { if (session && (activeTab === 'products' || activeTab === 'orders' || activeTab === 'home')) loadStock(); }, [activeTab]);
+  const isMobile = useIsMobile();
+  const [showMore, setShowMore]       = useState(false); // hoja "Más" (teléfono)
+  const [showTools, setShowTools]     = useState(false); // hoja "Herramientas" (Productos)
+  const [rowMenu, setRowMenu]         = useState(null);  // producto del menú "⋯"
+  const [sortMode, setSortMode]       = useState(false); // "Ordenar": muestra ▲▼
+  const [stockFilter, setStockFilter] = useState('all'); // 'all' | 'out' (agotados) | 'low' (se están acabando)
+  const [loversMissingOnly, setLoversMissingOnly] = useState(false);
+  const [ordersHint, setOrdersHint]   = useState('');
+  // Vista de Productos: lista (por defecto en el teléfono) o cuadrícula (por defecto en escritorio);
+  // se recuerda por tipo de pantalla.
+  const viewKey = 'cacusa-admin-prodview-' + (isMobile ? 'm' : 'd');
+  const [viewPref, setViewPref] = useState(() => ({ m: lsGet('cacusa-admin-prodview-m'), d: lsGet('cacusa-admin-prodview-d') }));
+  const prodView = viewPref[isMobile ? 'm' : 'd'] || (isMobile ? 'list' : 'grid');
+  const setProdView = v => { setViewPref(x => ({ ...x, [isMobile ? 'm' : 'd']: v })); lsSet(viewKey, v); };
   React.useEffect(() => { if (session && activeTab === 'orders') prewarmRecognition(products); }, [activeTab, products.length]); // precarga del identificador
   const [loversCount, setLoversCount] = useState(0);
   const [showOrderModal, setShowOrderModal] = useState(false);
@@ -9344,6 +9626,35 @@ function App() {
   const enRef   = React.useRef({ translations: null, texts_en: null, home_en: null, pages_en: null, lovers_en: null });
   // Snapshot del español al cargar, para detectar cambios y re-traducir solo lo editado
   const snapRef = React.useRef({ texts: '', home: '', pages: '', lovers: '' });
+  // Cambios sin publicar (27 nov): "dirty" sigue siendo la fuente de verdad (publish() no cambia);
+  // esto solo cuenta CUÁNTOS cambios hay contra lo último cargado/publicado (piezas nuevas, editadas
+  // o borradas, el orden, y cada bloque de configuración).
+  const pubBaseRef = React.useRef(null);
+  const resnapRef = React.useRef(false);
+  const cfgNow = { whatsapp: whatsappNum, categories, materials, shipping, texts, campaign, home, lovers, pages, combos };
+  const takePubSnap = () => {
+    pubBaseRef.current = {
+      prods: new Map(products.map(p => [String(p.id), JSON.stringify(p)])),
+      order: products.map(p => String(p.id)),
+      cfg: Object.fromEntries(Object.entries(cfgNow).map(([k, v]) => [k, JSON.stringify(v)]))
+    };
+  };
+  useEffect(() => { if (resnapRef.current) { resnapRef.current = false; takePubSnap(); } });
+  const prevDirtyRef = React.useRef(false);
+  useEffect(() => { if (prevDirtyRef.current && !dirty) takePubSnap(); prevDirtyRef.current = dirty; }, [dirty]);
+  const pendingCount = React.useMemo(() => {
+    const base = pubBaseRef.current;
+    if (!dirty || !base) return 0;
+    let n = 0;
+    const ids = new Set();
+    for (const p of products) { const id = String(p.id); ids.add(id); const b = base.prods.get(id); if (b == null || b !== JSON.stringify(p)) n++; }
+    for (const id of base.prods.keys()) if (!ids.has(id)) n++;
+    const common = products.map(p => String(p.id)).filter(id => base.prods.has(id)), baseCommon = base.order.filter(id => ids.has(id));
+    if (common.join(',') !== baseCommon.join(',')) n++;
+    for (const [k, v] of Object.entries(cfgNow)) if (base.cfg[k] !== JSON.stringify(v)) n++;
+    return n;
+  }, [dirty, products, whatsappNum, categories, materials, shipping, texts, campaign, home, lovers, pages, combos]);
+  const pendingText = pendingCount ? `Tienes ${pendingCount} cambio${pendingCount === 1 ? '' : 's'} sin publicar` : 'Tienes cambios sin publicar';
 
   useEffect(() => {
     (async () => {
@@ -9452,6 +9763,7 @@ function App() {
       } else if (res.products) {
         const data = JSON.parse(res.products);
         const prods = Array.isArray(data) ? data : (data.products || []);
+        resnapRef.current = true; // base para contar los cambios sin publicar
         setProducts(prods.map(p => ({ ...p, available: p.available !== false })));
         if (Array.isArray(data.combos)) setCombos(data.combos);
         const cfg = (data.config || {});
@@ -9719,35 +10031,84 @@ function App() {
 
   if (!session) return <LoginScreen onLogin={s => setSession(s)} />;
 
+  const attention = computeAttention(orders, products, stock);
+  const outSet = new Set(attention.outIds), lowSet = new Set(attention.lowIds);
   const filtered = products.filter(p => {
     if (filter !== 'all' && p.category !== filter) return false;
     if (search && !productMatchesSearch(p, search)) return false;
+    if (stockFilter === 'out' && !outSet.has(String(p.id))) return false;
+    if (stockFilter === 'low' && !lowSet.has(String(p.id))) return false;
     return true;
   });
-  const activeCount = products.filter(p => p.available !== false).length;
   const pendingOrders = orders.filter(o => ['Nuevo', 'Confirmado', 'En proceso'].includes(o.estado || 'Nuevo')).length;
+  const promoCount = products.filter(p => p.promo && p.promo.price && (!p.promo.endsAt || new Date(p.promo.endsAt) >= new Date())).length + combos.length;
+  const navBadge = { orders: pendingOrders, descuentos: promoCount, lovers: loversCount };
+  const go = tab => {
+    if (tab === '@notif') { setShowMore(false); setShowNtfyModal(true); return; }
+    setActiveTab(tab); setShowMore(false);
+    try { window.scrollTo(0, 0); } catch (_) {}
+  };
+  const openNewProduct = () => { setEditProd(null); setShowModal(true); };
+  const openEnroll = () => { setEnrollOnly(null); setShowEnroll(true); };
+  const homeGo = key => {
+    if (key === 'prep') { setOrdersView('active'); setLoteOnly(false); setLoversMissingOnly(false); setHistSearch(''); go('orders'); }
+    else if (key === 'lovers') { setOrdersView('active'); setLoteOnly(false); setLoversMissingOnly(true); setHistSearch(''); go('orders'); }
+    else if (key === 'out' || key === 'low') { setStockFilter(key); setFilter('all'); setSearch(''); go('products'); }
+    else if (key === 'ventas') go('ventas');
+    else if (key === 'new') { go('products'); openNewProduct(); }
+    else if (key === 'addpiece') {
+      setOrdersView('active'); setLoteOnly(false); setLoversMissingOnly(false); setHistSearch('');
+      setOrdersHint('Elige el pedido y toca "+ Agregar pieza" para cargarla con la etiqueta QR, el código o una foto. Los pedidos de Lovers y los creados en el panel lo permiten.');
+      go('orders');
+    }
+    else if (key === 'enroll') openEnroll();
+    else if (key === 'board') { setOrdersView('board'); setLoversMissingOnly(false); go('orders'); }
+  };
+  const refsPool = products.filter(p => p.available !== false && productImageUrl(p));
+  const refsWith = refCounts ? refsPool.filter(p => refCounts[String(p.id)]).length : null;
+  const pillBtn = { minHeight: 44, padding: '0 16px', background: 'white', color: '#5B3F8A', border: '1.5px solid #D9C9EE', borderRadius: 99, fontWeight: 700, fontSize: 13, whiteSpace: 'nowrap', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6 };
+  const sideBtn = (tab, label, glyph) => {
+    const on = activeTab === tab;
+    return (
+      <button key={tab} type="button" onClick={() => go(tab)} aria-current={on ? 'page' : undefined}
+        style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', minHeight: 40, padding: '8px 10px', borderRadius: 10, fontSize: 13.5, fontWeight: on ? 800 : 600, color: on ? '#C0336E' : '#3F3346', background: on ? '#FCE7F0' : 'transparent', textAlign: 'left', fontFamily: 'inherit' }}>
+        <span aria-hidden="true" style={{ width: 22, display: 'inline-flex', justifyContent: 'center', color: on ? '#C0336E' : '#9A8AA3', fontSize: 15 }}>{typeof glyph === 'string' ? glyph : glyph}</span>
+        <span style={{ flex: 1, minWidth: 0 }}>{label}</span>
+        <NavBadge n={navBadge[tab]} active={on} light />
+      </button>
+    );
+  };
+  const viewToggle = (
+    <div role="group" aria-label="Vista de productos" style={{ display: 'inline-flex', background: '#F3EFF5', borderRadius: 12, padding: 3, flexShrink: 0 }}>
+      {[['list', 'Lista'], ['grid', 'Cuadrícula']].map(([v, l]) => (
+        <button key={v} type="button" onClick={() => setProdView(v)} aria-pressed={prodView === v} aria-label={l} title={l}
+          style={{ minHeight: 38, minWidth: 44, padding: isMobile ? '0 10px' : '0 12px', borderRadius: 9, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: 13, fontWeight: 700,
+            background: prodView === v ? 'white' : 'transparent', color: prodView === v ? '#C0336E' : '#7A6880', boxShadow: prodView === v ? '0 1px 4px rgba(0,0,0,.1)' : 'none' }}>
+          <NavIcon name={v} size={18} />{!isMobile && <span aria-hidden="true">{l}</span>}
+        </button>
+      ))}
+    </div>
+  );
+  const toolsBtn = (
+    <button type="button" onClick={() => setShowTools(true)} aria-haspopup="dialog" aria-expanded={showTools} data-testid="toolsBtn" style={{ ...pillBtn, flexShrink: 0 }}>
+      <NavIcon name="tools" size={18} />Herramientas
+    </button>
+  );
 
   return (
     <div style={{ minHeight: '100vh', background: '#F0EFF5' }} onClick={() => showMenu && setShowMenu(false)}>
 
       {/* ── Header ── */}
-      <div style={{ background: 'linear-gradient(135deg,#1A1124,#2D1B2E)', color: 'white', padding: '0 20px', display: 'flex', alignItems: 'center', gap: 10, height: 56, position: 'sticky', top: 0, zIndex: 200, boxShadow: '0 2px 16px rgba(0,0,0,.3)' }}>
+      <header style={{ background: 'linear-gradient(135deg,#1A1124,#2D1B2E)', color: 'white', padding: isMobile ? '0 12px' : '0 20px', display: 'flex', alignItems: 'center', gap: 10, height: 56, position: 'sticky', top: 0, zIndex: 200, boxShadow: '0 2px 16px rgba(0,0,0,.3)' }}>
         <div style={{ fontFamily: 'Georgia,serif', fontWeight: 900, fontSize: 20, letterSpacing: '.15em', background: 'linear-gradient(135deg,#E85D8A,#C9A84C)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>CACUSA</div>
-        <div style={{ color: 'rgba(255,255,255,.3)', fontSize: 12 }}>/admin</div>
+        <div style={{ color: 'rgba(255,255,255,.45)', fontSize: 12 }}>{isMobile ? (NAV_LABEL[activeTab] || '') : '/admin'}</div>
         <div style={{ flex: 1 }} />
-        {dirty && <span style={{ fontSize: 11, color: '#FBBF24', fontWeight: 700 }}>● Cambios sin publicar</span>}
-        <a href={STORE_URL} target="_blank" rel="noopener" style={{ color: 'rgba(255,255,255,.5)', fontSize: 12, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 4 }}>🌐 Tienda</a>
-        <button
-          onClick={() => setShowNtfyModal(true)}
-          title="Configurar notificaciones de pedidos"
-          style={{ width: 34, height: 34, borderRadius: '50%', background: 'rgba(255,255,255,.1)', color: 'rgba(255,255,255,.75)', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', cursor: 'pointer' }}>
-          🔔
-        </button>
-        <button onClick={e => { e.stopPropagation(); setShowMenu(s => !s); }}
-          style={{ width: 34, height: 34, borderRadius: '50%', background: 'rgba(255,255,255,.1)', color: 'rgba(255,255,255,.75)', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none' }}>
+        {!isMobile && <a href={STORE_URL} target="_blank" rel="noopener" style={{ color: 'rgba(255,255,255,.65)', fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4, padding: '8px 10px' }}>Ver tienda ↗</a>}
+        <button onClick={e => { e.stopPropagation(); setShowMenu(s => !s); }} aria-label="Menú de la cuenta" aria-expanded={showMenu}
+          style={{ width: 40, height: 40, borderRadius: '50%', background: 'rgba(255,255,255,.1)', color: 'rgba(255,255,255,.75)', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none' }}>
           {USERS[session.username].avatar}
         </button>
-      </div>
+      </header>
 
       {showMenu && (
         <div style={{ position: 'fixed', top: 63, right: 16, background: 'white', borderRadius: 14, padding: '8px', boxShadow: '0 8px 32px rgba(0,0,0,.15)', zIndex: 300, minWidth: 210, animation: 'fadeIn .2s ease' }}
@@ -9756,6 +10117,7 @@ function App() {
           {[
             ['🔄 Recargar datos', () => { if (!dirty || window.confirm('Tienes cambios sin publicar. ¿Recargar y descartarlos?')) loadData(); setShowMenu(false); }],
             ['🌐 Ver tienda', () => { window.open(STORE_URL, '_blank'); setShowMenu(false); }],
+            ['🔔 Avisos de pedidos', () => { setShowNtfyModal(true); setShowMenu(false); }],
             // Auditoría (20 sep, F21-c): revoca TODOS los tokens de esta cuenta en el
             // servidor (no solo el de este navegador) — útil si se sospecha que un token
             // se filtró (dispositivo perdido/robado, sesión abierta en una compu ajena).
@@ -9778,31 +10140,66 @@ function App() {
               sessionStorage.clear(); setSession(null);
             }]
           ].map(([l, fn]) => (
-            <button key={l} onClick={fn} style={{ display: 'block', width: '100%', textAlign: 'left', padding: '9px 12px', fontSize: 13, color: '#333', borderRadius: 8, transition: 'background .15s', border: 'none', cursor: 'pointer', background: 'none', fontFamily: 'inherit' }}>{l}</button>
+            <button key={l} onClick={fn} style={{ display: 'block', width: '100%', textAlign: 'left', padding: '11px 12px', fontSize: 13, color: '#333', borderRadius: 8, transition: 'background .15s', border: 'none', cursor: 'pointer', background: 'none', fontFamily: 'inherit' }}>{l}</button>
           ))}
         </div>
       )}
 
-      <div style={{ maxWidth: 1200, margin: '0 auto', padding: '20px 16px' }}>
+      {/* ── Navegación del teléfono: barra inferior fija (va antes del contenido en el DOM) ── */}
+      {isMobile && (
+        <nav aria-label="Secciones del panel" data-testid="bottomNav"
+          style={{ position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 260, background: 'rgba(255,255,255,.97)', borderTop: '1px solid #EDE8EA', boxShadow: '0 -2px 14px rgba(26,17,36,.06)', paddingBottom: 'env(safe-area-inset-bottom)', display: 'flex' }}>
+          {[...NAV_PRIMARY, ['@more', 'Más']].map(([t, l]) => {
+            const isMore = t === '@more';
+            const on = isMore ? (showMore || NAV_MORE_TABS.includes(activeTab)) : activeTab === t;
+            return (
+              <button key={t} type="button" className="adm-navbtn"
+                onClick={() => isMore ? setShowMore(true) : go(t)}
+                aria-current={on && !(isMore && showMore) ? 'page' : undefined}
+                {...(isMore ? { 'aria-haspopup': 'dialog', 'aria-expanded': showMore } : {})}
+                style={{ flex: 1, minWidth: 0, minHeight: 58, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, color: on ? '#C0336E' : '#7A6880', fontSize: 11, fontWeight: on ? 800 : 600, fontFamily: 'inherit', position: 'relative' }}>
+                <span style={{ position: 'relative', display: 'inline-flex' }}>
+                  <NavIcon name={isMore ? 'more' : t} />
+                  {navBadge[t] > 0 && <span style={{ position: 'absolute', top: -5, left: 14 }}><NavBadge n={navBadge[t]} /></span>}
+                </span>
+                <span>{l}</span>
+                {on && <span aria-hidden="true" style={{ position: 'absolute', top: 0, left: '30%', right: '30%', height: 3, borderRadius: '0 0 3px 3px', background: '#E8508A' }} />}
+              </button>
+            );
+          })}
+        </nav>
+      )}
 
-        {/* ── Stats ── */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(110px,1fr))', gap: 10, marginBottom: 20 }}>
-          {[
-            { label: 'Total joyas', val: products.length,              col: '#9B5DE5', icon: '💎' },
-            { label: 'Activas',     val: activeCount,                   col: '#10B981', icon: '✅' },
-            { label: 'Inactivas',   val: products.length - activeCount, col: '#F59E0B', icon: '⏸' },
-            { label: 'Pedidos act', val: pendingOrders,                 col: '#E85D8A', icon: '📦' },
-            ...categories.map(c => ({ label: c, val: products.filter(p => p.category === c).length, col: '#6B7280', icon: '🏷' }))
-          ].map((s, i) => (
-            <div key={i} style={{ background: 'white', borderRadius: 14, padding: '13px 14px', boxShadow: '0 1px 6px rgba(0,0,0,.06)', borderLeft: `4px solid ${s.col}`, cursor: 'pointer', transition: 'transform .15s' }}>
-              <div style={{ fontSize: 22, fontWeight: 800, color: s.col }}>{s.val}</div>
-              <div style={{ fontSize: 10, color: '#888', marginTop: 2 }}>{s.icon} {s.label}</div>
+      <div style={{ display: 'flex', alignItems: 'flex-start', maxWidth: isMobile ? undefined : 1480, margin: '0 auto' }}>
+        {/* ── Barra lateral (escritorio) ── */}
+        {!isMobile && (
+          <aside className="adm-side" data-testid="sidebar" style={{ width: 236, flexShrink: 0, position: 'sticky', top: 56, height: 'calc(100vh - 56px)', overflowY: 'auto', padding: '16px 12px 24px', borderRight: '1px solid #E7E1EA', background: '#FBFAFC' }}>
+            <div data-testid="publishBox" style={{ background: dirty ? '#FFF4F8' : 'white', border: '1px solid ' + (dirty ? '#F8C9DA' : '#EDE8EA'), borderRadius: 14, padding: 12, marginBottom: 14 }}>
+              <button onClick={publish} disabled={!dirty || syncing}
+                style={{ width: '100%', minHeight: 44, background: dirty ? 'linear-gradient(135deg,#C0336E,#9B5DE5)' : '#E7E3EA', color: dirty ? 'white' : '#8A7F90', borderRadius: 99, fontWeight: 800, fontSize: 13.5, opacity: syncing ? .7 : 1, boxShadow: dirty ? '0 4px 12px rgba(192,51,110,.25)' : 'none', cursor: dirty && !syncing ? 'pointer' : 'default' }}>
+                {syncing ? 'Publicando…' : 'Publicar cambios'}
+              </button>
+              <div role="status" aria-live="polite" data-testid="pendingText" style={{ fontSize: 12, marginTop: 8, color: dirty ? '#9D174D' : '#7A6880', fontWeight: dirty ? 700 : 500, textAlign: 'center' }}>
+                {dirty ? pendingText : 'Todo está publicado'}
+              </div>
             </div>
-          ))}
-        </div>
+            <nav aria-label="Secciones del panel">
+              {NAV_PRIMARY.map(([t, l]) => sideBtn(t, l, <NavIcon name={t} size={18} />))}
+              {NAV_GROUPS.map(g => (
+                <div key={g.title}>
+                  <div style={{ ...SHEET_GROUP_H, margin: '16px 10px 4px' }}>{g.title}</div>
+                  {g.items.map(([t, l, gl]) => sideBtn(t, l, gl))}
+                </div>
+              ))}
+            </nav>
+          </aside>
+        )}
+
+      <main style={{ flex: 1, minWidth: 0, padding: isMobile ? '14px 12px' : '20px 24px', paddingBottom: isMobile ? `calc(${84 + (dirty ? 64 : 0) + (activeTab === 'products' ? 64 : 0)}px + env(safe-area-inset-bottom))` : 40 }}>
+      <div style={{ maxWidth: 1200, margin: '0 auto' }}>
 
         {/* ── Sync message ── */}
-        {syncMsg && (
+        {syncMsg && !(isMobile && syncing) && (
           <div role="status" aria-live="polite" style={{ borderRadius: 12, padding: '11px 16px', marginBottom: 14, fontSize: 13, fontWeight: 600, background: syncMsg.startsWith('✅') ? '#D1FAE5' : syncMsg.startsWith('❌') ? '#FEE2E2' : '#FEF3C7', color: syncMsg.startsWith('✅') ? '#065F46' : syncMsg.startsWith('❌') ? '#DC2626' : '#92400E' }}>
             {syncMsg}
           </div>
@@ -9810,92 +10207,67 @@ function App() {
 
         <RecogUpgradeNotice token={session.token} counts={refCounts} />
 
-        {/* ── WhatsApp + Publish bar ── */}
-        <div style={{ background: 'white', borderRadius: 12, padding: '12px 16px', marginBottom: 14, display: 'flex', alignItems: 'center', gap: 12, boxShadow: '0 1px 6px rgba(0,0,0,.05)', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 18 }}>📱</span>
-          <span style={{ fontSize: 12, fontWeight: 600, color: '#555', whiteSpace: 'nowrap' }}>WhatsApp para pedidos:</span>
-          <input value={whatsappNum} onChange={e => { setWhatsappNum(e.target.value); setDirty(true); }}
-            placeholder="+1 786 555 0123"
-            style={{ flex: 1, minWidth: 180, padding: '8px 12px', border: '1.5px solid #e0e0e0', borderRadius: 8, fontSize: 13, outline: 'none', color: '#333' }} />
-          <button onClick={publish} disabled={!dirty || syncing}
-            style={{ padding: '10px 22px', background: dirty ? 'linear-gradient(135deg,#1A1124,#2D1B2E)' : '#e0e0e0', color: dirty ? 'white' : '#767676', borderRadius: 99, fontWeight: 700, fontSize: 13, whiteSpace: 'nowrap', opacity: syncing ? .7 : 1, transition: 'all .2s', boxShadow: dirty ? '0 4px 12px rgba(0,0,0,.2)' : 'none', border: 'none', cursor: dirty && !syncing ? 'pointer' : 'default' }}>
-            {syncing ? '⏳ Publicando…' : '☁️ Publicar cambios'}
-          </button>
-        </div>
-
-        {/* ── Tab navigation ── */}
-        <div style={{ display: 'flex', marginBottom: 20, background: 'white', borderRadius: 12, overflowX: 'auto', WebkitOverflowScrolling: 'touch', border: '1px solid #EDE8EA' }}>
-          {[
-            ['products',   '💎 Productos',  products.length],
-            ['orders',     '📦 Pedidos',    pendingOrders],
-            ['ventas',     '◇ Ventas',      0],
-            ['clientas',   '♡ Clientas',    0],
-            ['descuentos', '🏷️ Descuentos', products.filter(p => p.promo && p.promo.price && (!p.promo.endsAt || new Date(p.promo.endsAt) >= new Date())).length + combos.length],
-            ['mercado',    '🌍 Mercado',    0],
-            ['landing',    '🏠 Landing',    0],
-            ['pages',      '📄 Páginas',    0],
-            ['giftcards',  '🎁 Gift Cards',  0],
-            ['cupones',    '🏷️ Cupones',    0],
-            ['leads',      '📋 Leads 10%',  0],
-            ['marketing',  '✉ Marketing',   0],
-            ['carts',      '🛒 Carritos abandonados', 0],
-            ['lovers',     '🌸 Cacusa Lovers', loversCount],
-            ['lovers-page','💌 Lovers (página)', 0],
-            ['settings',   '⚙️ Ajustes',    0]
-          ].map(([tab, label, badge]) => (
-            <button key={tab} onClick={() => setActiveTab(tab)}
-              style={{ flexShrink: 0, minWidth: 90, padding: '13px 16px', fontWeight: 700, fontSize: 14, border: 'none', cursor: 'pointer', background: activeTab === tab ? 'white' : '#F9F5F7', color: activeTab === tab ? '#E8508A' : '#7A6880', borderBottom: activeTab === tab ? '2.5px solid #E8508A' : '2.5px solid transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, transition: 'all .15s', fontFamily: 'inherit', whiteSpace: 'nowrap' }}>
-              {label}
-              {badge > 0 && <span style={{ background: activeTab === tab ? '#E8508A' : '#C4B5C8', color: 'white', borderRadius: 99, fontSize: 11, padding: '1px 7px', fontWeight: 800 }}>{badge}</span>}
-            </button>
-          ))}
-        </div>
+        {/* ── Inicio ── */}
+        {activeTab === 'home' && (
+          <HomeTab name={String(session.name || USERS[session.username].name || '').split(' ')[0]} attention={attention} sales={computeSales(orders, products)} onGo={homeGo} mobile={isMobile} productsCount={products.length} />
+        )}
 
         {/* ── Products tab ── */}
         {activeTab === 'products' && (
-          <div>
-            {/* Toolbar */}
-            <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
-              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="🔍 Buscar por nombre, descripción o código (AN001)…" aria-label="Buscar productos"
-                style={{ flex: 1, minWidth: 200, padding: '10px 14px', border: '1.5px solid #e0e0e0', borderRadius: 10, fontSize: 14, outline: 'none', background: 'white' }} />
-              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-                {['all', ...categories].map(cat => {
-                  const cnt = cat === 'all' ? products.length : products.filter(p => p.category === cat).length;
-                  return (
-                    <button key={cat} onClick={() => setFilter(cat)}
-                      style={{ padding: '8px 13px', borderRadius: 99, fontSize: 12, fontWeight: 600, background: filter === cat ? '#E85D8A' : 'white', color: filter === cat ? 'white' : '#666', border: filter === cat ? 'none' : '1.5px solid #e0e0e0', boxShadow: filter === cat ? '0 2px 8px rgba(232,93,138,.3)' : 'none', transition: 'all .2s', cursor: 'pointer' }}>
-                      {cat === 'all' ? 'Todo' : cat} ({cnt})
-                    </button>
-                  );
-                })}
+          <div data-testid="productsTab">
+            {/* Toolbar: buscador arriba; herramientas secundarias en "Herramientas" */}
+            <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center' }}>
+              <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
+                <span aria-hidden="true" style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: '#9A8AA3', display: 'flex' }}><NavIcon name="search" size={18} /></span>
+                <input value={search} onChange={e => setSearch(e.target.value)} placeholder={isMobile ? 'Buscar nombre o código (AN001)…' : 'Buscar por nombre, descripción o código (AN001)…'} aria-label="Buscar productos" type="search"
+                  style={{ width: '100%', height: 44, padding: '0 14px 0 38px', border: '1.5px solid #E5DDEA', borderRadius: 12, fontSize: 15, outline: 'none', background: 'white' }} />
               </div>
-              <button onClick={() => { setEditProd(null); setShowModal(true); }}
-                style={{ padding: '10px 20px', background: 'linear-gradient(135deg,#C0336E,#9B5DE5)', color: 'white', borderRadius: 99, fontWeight: 700, fontSize: 13, boxShadow: '0 4px 16px rgba(155,93,229,.3)', whiteSpace: 'nowrap', border: 'none', cursor: 'pointer' }}>
-                + Nuevo Producto
-              </button>
-              <button onClick={() => setShowLabels(true)}
-                style={{ padding: '10px 16px', background: 'white', color: '#5B3F8A', border: '1.5px solid #D9C9EE', borderRadius: 99, fontWeight: 700, fontSize: 13, whiteSpace: 'nowrap', cursor: 'pointer' }}>
-                🏷️ Etiquetas
-              </button>
-              <button type="button" onClick={() => { setBulkMode(v => !v); setBulkSel([]); setBulkMsg(''); }} aria-pressed={bulkMode} data-testid="bulkToggle"
-                style={{ padding: '10px 16px', background: bulkMode ? '#5B3F8A' : 'white', color: bulkMode ? 'white' : '#5B3F8A', border: '1.5px solid #D9C9EE', borderRadius: 99, fontWeight: 700, fontSize: 13, whiteSpace: 'nowrap', cursor: 'pointer' }}>
-                {bulkMode ? '✕ Salir de selección' : '☑ Selección múltiple'}
-              </button>
-              {refCounts && (() => {
-                const pool = products.filter(p => p.available !== false && productImageUrl(p));
-                const withN = pool.filter(p => refCounts[String(p.id)]).length;
-                return <button type="button" data-testid="refsSummary" onClick={() => { setEnrollOnly(null); setShowEnroll(true); }}
-                  style={{ padding: '6px 12px', background: '#F1EAFB', color: '#5B3F8A', border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 12, whiteSpace: 'nowrap', cursor: 'pointer' }}>◇ {withN} de {pool.length} piezas con fotos reales</button>;
-              })()}
-              <button onClick={() => { setEnrollOnly(null); setShowEnroll(true); }}
-                style={{ padding: '10px 16px', background: 'white', color: '#5B3F8A', border: '1.5px solid #D9C9EE', borderRadius: 99, fontWeight: 700, fontSize: 13, whiteSpace: 'nowrap', cursor: 'pointer' }}>
-                📸 Registrar fotos
-              </button>
-              <button onClick={updateSimilar} disabled={recoBusy} aria-busy={recoBusy} data-testid="updateSimilar"
-                style={{ padding: '10px 16px', background: 'white', color: '#5B3F8A', border: '1.5px solid #D9C9EE', borderRadius: 99, fontWeight: 700, fontSize: 13, whiteSpace: 'nowrap', cursor: recoBusy ? 'default' : 'pointer', opacity: recoBusy ? .7 : 1 }}>
-                {recoBusy ? 'Calculando…' : '✦ Actualizar recomendaciones'}
-              </button>
+              {!isMobile && viewToggle}
+              {!isMobile && toolsBtn}
+              {!isMobile && (
+                <button onClick={openNewProduct}
+                  style={{ minHeight: 44, padding: '0 20px', background: 'linear-gradient(135deg,#C0336E,#9B5DE5)', color: 'white', borderRadius: 99, fontWeight: 700, fontSize: 13.5, boxShadow: '0 4px 16px rgba(155,93,229,.3)', whiteSpace: 'nowrap', border: 'none', cursor: 'pointer', flexShrink: 0 }}>
+                  + Nuevo producto
+                </button>
+              )}
             </div>
+            <div className="adm-scrollx" role="group" aria-label="Filtrar por categoría"
+              style={{ display: 'flex', gap: 6, flexWrap: isMobile ? 'nowrap' : 'wrap', overflowX: isMobile ? 'auto' : 'visible', margin: isMobile ? '0 -12px 10px' : '0 0 12px', padding: isMobile ? '2px 12px' : 0 }}>
+              {['all', ...categories].map(cat => {
+                const cnt = cat === 'all' ? products.length : products.filter(p => p.category === cat).length;
+                const on = filter === cat;
+                return (
+                  <button key={cat} type="button" onClick={() => setFilter(cat)} aria-pressed={on}
+                    style={{ flexShrink: 0, minHeight: isMobile ? 40 : 36, padding: '0 14px', borderRadius: 99, fontSize: 13, fontWeight: 700, background: on ? '#E85D8A' : 'white', color: on ? 'white' : '#5B4A63', border: on ? '1.5px solid #E85D8A' : '1.5px solid #E5DDEA', boxShadow: on ? '0 2px 8px rgba(232,93,138,.3)' : 'none', whiteSpace: 'nowrap', cursor: 'pointer' }}>
+                    {cat === 'all' ? 'Todo' : cat} ({cnt})
+                  </button>
+                );
+              })}
+            </div>
+            {stockFilter !== 'all' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+                <span data-testid="stockFilterChip" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: stockFilter === 'out' ? '#FEE2E2' : '#FEF3C7', color: stockFilter === 'out' ? '#B91C1C' : '#92400E', borderRadius: 99, padding: '0 4px 0 12px', fontSize: 13, fontWeight: 700, minHeight: 36 }}>
+                  {stockFilter === 'out' ? 'Solo agotados' : 'Solo los que se están acabando'} ({filtered.length})
+                  <button type="button" onClick={() => setStockFilter('all')} aria-label="Quitar filtro de stock" style={{ width: 32, height: 32, borderRadius: '50%', color: 'inherit', fontWeight: 800 }}>✕</button>
+                </span>
+              </div>
+            )}
+            {isMobile && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <span style={{ flex: 1, fontSize: 12.5, color: '#7A6880', fontWeight: 600 }}>{filtered.length === products.length ? products.length + ' piezas' : filtered.length + ' de ' + products.length + ' piezas'}</span>
+                {viewToggle}
+                {toolsBtn}
+              </div>
+            )}
+            <p id="stockHint" style={{ fontSize: 12, color: '#7A6880', margin: '0 2px 10px', lineHeight: 1.4 }}>
+              Stock: por defecto 1 unidad; súbelo si tienes más. Se guarda al instante, sin publicar.
+            </p>
+            {sortMode && (
+              <div data-testid="sortBar" role="status" aria-live="polite" style={{ background: '#EEF2FF', color: '#3730A3', borderRadius: 12, padding: '8px 8px 8px 14px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700 }}>
+                <span style={{ flex: 1 }}>Modo ordenar: usa ▲ ▼ para cambiar el orden en la tienda.</span>
+                <button type="button" onClick={() => setSortMode(false)} style={{ minHeight: 40, padding: '0 16px', borderRadius: 99, background: '#3730A3', color: 'white', fontWeight: 800 }}>Listo</button>
+              </div>
+            )}
             {bulkMode && (() => {
               const selSet = new Set(bulkSel);
               const outside = bulkSel.filter(id => !filtered.some(p => String(p.id) === id)).length;
@@ -9906,13 +10278,17 @@ function App() {
                     {bulkSel.length} elegido{bulkSel.length === 1 ? '' : 's'}{outside ? ' (' + outside + ' fuera del filtro)' : ''}
                   </span>
                   <button type="button" onClick={() => setBulkSel(s => allIn ? s.filter(id => !filtered.some(p => String(p.id) === id)) : [...new Set([...s, ...filtered.map(p => String(p.id))])])}
-                    style={{ padding: '7px 12px', borderRadius: 99, background: 'white', border: '1.5px solid #D9C9EE', color: '#5B3F8A', fontWeight: 700, fontSize: 12 }}>
+                    style={{ minHeight: 40, padding: '0 12px', borderRadius: 99, background: 'white', border: '1.5px solid #D9C9EE', color: '#5B3F8A', fontWeight: 700, fontSize: 12 }}>
                     {allIn ? 'Quitar los ' + filtered.length + ' del filtro' : 'Elegir los ' + filtered.length + ' del filtro'}
                   </button>
-                  {bulkSel.length > 0 && <button type="button" onClick={() => setBulkSel([])} style={{ padding: '7px 12px', borderRadius: 99, background: 'white', border: '1.5px solid #D9C9EE', color: '#7A6880', fontWeight: 700, fontSize: 12 }}>Quitar selección</button>}
+                  {bulkSel.length > 0 && <button type="button" onClick={() => setBulkSel([])} style={{ minHeight: 40, padding: '0 12px', borderRadius: 99, background: 'white', border: '1.5px solid #D9C9EE', color: '#7A6880', fontWeight: 700, fontSize: 12 }}>Quitar selección</button>}
                   <button type="button" disabled={!bulkSel.length} onClick={() => { setBulkMsg(''); setShowBulk(true); }} data-testid="bulkOpen"
-                    style={{ padding: '8px 16px', borderRadius: 99, border: 'none', background: bulkSel.length ? 'linear-gradient(135deg,#C0336E,#9B5DE5)' : '#C9B8D3', color: 'white', fontWeight: 700, fontSize: 13, cursor: bulkSel.length ? 'pointer' : 'default' }}>
+                    style={{ minHeight: 40, padding: '0 16px', borderRadius: 99, border: 'none', background: bulkSel.length ? 'linear-gradient(135deg,#C0336E,#9B5DE5)' : '#C9B8D3', color: 'white', fontWeight: 700, fontSize: 13, cursor: bulkSel.length ? 'pointer' : 'default' }}>
                     Editar {bulkSel.length || ''} elegido{bulkSel.length === 1 ? '' : 's'}…
+                  </button>
+                  <button type="button" onClick={() => { setBulkMode(false); setBulkSel([]); setBulkMsg(''); }} data-testid="bulkExit"
+                    style={{ minHeight: 40, padding: '0 12px', borderRadius: 99, background: 'transparent', border: 'none', color: '#5B3F8A', fontWeight: 700, fontSize: 12 }}>
+                    ✕ Salir de selección
                   </button>
                 </div>
               );
@@ -9920,74 +10296,52 @@ function App() {
             {bulkMsg && <div role="status" aria-live="polite" data-testid="bulkMsg" style={{ fontSize: 13, fontWeight: 600, color: '#065F46', background: '#D1FAE5', borderRadius: 10, padding: '8px 12px', marginBottom: 12 }}>{bulkMsg}</div>}
             {showBulk && <BulkEditModal products={products.filter(p => bulkSel.includes(String(p.id)))} categories={categories} stock={stock}
               onApply={applyBulk} onSaveStock={saveStock} onClose={() => setShowBulk(false)} />}
-            {recoMsg && <div role="status" aria-live="polite" data-testid="recoMsg" style={{ fontSize: 12, color: recoMsg.startsWith('✓') ? '#15803D' : '#7A6880', margin: '-6px 0 10px' }}>{recoMsg}</div>}
-            {showLabels && <LabelsModal products={products} categories={categories} stock={stock} onClose={() => setShowLabels(false)} />}
-            {showEnroll && !enrollOnly && <EnrollPhotosModal products={products} token={session.token} onClose={() => setShowEnroll(false)} />}
+            {recoMsg && <div role="status" aria-live="polite" data-testid="recoMsg" style={{ fontSize: 12, color: recoMsg.startsWith('✓') ? '#15803D' : '#7A6880', margin: '0 2px 10px' }}>{recoMsg}</div>}
 
-            {/* TikTok Shop: carga masiva */}
-            <div style={{ background: '#FAF7FB', borderRadius: 12, padding: '12px 14px', marginBottom: 16 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: '#7A6880', marginBottom: 6, letterSpacing: '.04em' }}>🎵 TIKTOK SHOP — CARGA MASIVA</div>
-              <div style={{ fontSize: 12, color: '#555', marginBottom: 8 }}>
-                {tiktokMeta
-                  ? `Última exportación: ${tiktokMeta.lastCount} producto(s) · ${new Date(tiktokMeta.lastGeneratedAt).toLocaleString('es-EC')}`
-                  : 'Se genera automáticamente cada noche (solo productos nuevos/cambiados). Descárgalo y súbelo a mano en Seller Center → Bulk actions → Upload in bulk.'}
-              </div>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <button onClick={triggerTiktokExport} disabled={tiktokExportBusy}
-                  style={{ padding: '8px 16px', background: tiktokExportBusy ? '#ccc' : '#1A1118', color: 'white', border: 'none', borderRadius: 99, fontSize: 12, fontWeight: 700, cursor: tiktokExportBusy ? 'wait' : 'pointer' }}>
-                  {tiktokExportBusy ? '⏳ Disparando…' : '🚀 Generar ahora'}
-                </button>
-                <button onClick={loadTiktokStatus}
-                  style={{ padding: '8px 16px', background: 'white', color: '#555', border: '1.5px solid #ddd', borderRadius: 99, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
-                  🔄 Actualizar
-                </button>
-                {tiktokDownloadUrl && (
-                  <a href={tiktokDownloadUrl} target="_blank" rel="noopener noreferrer"
-                    style={{ padding: '8px 16px', background: 'white', color: '#9B5DE5', border: '1.5px solid #9B5DE5', borderRadius: 99, fontSize: 12, fontWeight: 700, textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
-                    ⬇️ Descargar Excel
-                  </a>
-                )}
-              </div>
-              {tiktokExportMsg && <div style={{ fontSize: 12, marginTop: 8, color: tiktokExportMsg.startsWith('✅') ? '#065F46' : '#DC2626', fontWeight: 500 }}>{tiktokExportMsg}</div>}
-            </div>
-
-            {/* Grid */}
+            {/* Lista / cuadrícula */}
             {loading ? (
               <div style={{ textAlign: 'center', padding: '80px 0', color: '#767676' }}>
                 <div style={{ fontSize: 44, marginBottom: 12 }}>⏳</div>
                 <div style={{ fontSize: 16 }}>Cargando…</div>
               </div>
             ) : filtered.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '80px 0', color: '#767676' }}>
-                <div style={{ fontSize: 52, marginBottom: 12 }}>💎</div>
-                <div style={{ fontSize: 16, marginBottom: 8 }}>{search ? `Sin resultados para "${search}"` : 'Sin productos en esta categoría'}</div>
-                {!search && <button onClick={() => { setEditProd(null); setShowModal(true); }}
-                  style={{ padding: '10px 24px', background: 'linear-gradient(135deg,#C0336E,#9B5DE5)', color: 'white', borderRadius: 99, fontWeight: 700, fontSize: 13, marginTop: 8, border: 'none', cursor: 'pointer' }}>
+              <div style={{ textAlign: 'center', padding: '60px 0', color: '#767676' }}>
+                <div style={{ fontSize: 40, marginBottom: 12, color: '#E8508A' }}>◇</div>
+                <div style={{ fontSize: 16, marginBottom: 8 }}>{search ? `Sin resultados para "${search}"` : stockFilter !== 'all' ? 'Ninguna pieza con ese stock' : 'Sin productos en esta categoría'}</div>
+                {!search && stockFilter === 'all' && <button onClick={openNewProduct}
+                  style={{ minHeight: 44, padding: '0 24px', background: 'linear-gradient(135deg,#C0336E,#9B5DE5)', color: 'white', borderRadius: 99, fontWeight: 700, fontSize: 13, marginTop: 8, border: 'none', cursor: 'pointer' }}>
                   + Agregar primer producto
                 </button>}
               </div>
-            ) : (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(200px,1fr))', gap: 14 }}>
-                {filtered.map(p => {
-                  const globalIdx = products.findIndex(x => x.id === p.id);
-                  return (
-                    <ProductCard key={p.id} p={p}
-                      onEdit={p => { setEditProd(p); setShowModal(true); }}
+            ) : (() => {
+              const common = p => {
+                const globalIdx = products.findIndex(x => x.id === p.id);
+                return {
+                  onMoveUp: q => moveProd(q, 'up'), onMoveDown: q => moveProd(q, 'down'),
+                  canUp: globalIdx > 0, canDown: globalIdx < products.length - 1,
+                  stockQty: stock ? stockOf(stock, p.id) : null,
+                  onStockSave: stock ? saveStock : null,
+                  refN: refCounts ? (refCounts[String(p.id)] || 0) : null,
+                  select: bulkMode ? { checked: bulkSel.includes(String(p.id)), onChange: () => setBulkSel(s => s.includes(String(p.id)) ? s.filter(x => x !== String(p.id)) : [...s, String(p.id)]) } : null,
+                  sortMode, hintId: 'stockHint'
+                };
+              };
+              return prodView === 'list' ? (
+                <ul aria-label="Productos" data-testid="productList" style={{ background: 'white', borderRadius: 14, overflow: 'hidden', boxShadow: '0 1px 6px rgba(26,17,36,.06)', padding: 0, margin: 0 }}>
+                  {filtered.map(p => <ProductRow key={p.id} p={p} {...common(p)} onEdit={q => { setEditProd(q); setShowModal(true); }} onMenu={setRowMenu} />)}
+                </ul>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(auto-fill,minmax(160px,1fr))' : 'repeat(auto-fill,minmax(200px,1fr))', gap: isMobile ? 10 : 14 }}>
+                  {filtered.map(p => (
+                    <ProductCard key={p.id} p={p} {...common(p)}
+                      onEdit={q => { setEditProd(q); setShowModal(true); }}
                       onDelete={setDelConfirm}
                       onToggle={toggleProd}
-                      onMoveUp={p => moveProd(p, 'up')}
-                      onMoveDown={p => moveProd(p, 'down')}
-                      canUp={globalIdx > 0}
-                      canDown={globalIdx < products.length - 1}
-                      stockQty={stock ? stockOf(stock, p.id) : null}
-                      onStockSave={stock ? saveStock : null}
-                      refN={refCounts ? (refCounts[String(p.id)] || 0) : null}
-                      select={bulkMode ? { checked: bulkSel.includes(String(p.id)), onChange: () => setBulkSel(s => s.includes(String(p.id)) ? s.filter(x => x !== String(p.id)) : [...s, String(p.id)]) } : null}
                     />
-                  );
-                })}
-              </div>
-            )}
+                  ))}
+                </div>
+              );
+            })()}
           </div>
         )}
 
@@ -10006,7 +10360,8 @@ function App() {
           const ACTIVE_STATES  = ['Nuevo', 'Confirmado', 'En proceso', 'Enviado'];
           const DONE_STATES    = ['Entregado', 'Cancelado'];
           const loteCount      = orders.filter(o => o.lote && ACTIVE_STATES.includes(o.estado || 'Nuevo')).length;
-          const activeOrders   = orders.filter(o => ACTIVE_STATES.includes(o.estado || 'Nuevo') && (!loteOnly || o.lote) && orderMatchesSearch(o, histSearch));
+          const loversMissCount = orders.filter(o => PREP_STATES.includes(o.estado || 'Nuevo') && loversMissingPieces(o) > 0).length;
+          const activeOrders   = orders.filter(o => ACTIVE_STATES.includes(o.estado || 'Nuevo') && (!loteOnly || o.lote) && (!loversMissingOnly || (PREP_STATES.includes(o.estado || 'Nuevo') && loversMissingPieces(o) > 0)) && orderMatchesSearch(o, histSearch));
           const histOrders     = orders.filter(o => DONE_STATES.includes(o.estado || 'Nuevo') && orderMatchesSearch(o, histSearch));
           const histFiltered   = histOrders.filter(o => {
             const oDate = o.fecha ? o.fecha.substring(0, 10) : '';
@@ -10069,6 +10424,19 @@ function App() {
                   </button>
                 ))}
               </div>
+              {ordersHint && ordersView === 'active' && (
+                <div role="status" aria-live="polite" data-testid="ordersHint" style={{ background: '#F1EAFB', color: '#5B3F8A', borderRadius: 12, padding: '10px 8px 10px 14px', marginBottom: 14, fontSize: 13, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ flex: 1 }}>◇ {ordersHint}</span>
+                  <button type="button" onClick={() => setOrdersHint('')} aria-label="Cerrar aviso" style={{ width: 40, height: 40, borderRadius: '50%', color: '#5B3F8A', fontWeight: 800 }}>✕</button>
+                </div>
+              )}
+              {ordersView === 'active' && (loversMissingOnly || loversMissCount > 0) && (
+                <button type="button" onClick={() => setLoversMissingOnly(v => !v)} aria-pressed={loversMissingOnly} data-testid="loversMissingFilter"
+                  style={{ marginBottom: 16, marginRight: 8, minHeight: 36, padding: '0 16px', borderRadius: 99, fontSize: 12, fontWeight: 700, fontFamily: 'inherit', cursor: 'pointer',
+                    background: loversMissingOnly ? '#7C3AED' : 'white', color: loversMissingOnly ? 'white' : '#7C3AED', border: '1.5px solid #7C3AED' }}>
+                  ♡ Cajas Lovers sin piezas ({loversMissCount}){loversMissingOnly ? ' · ver todos' : ''}
+                </button>
+              )}
               {(ordersView === 'active' || ordersView === 'board') && loteCount > 0 && (
                 <button onClick={() => setLoteOnly(v => !v)}
                   style={{ marginBottom: 16, padding: '7px 16px', borderRadius: 99, fontSize: 12, fontWeight: 700, fontFamily: 'inherit', cursor: 'pointer',
@@ -10082,7 +10450,7 @@ function App() {
                 activeOrders.length === 0 ? (
                   <div style={{ textAlign: 'center', padding: '80px 0', color: '#767676' }}>
                     <div style={{ fontSize: 52, marginBottom: 12 }}>📦</div>
-                    <div style={{ fontSize: 16, marginBottom: 8 }}>No hay pedidos activos</div>
+                    <div style={{ fontSize: 16, marginBottom: 8 }}>{loversMissingOnly ? 'No hay cajas de Lovers sin piezas' : 'No hay pedidos activos'}</div>
                     <div style={{ fontSize: 13, color: '#ccc', maxWidth: 300, margin: '0 auto' }}>
                       Los pedidos de Square y WhatsApp aparecen aquí automáticamente.
                     </div>
@@ -10246,6 +10614,15 @@ function App() {
 
         {/* ── Settings tab ── */}
         {activeTab === 'settings' && (
+          <div data-testid="whatsappSetting" style={{ background: 'white', borderRadius: 14, padding: '14px 16px', marginBottom: 16, boxShadow: '0 1px 6px rgba(0,0,0,.05)' }}>
+            <label htmlFor="whatsappNum" style={{ display: 'block', fontSize: 13, fontWeight: 800, color: '#1A1118', marginBottom: 4 }}>WhatsApp para pedidos</label>
+            <div id="whatsappHelp" style={{ fontSize: 12, color: '#7A6880', marginBottom: 8 }}>El número al que la tienda manda los pedidos y consultas. Se sube con "Publicar cambios".</div>
+            <input id="whatsappNum" value={whatsappNum} onChange={e => { setWhatsappNum(e.target.value); setDirty(true); }} aria-describedby="whatsappHelp"
+              placeholder="+1 786 555 0123" inputMode="tel"
+              style={{ width: '100%', maxWidth: 360, height: 44, padding: '0 12px', border: '1.5px solid #E5DDEA', borderRadius: 10, fontSize: 15, outline: 'none', color: '#333' }} />
+          </div>
+        )}
+        {activeTab === 'settings' && (
           <SettingsTab
             categories={categories} setCategories={setCategories}
             materials={materials} setMaterials={setMaterials}
@@ -10267,6 +10644,8 @@ function App() {
         {showModal && <ProductModal product={editProduct} token={session.token} categories={categories} materials={materials} fbSurcharges={fbSurcharges} fbMarkets={fbMarkets} allProducts={products} skuSeq={skuSeq} onSave={saveProduct} onClose={() => { setShowModal(false); setEditProd(null); }}
           onDupStock={(p, from, to) => { setStock(prev => ({ ...(prev || {}), [String(p.id)]: to })); setSyncMsg('✅ ' + (normalizeSku(p.sku) || p.name) + ': stock ' + from + ' → ' + to); setTimeout(() => setSyncMsg(''), 6000); }}
           onEnroll={p => { setEnrollOnly(String(p.id)); setShowEnroll(true); }} />}
+        {showLabels && <LabelsModal products={products} categories={categories} stock={stock} onClose={() => setShowLabels(false)} />}
+        {showEnroll && !enrollOnly && <EnrollPhotosModal products={products} token={session.token} onClose={() => setShowEnroll(false)} />}
         {showEnroll && enrollOnly && <EnrollPhotosModal products={products} token={session.token} onlyId={enrollOnly} onClose={() => { setShowEnroll(false); setEnrollOnly(null); }} />}
 
         {delConfirm && (
@@ -10284,6 +10663,121 @@ function App() {
         )}
 
       </div>
+      </main>
+      </div>
+
+      {/* ── Teléfono: barra de cambios sin publicar (sobre la barra inferior), solo si hay cambios ── */}
+      {isMobile && dirty && (
+        <div data-testid="pendingBar" role="region" aria-label="Cambios sin publicar"
+          style={{ position: 'fixed', left: 8, right: 8, bottom: 'calc(66px + env(safe-area-inset-bottom))', zIndex: 255, background: '#1A1124', color: 'white', borderRadius: 14, padding: '6px 6px 6px 14px', display: 'flex', alignItems: 'center', gap: 10, boxShadow: '0 8px 24px rgba(26,17,36,.35)', animation: 'sheetUp .2s ease' }}>
+          <span role="status" aria-live="polite" style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 700, lineHeight: 1.3 }}>
+            <span aria-hidden="true" style={{ color: '#FBBF24' }}>● </span>{syncing ? (syncMsg || 'Publicando…') : pendingText}
+          </span>
+          <button type="button" onClick={publish} disabled={syncing} aria-label={syncing ? undefined : 'Publicar cambios'}
+            style={{ minHeight: 44, padding: '0 18px', borderRadius: 99, background: 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', fontWeight: 800, fontSize: 14, flexShrink: 0, opacity: syncing ? .7 : 1 }}>
+            {syncing ? 'Publicando…' : 'Publicar'}
+          </button>
+        </div>
+      )}
+
+      {/* ── Teléfono: "+ Nuevo producto" flotante en Productos ── */}
+      {isMobile && activeTab === 'products' && !bulkMode && !sortMode && (
+        <button type="button" onClick={openNewProduct} data-testid="fabNew"
+          style={{ position: 'fixed', right: 14, bottom: `calc(${dirty ? 132 : 74}px + env(safe-area-inset-bottom))`, zIndex: 250, minHeight: 52, padding: '0 20px', borderRadius: 99, background: 'linear-gradient(135deg,#C0336E,#9B5DE5)', color: 'white', fontWeight: 800, fontSize: 14.5, boxShadow: '0 8px 22px rgba(155,93,229,.45)' }}>
+          + Nuevo producto
+        </button>
+      )}
+
+      {/* ── Hoja "Más" (teléfono) ── */}
+      {showMore && (
+        <Sheet title="Más secciones" onClose={() => setShowMore(false)} mobile={isMobile} testid="moreSheet">
+          {NAV_GROUPS.map(g => (
+            <div key={g.title} role="group" aria-label={g.title}>
+              <div style={SHEET_GROUP_H}>{g.title}</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                {g.items.map(([t, l, gl]) => (
+                  <button key={t} type="button" onClick={() => go(t)} aria-current={activeTab === t ? 'page' : undefined}
+                    style={{ ...SHEET_ITEM, fontSize: 13, padding: '8px 10px', background: activeTab === t ? '#FCE7F0' : '#FAF7FB', color: activeTab === t ? '#C0336E' : '#1A1118' }}>
+                    <span aria-hidden="true" style={SHEET_GLYPH}>{gl}</span>
+                    <span style={{ flex: 1, minWidth: 0, lineHeight: 1.25 }}>{l}</span>
+                    <NavBadge n={navBadge[t]} light />
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </Sheet>
+      )}
+
+      {/* ── Hoja "Herramientas" (Productos) ── */}
+      {showTools && (
+        <Sheet title="Herramientas" onClose={() => setShowTools(false)} mobile={isMobile} testid="toolsSheet">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <button type="button" style={SHEET_ITEM} onClick={() => { setShowTools(false); setShowLabels(true); }}>
+              <span aria-hidden="true" style={SHEET_GLYPH}>◈</span><span style={{ flex: 1 }}>Etiquetas con QR<span style={{ display: 'block', fontSize: 11.5, fontWeight: 500, color: '#7A6880' }}>Imprimir etiquetas por pieza o categoría</span></span>
+            </button>
+            <button type="button" style={SHEET_ITEM} data-testid="bulkToggle" aria-pressed={bulkMode} onClick={() => { setBulkMode(v => !v); setBulkSel([]); setBulkMsg(''); setSortMode(false); setShowTools(false); }}>
+              <span aria-hidden="true" style={SHEET_GLYPH}>✓</span><span style={{ flex: 1 }}>{bulkMode ? 'Salir de selección múltiple' : 'Selección múltiple'}<span style={{ display: 'block', fontSize: 11.5, fontWeight: 500, color: '#7A6880' }}>Precio, oferta, pausar o stock de varias a la vez</span></span>
+            </button>
+            <button type="button" style={SHEET_ITEM} data-testid="refsSummary" onClick={() => { setShowTools(false); openEnroll(); }}>
+              <span aria-hidden="true" style={SHEET_GLYPH}>◇</span><span style={{ flex: 1 }}>Registrar fotos<span style={{ display: 'block', fontSize: 11.5, fontWeight: 500, color: '#7A6880' }}>{refsWith == null ? 'Fotos reales para el identificador' : `${refsWith} de ${refsPool.length} piezas con fotos reales`}</span></span>
+            </button>
+            <button type="button" style={{ ...SHEET_ITEM, opacity: recoBusy ? .7 : 1 }} data-testid="updateSimilar" disabled={recoBusy} aria-busy={recoBusy} onClick={() => { setShowTools(false); updateSimilar(); }}>
+              <span aria-hidden="true" style={SHEET_GLYPH}>✦</span><span style={{ flex: 1 }}>{recoBusy ? 'Calculando recomendaciones…' : 'Actualizar recomendaciones'}<span style={{ display: 'block', fontSize: 11.5, fontWeight: 500, color: '#7A6880' }}>"También te puede gustar" en la tienda</span></span>
+            </button>
+            <button type="button" style={SHEET_ITEM} data-testid="sortToggle" aria-pressed={sortMode} onClick={() => { setSortMode(v => !v); setBulkMode(false); setBulkSel([]); setShowTools(false); }}>
+              <span aria-hidden="true" style={SHEET_GLYPH}>⇅</span><span style={{ flex: 1 }}>{sortMode ? 'Terminar de ordenar' : 'Ordenar productos'}<span style={{ display: 'block', fontSize: 11.5, fontWeight: 500, color: '#7A6880' }}>Cambiar el orden en que salen en la tienda</span></span>
+            </button>
+            {/* TikTok Shop: carga masiva */}
+            <div data-testid="tiktokBlock" style={{ background: '#FAF7FB', borderRadius: 12, padding: '12px 14px', marginTop: 4 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: '#7A6880', marginBottom: 6, letterSpacing: '.06em' }}>TIKTOK SHOP — CARGA MASIVA</div>
+              <div style={{ fontSize: 12, color: '#555', marginBottom: 8, lineHeight: 1.4 }}>
+                {tiktokMeta
+                  ? `Última exportación: ${tiktokMeta.lastCount} producto(s) · ${new Date(tiktokMeta.lastGeneratedAt).toLocaleString('es-EC')}`
+                  : 'Se genera automáticamente cada noche (solo productos nuevos/cambiados). Descárgalo y súbelo a mano en Seller Center → Bulk actions → Upload in bulk.'}
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button onClick={triggerTiktokExport} disabled={tiktokExportBusy}
+                  style={{ minHeight: 40, padding: '0 16px', background: tiktokExportBusy ? '#ccc' : '#1A1118', color: 'white', border: 'none', borderRadius: 99, fontSize: 12, fontWeight: 700, cursor: tiktokExportBusy ? 'wait' : 'pointer' }}>
+                  {tiktokExportBusy ? 'Disparando…' : 'Generar ahora'}
+                </button>
+                <button onClick={loadTiktokStatus}
+                  style={{ minHeight: 40, padding: '0 16px', background: 'white', color: '#555', border: '1.5px solid #ddd', borderRadius: 99, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                  Actualizar
+                </button>
+                {tiktokDownloadUrl && (
+                  <a href={tiktokDownloadUrl} target="_blank" rel="noopener noreferrer"
+                    style={{ minHeight: 40, padding: '0 16px', background: 'white', color: '#9B5DE5', border: '1.5px solid #9B5DE5', borderRadius: 99, fontSize: 12, fontWeight: 700, textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
+                    Descargar Excel
+                  </a>
+                )}
+              </div>
+              {tiktokExportMsg && <div role="status" aria-live="polite" style={{ fontSize: 12, marginTop: 8, color: tiktokExportMsg.startsWith('✅') ? '#065F46' : '#DC2626', fontWeight: 500 }}>{tiktokExportMsg}</div>}
+            </div>
+          </div>
+        </Sheet>
+      )}
+
+      {/* ── Menú "⋯" de una fila de la lista ── */}
+      {rowMenu && (() => {
+        const p = products.find(x => x.id === rowMenu.id) || rowMenu;
+        const active = p.available !== false;
+        return (
+          <Sheet title={p.name} onClose={() => setRowMenu(null)} mobile={isMobile} testid="rowMenuSheet" maxWidth={420}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <button type="button" style={SHEET_ITEM} onClick={() => { setRowMenu(null); setEditProd(p); setShowModal(true); }}>
+                <span aria-hidden="true" style={SHEET_GLYPH}>✎</span>Editar
+              </button>
+              <button type="button" style={SHEET_ITEM} onClick={() => { toggleProd(p); setRowMenu(null); }}>
+                <span aria-hidden="true" style={SHEET_GLYPH}>{active ? '❙❙' : '▷'}</span>{active ? 'Pausar (ocultar de la tienda)' : 'Activar (mostrar en la tienda)'}
+              </button>
+              <button type="button" style={{ ...SHEET_ITEM, color: '#B91C1C', background: '#FEF2F2' }} onClick={() => { setRowMenu(null); setDelConfirm(p); }}>
+                <span aria-hidden="true" style={{ ...SHEET_GLYPH, color: '#B91C1C' }}>✕</span>Eliminar
+              </button>
+            </div>
+          </Sheet>
+        );
+      })()}
     </div>
   );
 }

@@ -8,6 +8,29 @@ Vive separado de la tienda (`cacusabytaitus.com`, repo `cacusa`) a propósito: a
 - Todo pasa por el Worker `cacusa-admin` (login, pedidos, subir fotos). Cuando se publica el catálogo, el Worker lo commitea a `data/products.json` en el repo `cacusa`, no acá.
 - `sw.js`: service worker de avisos push.
 
+## Navegación e Inicio (27 nov)
+
+- **Inicio** (pantalla por defecto): pedidos por preparar (Nuevo / Confirmado / En proceso), cajas de
+  Lovers sin sus 2 piezas, agotados (activos con stock 0), "se están acabando" (stock 1 y vendidos en
+  los últimos 30 días) y ventas de hoy vs. ayer (misma cuenta que Ventas). Cada tarjeta abre su vista
+  filtrada; accesos rápidos: Nuevo producto, Agregar pieza (lleva a Pedidos: la pieza se carga dentro
+  de un pedido), Registrar fotos y Preparar pedidos (tablero).
+- **Teléfono (< 768 px)**: barra inferior fija Inicio · Productos · Pedidos · Ventas · Más; "Más" abre
+  las demás secciones agrupadas (Clientas, Marketing, Tienda, Ajustes). **Escritorio**: barra lateral
+  con los mismos grupos y "Publicar cambios" arriba (gris si no hay nada que publicar).
+- **Cambios sin publicar**: `dirty` sigue mandando (publish() no cambió); el panel solo cuenta cuántos
+  cambios hay contra lo último cargado/publicado (piezas nuevas/editadas/borradas, el orden y cada
+  bloque de configuración). En el teléfono aparece la barra "Tienes N cambios sin publicar · Publicar".
+- **WhatsApp para pedidos** vive en Ajustes. Los avisos de pedidos (antes 🔔) están en Ajustes y en el
+  menú de la cuenta.
+- **Productos**: vista de lista (por defecto en el teléfono; stock − / + que guarda con `/stock/set`
+  un instante después del último toque, ⋯ con Pausar/Activar y Eliminar) o cuadrícula (por defecto en
+  escritorio); la elección se recuerda por tipo de pantalla (`cacusa-admin-prodview-m` / `-d`).
+  Etiquetas, Selección múltiple, Registrar fotos, Actualizar recomendaciones, Ordenar (▲▼) y TikTok
+  Shop están en "Herramientas".
+- **Foto del producto**: una sola vista previa cuadrada con el encuadre de la tienda (focalX/focalY/
+  zoom), con "Cambiar foto", ✕ y "Ajustar encuadre" (arrastrar, flechas, − / +) sobre la misma foto.
+
 ## Reconocimiento por foto ("📷 Agregar pieza con foto")
 
 Gratis y en el navegador (TF.js 4.22.0, WebGL). La foto del taller se convierte en una huella de
