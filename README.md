@@ -203,6 +203,19 @@ los parches junto al CLS (no mejora). `tools/build-catalog-refs.mjs` genera tamb
   sueltas sobre fondo liso, pero con la mano, el mantel estampado, cadenas finas o bandejas se
   queda con la mano o el fondo.
 
+### "¿Ya existe?" en Nuevo producto (25 nov)
+
+Al subir la foto de un producto nuevo se compara en segundo plano con el catálogo (huella v3, la
+misma que luego reusa "Sugerir datos"). Puntaje del 1ro ≥ 0,55: "Parece que este producto ya
+existe"; ≥ 0,40: "Se parece a estos productos" (hasta 3). "Sí, es el mismo: sumar N" lee el stock
+(/stock/list; sin dato = 1), llama a /stock/set con stock + N, aprende la foto como foto real de
+esa pieza y cierra sin crear el producto. Nunca suma solo; al editar no se revisa.
+
+| umbral | duplicados detectados (sintético / real) | en el top 3 (sintético / real) | falsa alarma en piezas nuevas reales (vs catálogo) | falsa alarma sintética (otra pieza del catálogo) |
+|---|---|---|---|---|
+| alto ≥ 0,55 | 39 % / 53 % | 39 % / 57 % | 0 % | 1 % (precisión 99 %) |
+| medio ≥ 0,40 | 73 % / 67 % | 74 % / 83 % | 0 % | 20 % (precisión 77 %) |
+
 ### Regenerar (cuando haya muchos productos nuevos o fotos cambiadas)
 
 ```bash

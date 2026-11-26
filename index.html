@@ -1285,7 +1285,9 @@ function ImageEditor({ imgSrc, focalX, focalY, zoom, onChange }) {
 }
 
 // ── Product Modal ──────────────────────────────────────────────────────────
-function ProductModal({ product, onSave, onClose, token, categories, materials, fbSurcharges = {}, fbMarkets = {}, allProducts = [], skuSeq = {}, onEnroll }) {
+// "¿Ya existe?" (25 nov): umbrales sobre el puntaje del 1ro (huella v3; ver README).
+const DUP_HIGH = 0.55, DUP_MEDIUM = 0.40;
+function ProductModal({ product, onSave, onClose, token, categories, materials, fbSurcharges = {}, fbMarkets = {}, allProducts = [], skuSeq = {}, onEnroll, onDupStock }) {
   const refCountsPM = useRefCounts(token);
   const cats = (categories && categories.length) ? categories : DEFAULT_CATEGORIES;
   const mats = (materials && materials.length) ? materials : DEFAULT_MATERIALS;
@@ -1328,6 +1330,61 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
   // Al abrir "Nuevo producto" se precarga el reconocimiento en segundo plano (misma precarga que
   // Pedidos: una vez por sesión, nunca con Ahorro de datos), así "Sugerir datos" responde rápido.
   useEffect(() => { if (isNew) prewarmRecognition(allProducts); }, []);
+  // ── ¿Ya existe? (25 nov) ── Al subir la foto de un producto NUEVO se compara en segundo plano con
+  // el catálogo (huella v3). Umbrales (ver README): ≥ DUP_HIGH "Parece que este producto ya existe";
+  // ≥ DUP_MEDIUM "Se parece a estos productos" (hasta 3). Nunca suma stock solo: siempre un toque.
+  const photoQRef = useRef(null);            // { src, q, img }: huella de la foto subida (la reusa "Sugerir datos")
+  const dupDismissed = useRef(new Set());    // fotos para las que ya se dijo "No, es otro producto"
+  const [dup, setDup] = useState(null);      // { status: checking|done|error, level, cands, idx, stock, qty, busy, err }
+  const photoQuery = async src => {
+    if (photoQRef.current && photoQRef.current.src === src) return photoQRef.current;
+    const img = /^(blob:|data:)/.test(src) ? await loadImg(src, false) : await loadCatalogImg(src);
+    const eng = await loadRecognitionModel();
+    const r = eng.kind === 'v3' ? await embedV3Both(eng, img, null) : null;
+    const emb = r ? r.all : await embedPhoto(eng, img, 'base');
+    const q = { emb, embRef: r ? r.ref : null, color: colorDescriptor(img), kind: eng.kind, cw: eng.cw, margin: eng.margin, pct: eng.pct };
+    photoQRef.current = { src, q, img };
+    return photoQRef.current;
+  };
+  useEffect(() => {
+    if (!isNew || !imgPrev || uploading || dupDismissed.current.has(imgPrev)) { if (!imgPrev) setDup(null); return; }
+    let alive = true;
+    setDup({ status: 'checking' });
+    (async () => {
+      const cat = await prepareCatalogShared(allProducts);
+      const { q } = await photoQuery(imgPrev);
+      const ranked = rankCatalog(q, cat.items, null, 'Todas', 3);
+      if (!alive) return;
+      const top = ranked.length ? ranked[0].score : -1;
+      const level = top >= DUP_HIGH ? 'high' : top >= DUP_MEDIUM ? 'medium' : null;
+      const cands = level === 'high' ? ranked.filter(r => r.score >= DUP_HIGH).slice(0, 3) : ranked.filter(r => r.score >= DUP_MEDIUM).slice(0, 3);
+      if (!level) { setDup({ status: 'done', level: null }); return; }
+      let stock = null; try { const r = await apiCall('stock/list', { token }); stock = (r && r.stock) || {}; } catch (_) {}
+      if (alive) setDup({ status: 'done', level, cands, idx: 0, stock, qty: 1 });
+    })().catch(e => { if (alive) setDup({ status: 'error' }); console.warn('¿ya existe?:', e && e.message); });
+    return () => { alive = false; };
+  }, [imgPrev, uploading]);
+  const dupConfirm = async () => {
+    const c = dup && dup.cands && dup.cands[dup.idx];
+    if (!c || dup.busy) return;
+    setDup(d => ({ ...d, busy: true, err: '' }));
+    try {
+      let cur = stockOf(dup.stock, c.p.id);
+      try { const r = await apiCall('stock/list', { token }); if (r && r.stock) cur = stockOf(r.stock, c.p.id); } catch (_) {}
+      const next = cur + dup.qty;
+      await apiCall('stock/set', { token, id: String(c.p.id), qty: next });
+      // La foto del taller sirve como foto real aprendida de esa pieza (solo con la huella actual).
+      const pq = photoQRef.current;
+      if (pq && pq.src === imgPrev && pq.q.kind === RECOG_KIND) {
+        apiCall('identify/ref/add', { token, id: String(c.p.id), vector: learnedRefVector(pq.q) }).then(r => { if (r && Number.isInteger(r.count)) setRefCount(c.p.id, r.count); }).catch(() => {});
+      }
+      onDupStock && onDupStock(c.p, cur, next);
+      onClose();
+    } catch (e) {
+      setDup(d => ({ ...d, busy: false, err: 'No se pudo actualizar el stock (' + ((e && e.message) || 'error') + '). El formulario sigue igual.' }));
+    }
+  };
+  const dupDismiss = () => { dupDismissed.current.add(imgPrev); setDup(null); };
   const set = (k, v) => {
     touched.current.add(k);
     setSugTags(t => { if (!t[k]) return t; const n = { ...t }; delete n[k]; return n; });
@@ -1348,7 +1405,8 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
       const cat = await prepareCatalogShared(allProducts);
       setSugPhase('Buscando piezas parecidas en el catálogo…');
       const items = cat.items.filter(it => String(it.p.id) !== String(product && product.id));
-      const q = { emb: await embedPhoto(eng, img, 'base'), color: colorDescriptor(img), kind: eng.kind, cw: eng.cw, margin: eng.margin };
+      const pq = /^(blob:|data:)/.test(imgPrev) ? await photoQuery(imgPrev) : null; // misma huella que "¿ya existe?"
+      const q = pq ? pq.q : { emb: await embedPhoto(eng, img, 'base'), color: colorDescriptor(img), kind: eng.kind, cw: eng.cw, margin: eng.margin };
       const sug = localProductSuggestion(q, items, { tone: photoTone(img) });
       if (!sug) throw new Error('No hay piezas del catálogo para comparar.');
       const top3 = sug.neighbors.slice(0, 3);
@@ -1571,6 +1629,44 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
           <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: 'none' }} />
           {uploadMsg && <div role="status" aria-live="polite" style={{ fontSize: 12, marginTop: 6, color: uploadMsg.startsWith('✅') ? '#065F46' : '#DC2626', fontWeight: 500 }}>{uploadMsg}</div>}
           {!uploadMsg && <div style={{ fontSize: 11, color: '#767676', marginTop: 6 }}>💡 La foto se optimiza automáticamente para cargar rápido en la tienda.</div>}
+          {isNew && imgPrev && !uploading && dup && dup.status === 'checking' && <div role="status" aria-live="polite" data-testid="dupChecking" style={{ fontSize: 11, color: '#7A6880', marginTop: 8 }}>Revisando si ya existe…</div>}
+          {isNew && imgPrev && !uploading && dup && dup.status === 'done' && dup.level && (() => {
+            const c = dup.cands[dup.idx], gal = (c.p.images || []).filter(u => typeof u === 'string' && /^https:/.test(u)).slice(0, 3), cur = stockOf(dup.stock, c.p.id);
+            return (
+              <div role="alert" data-testid="dupAlert" data-level={dup.level} style={{ marginTop: 10, background: dup.level === 'high' ? '#FFF7ED' : '#F7F3FA', border: '1.5px solid ' + (dup.level === 'high' ? '#FDBA74' : '#E2D4F5'), borderRadius: 12, padding: 12 }}>
+                <div style={{ fontWeight: 800, fontSize: 14, color: '#1A1118', marginBottom: 8 }}>
+                  {dup.level === 'high' ? '◇ Parece que este producto ya existe' : '◇ Se parece a ' + (dup.cands.length === 1 ? 'este producto' : 'estos productos')}
+                  {dup.cands.length > 1 && <span style={{ fontWeight: 600, fontSize: 12, color: '#7A6880' }}> ({dup.idx + 1} de {dup.cands.length})</span>}
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <figure style={{ margin: 0, flex: 1, minWidth: 0 }}>
+                    <img src={imgPrev} alt="Foto que subiste" data-testid="dupMine" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 10, display: 'block' }} />
+                    <figcaption style={{ fontSize: 10, color: '#7A6880', marginTop: 2 }}>Tu foto</figcaption>
+                  </figure>
+                  <figure style={{ margin: 0, flex: 1, minWidth: 0 }}>
+                    <img src={productImageUrl(c.p)} alt={'Foto del catálogo de ' + c.p.name} data-testid="dupTheirs" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 10, display: 'block' }} />
+                    {gal.length > 0 && <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>{gal.map((u, i) => <img key={i} src={u} alt="" style={{ width: 30, height: 30, objectFit: 'cover', borderRadius: 6 }} />)}</div>}
+                    <figcaption style={{ fontSize: 10, color: '#7A6880', marginTop: 2 }}>En el catálogo</figcaption>
+                  </figure>
+                </div>
+                <div style={{ fontSize: 13, marginTop: 8, color: '#1A1118' }}><SkuChip sku={normalizeSku(c.p.sku)} /> <b>{c.p.name}</b> <span data-testid="dupStock" style={{ fontSize: 12, color: '#7A6880' }}>· stock actual: {dup.stock ? cur : '—'}</span></div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+                  <span id="dupQtyLbl" style={{ fontSize: 12, color: '#5B4A63' }}>Unidades a sumar:</span>
+                  <button type="button" aria-label="Una unidad menos" onClick={() => setDup(d => ({ ...d, qty: Math.max(1, d.qty - 1) }))} style={{ width: 30, height: 30, borderRadius: 8, border: '1px solid #E5D7EE', background: 'white', cursor: 'pointer' }}>−</button>
+                  <span aria-labelledby="dupQtyLbl" data-testid="dupQty" style={{ minWidth: 20, textAlign: 'center', fontWeight: 800 }}>{dup.qty}</span>
+                  <button type="button" aria-label="Una unidad más" onClick={() => setDup(d => ({ ...d, qty: Math.min(50, d.qty + 1) }))} style={{ width: 30, height: 30, borderRadius: 8, border: '1px solid #E5D7EE', background: 'white', cursor: 'pointer' }}>+</button>
+                </div>
+                {dup.err && <div role="alert" style={{ fontSize: 12, color: '#DC2626', marginTop: 6 }}>{dup.err}</div>}
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
+                  <button type="button" onClick={dupConfirm} disabled={dup.busy} style={{ padding: '9px 14px', borderRadius: 99, border: 'none', background: 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
+                    {dup.busy ? 'Sumando…' : 'Sí, es el mismo: sumar ' + dup.qty + ' unidad' + (dup.qty === 1 ? '' : 'es')}
+                  </button>
+                  <button type="button" onClick={dupDismiss} disabled={dup.busy} style={{ padding: '9px 14px', borderRadius: 99, border: '1px solid #E5D7EE', background: 'white', color: '#5B3F8A', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>No, es otro producto</button>
+                  {dup.cands.length > 1 && <button type="button" onClick={() => setDup(d => ({ ...d, idx: (d.idx + 1) % d.cands.length, qty: 1, err: '' }))} disabled={dup.busy} style={{ padding: '9px 14px', borderRadius: 99, border: 'none', background: '#F3EFF5', color: '#5B3F8A', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>Ver otro candidato</button>}
+                </div>
+              </div>
+            );
+          })()}
           {isNew && imgPrev && !uploading && (
             <div data-testid="suggestBox" style={{ marginTop: 10, background: '#F7F3FA', borderRadius: 10, padding: '10px 12px' }}>
               <button type="button" onClick={suggestFromPhoto} disabled={sugBusy} aria-busy={sugBusy}
@@ -9181,6 +9277,7 @@ function App() {
             .catch(e => { console.warn('order manual:', e); setSyncMsg('❌ No se pudo guardar el pedido: ' + e.message); });
         }} />}
         {showModal && <ProductModal product={editProduct} token={session.token} categories={categories} materials={materials} fbSurcharges={fbSurcharges} fbMarkets={fbMarkets} allProducts={products} skuSeq={skuSeq} onSave={saveProduct} onClose={() => { setShowModal(false); setEditProd(null); }}
+          onDupStock={(p, from, to) => { setStock(prev => ({ ...(prev || {}), [String(p.id)]: to })); setSyncMsg('✅ ' + (normalizeSku(p.sku) || p.name) + ': stock ' + from + ' → ' + to); setTimeout(() => setSyncMsg(''), 6000); }}
           onEnroll={p => { setEnrollOnly(String(p.id)); setShowEnroll(true); }} />}
         {showEnroll && enrollOnly && <EnrollPhotosModal products={products} token={session.token} onlyId={enrollOnly} onClose={() => { setShowEnroll(false); setEnrollOnly(null); }} />}
 
