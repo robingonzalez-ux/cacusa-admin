@@ -19,7 +19,8 @@
 //   cd tools && npm install && npx playwright install chromium
 //   node build-catalog-refs.mjs --download          # baja products.json y fotos del sitio público
 //   node build-catalog-refs.mjs --site ../../cacusa  # usa una copia local del repo de la tienda
-// Opciones: --n 12 (variantes por foto), --tfjs <tf.min.js local> (sin acceso a jsdelivr).
+// Opciones: --n 12 (variantes por foto), --tfjs <tf.min.js local> (sin acceso a jsdelivr),
+//           --keep-proj (no reaprende las proyecciones: solo recalcula las referencias, p. ej. productos nuevos).
 // Tarda ~10–15 min (la mayor parte, los autovalores de 2 matrices de 1952×1952 en JS).
 import fs from 'node:fs';
 import path from 'node:path';
@@ -60,7 +61,7 @@ const products = (catalog.products || []).filter(p => p && p.id != null && produ
 // Fotos del sitio que no usa ningún producto (solo para aprender la proyección).
 const used = new Set(products.flatMap(productUrls).map(u => new URL(u).pathname));
 const imgDir = path.join(siteDir, 'ui_kits', 'store', 'images');
-const orphans = fs.existsSync(imgDir) ? fs.readdirSync(imgDir).sort().filter(f => /\.(webp|jpe?g|png)$/i.test(f) && !used.has('/ui_kits/store/images/' + f)).map(f => SITE_ORIGIN + '/ui_kits/store/images/' + f) : [];
+const orphans = opt('keep-proj', false) ? [] : fs.existsSync(imgDir) ? fs.readdirSync(imgDir).sort().filter(f => /\.(webp|jpe?g|png)$/i.test(f) && !used.has('/ui_kits/store/images/' + f)).map(f => SITE_ORIGIN + '/ui_kits/store/images/' + f) : [];
 
 // base64 → Float32Array (copia exacta: Buffer.from puede compartir un bloque más grande)
 const f32of = b => { const u = Buffer.from(b, 'base64'); return new Float32Array(u.buffer.slice(u.byteOffset, u.byteOffset + u.length)); };
@@ -167,8 +168,24 @@ function fitLW(groups, D, dOut, eps, label) {
   };
   return { projBin, project, dOut: dO, nX };
 }
+// --keep-proj: no se vuelven a aprender las proyecciones; se usan las de models/ tal cual y solo se
+// recalculan las referencias (p. ej. al agregar productos). Mismo cálculo que el panel.
+const KEEP = !!opt('keep-proj', false);
+function loadLW(file, D, dOut) {
+  const buf = fs.readFileSync(file);
+  if (buf.length !== (D + dOut) * 4 + D * dOut) throw new Error('proyección con tamaño inesperado: ' + file);
+  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length);
+  const mu = new Float32Array(ab, 0, D), scale = new Float32Array(ab, D * 4, dOut), Wq = new Int8Array(ab, (D + dOut) * 4, D * dOut);
+  const Wdq = Float32Array.from(Wq, (q, k) => q * scale[k % dOut]);
+  const project = x => {
+    const y = new Float64Array(dOut);
+    for (let i = 0; i < D; i++) { const xi = x[i] - mu[i]; if (!xi) continue; const r = i * dOut; for (let j = 0; j < dOut; j++) y[j] += xi * Wdq[r + j]; }
+    let s2 = 0; for (const v of y) s2 += v * v; s2 = Math.sqrt(s2) || 1; return y.map(v => v / s2);
+  };
+  return { projBin: buf, project, dOut, nX: 0 };
+}
 const D = SPEC.dIn;
-const effLW = fitLW(photos.map(p => p.raws), D, SPEC.dOut, SPEC.eps, 'EfficientNetV2');
+const effLW = KEEP ? loadLW(path.join(MODELS, 'recog-v2-proj.bin'), D, SPEC.dOut) : fitLW(photos.map(p => p.raws), D, SPEC.dOut, SPEC.eps, 'EfficientNetV2');
 const { projBin, project } = effLW, dO = effLW.dOut, nX = effLW.nX;
 const q8 = y => { let m = 0; for (const v of y) m = Math.max(m, Math.abs(v)); const k = m ? 127 / m : 0; return Int8Array.from(y, v => Math.max(-127, Math.min(127, Math.round(v * k)))); };
 
@@ -199,7 +216,7 @@ const manifest = {
   refs: 'models/catalog-refs-v2.json',
   proj: { bin: 'recog-v2-proj.bin', binBytes: projBin.length, binSha256: sha(projBin), method: 'learned-whitening', eps: SPEC.eps,
           layout: 'mu float32[dIn] · escala float32[dOut] · W int8[dIn×dOut] por filas (W real = int8 × escala de su columna)',
-          trainedOn: { photos: photos.length, productPhotos: nProd, otherSitePhotos: nOrph, variantsPerPhoto: N, vectors: nX } },
+          trainedOn: KEEP ? JSON.parse(fs.readFileSync(path.join(MODELS, 'recog-v2.json'), 'utf8')).proj.trainedOn : { photos: photos.length, productPhotos: nProd, otherSitePhotos: nOrph, variantsPerPhoto: N, vectors: nX } },
   generated,
 };
 fs.writeFileSync(path.join(MODELS, 'recog-v2-proj.bin'), projBin);
@@ -250,7 +267,7 @@ for (const [i, p] of photos.entries()) {
 if (rp3) await rp3.close();
 fs.writeFileSync(CACHE3, JSON.stringify(cache3));
 console.log('');
-const dinoLW = fitLW(photos.map(p => p.draws), SPEC3.dino.dIn, SPEC3.dino.dOut, SPEC3.dino.eps, 'DINOv2');
+const dinoLW = KEEP ? loadLW(path.join(MODELS, 'recog-v3-proj-dino.bin'), SPEC3.dino.dIn, Math.min(SPEC3.dino.dOut, SPEC3.dino.dIn)) : fitLW(photos.map(p => p.draws), SPEC3.dino.dIn, SPEC3.dino.dOut, SPEC3.dino.eps, 'DINOv2');
 const a3 = Math.sqrt(SPEC3.alpha), b3 = Math.sqrt(1 - SPEC3.alpha), dim3 = dO + dinoLW.dOut;
 const fuse3 = (e, d) => { const pe = project(e), pd = dinoLW.project(d), y = new Float64Array(dim3); pe.forEach((v, i) => { y[i] = a3 * v; }); pd.forEach((v, i) => { y[dO + i] = b3 * v; }); return y; };
 const chunks3 = [], index3 = {}; let off3 = 0;

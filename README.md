@@ -226,7 +226,7 @@ node build-catalog-refs.mjs --download            # baja products.json + fotos d
 node build-catalog-refs.mjs --site ../../cacusa
 ```
 
-Usa TODAS las fotos: `imageUrl` + `images[]` de todos los productos (también los pausados) y las
+Con productos nuevos alcanza `--keep-proj`: no reaprende las proyecciones (usa las de `models/` tal cual) y solo recalcula las referencias (~1 min, las fotos ya calculadas salen de `tools/.cache/`). Sin esa opción, usa TODAS las fotos: `imageUrl` + `images[]` de todos los productos (también los pausados) y las
 fotos de `ui_kits/store/images/` que ya no usa ningún producto (estas últimas solo para aprender
 la proyección). Por cada foto calcula, con el código del propio panel (bloque entre
 `// @@recog-begin` y `// @@recog-end` de `index.html`, sin JSX) en Chromium headless (backend
