@@ -3029,6 +3029,53 @@ function colorDescriptor(img) {
   return h;
 }
 function colorSim(a, b) { if (!a || !b) return 0; let s = 0; for (let i = 0; i < a.length; i++) s += Math.min(a[i], b[i]); return s; }
+// ── Fotos de galería que NO sirven de referencia (fotos "con modelo"/de ambiente) ──
+// Una foto con modelo (cara, cuerpo, la joya chiquita) se parece más a OTRAS fotos con modelo que
+// a su propia pieza: como referencia, una foto del taller con una mano termina pareciéndose al
+// producto equivocado. Regla: una foto de galería se usa como referencia solo si es coherente con
+// la foto "ancla" del producto (coseno entre huellas base ≥ REF_CONSIST_MIN). El ancla es la foto
+// principal, salvo que la principal sea ella misma la foto con modelo: si una foto de galería NO
+// es coherente con la principal y tiene el fondo claramente más limpio (borde uniforme,
+// borderUniformity ≥ la de la principal + REF_CLEAN_MARGIN), esa es la foto de producto y pasa a
+// ser el ancla. La principal se usa siempre. Medido sobre todo el catálogo (26 nov, v3): fotos con
+// modelo vs su principal ≤ 0,11; misma pieza en otra toma ≥ 0,35 (juegos con varios diseños
+// ≈ 0,36–0,53); el borde separa sin excepción foto de producto (0,45–1,00) de foto con modelo
+// (0,02–0,18) en todos los pares incoherentes. Lo usan el identificador, el aviso de duplicado,
+// "Sugerir datos", "similar" y las sugerencias de Lovers (todos parten de prepareCatalogEmbeddings),
+// y tools/build-catalog-refs.mjs (referencias precalculadas del panel y de la búsqueda por foto de
+// la tienda).
+const REF_CONSIST_MIN = 0.25;
+const REF_CLEAN_MARGIN = 0.3;
+// Fracción del borde (4 px de un cuadro 64×64) que tiene el color de fondo (mediana): ~1 en una
+// foto de producto sobre fondo liso, baja con una persona o un ambiente en el borde.
+function borderUniformity(img) {
+  const N = 64, cv = document.createElement('canvas'); cv.width = N; cv.height = N;
+  const ctx = cv.getContext('2d'); ctx.drawImage(img, 0, 0, N, N);
+  const d = ctx.getImageData(0, 0, N, N).data, R = [], G = [], B = [];
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    if (x >= 4 && x < N - 4 && y >= 4 && y < N - 4) continue;
+    const i = (y * N + x) * 4; R.push(d[i]); G.push(d[i + 1]); B.push(d[i + 2]);
+  }
+  const med = a => a.slice().sort((p, q) => p - q)[a.length >> 1], mr = med(R), mg = med(G), mb = med(B);
+  let k = 0; for (let i = 0; i < R.length; i++) if (Math.hypot(R[i] - mr, G[i] - mg, B[i] - mb) < 24) k++;
+  return Math.round(k / R.length * 1000) / 1000;
+}
+// photos: [{ emb, bu }] con la principal primero (bu = borderUniformity o null si no se sabe).
+// → [{ keep, cos, anchor }] (cos = coseno con el ancla). Función pura (la usa también la herramienta).
+function galleryRefMask(photos) {
+  const list = photos || [];
+  if (!list.length) return [];
+  const main = list[0], cosM = list.map(ph => dot(main.emb, ph.emb));
+  let anchor = 0;
+  for (let k = 1; k < list.length; k++) {
+    const bu = list[k].bu, bm = main.bu;
+    if (cosM[k] < REF_CONSIST_MIN && typeof bu === 'number' && typeof bm === 'number' && bu >= bm + REF_CLEAN_MARGIN && (anchor === 0 || bu > list[anchor].bu)) anchor = k;
+  }
+  return list.map((ph, k) => {
+    const cos = anchor === 0 ? cosM[k] : dot(list[anchor].emb, ph.emb);
+    return { keep: k === 0 || k === anchor || cos >= REF_CONSIST_MIN, cos: Math.round(cos * 1000) / 1000, anchor: k === anchor };
+  });
+}
 function loadImg(src, cors) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -3078,7 +3125,8 @@ const _embMem = new Map(); // misma sesión, sin volver a IndexedDB
 // foto cambió o es nueva no hay entrada y se ignoran), y si no, AUG_LIVE_N variantes calculadas
 // acá con la misma función y semilla, guardadas en IndexedDB por URL (clave versión|url: una
 // foto nueva o cambiada siempre se recalcula sola; las que no cambiaron no se vuelven a bajar).
-// Las fotos de galería además suman su huella base como referencia.
+// Las fotos de galería además suman su huella base como referencia, salvo las fotos con modelo o
+// de ambiente (galleryRefMask: no coherentes con la foto de producto), que no se usan.
 // onProgress(hechos, total). Devuelve { items: [{p, emb, color, aug}], failed, computed, trained }.
 async function prepareCatalogEmbeddings(products, onProgress) {
   const list = (products || []).filter(p => p && p.available !== false && productImageUrl(p));
@@ -3088,19 +3136,20 @@ async function prepareCatalogEmbeddings(products, onProgress) {
   const items = []; let failed = 0, computed = 0, done = 0, trained = 0;
   for (const p of list) {
     const id = String(p.id), urls = productImageUrls(p);
-    let main = null; const aug = [];
+    // 1) Huella base, color y borde de cada foto (precalculados, de la caché o calculados acá).
+    const photos = []; // { url, key, rec, sRef, img }
     for (let k = 0; k < urls.length; k++) {
       const url = urls[k], key = eng.ver + '|' + url;
       const sRef = st && st.get(id + '|' + url);
-      let rec = _embMem.get(key) || await embDbGet(db, key);
+      let rec = _embMem.get(key) || await embDbGet(db, key), img = null;
       const okRec = !!(rec && rec.emb && rec.emb.length === EMB_DIM);
-      if (!okRec && sRef && sRef.color) rec = { emb: sRef.base, color: sRef.color, fromStatic: true }; // sin bajar la foto
-      const needLive = !!st && !sRef && !(okRec && rec.augV === AUG_VERSION && Array.isArray(rec.aug));
-      if ((!okRec && !(rec && rec.fromStatic)) || needLive) {
+      if (!okRec && sRef && sRef.color) rec = { emb: sRef.base, color: sRef.color, bu: sRef.bu, fromStatic: true }; // sin bajar la foto
+      const needBu = !!rec && typeof rec.bu !== 'number' && !(sRef && typeof sRef.bu === 'number');
+      if ((!okRec && !(rec && rec.fromStatic)) || needBu) {
         try {
-          const img = await loadCatalogImg(url);
-          rec = okRec ? { ...rec } : { emb: await embedPhoto(eng, img, 'base'), color: colorDescriptor(img), at: Date.now() };
-          if (needLive) { rec.aug = await augmentEmbeddings(eng, img, url, AUG_LIVE_N); rec.augV = AUG_VERSION; }
+          img = await loadCatalogImg(url);
+          rec = rec && !rec.fromStatic ? { ...rec } : { emb: await embedPhoto(eng, img, 'base'), color: colorDescriptor(img), at: Date.now() };
+          rec.bu = borderUniformity(img);
           computed++;
           await embDbPut(db, key, rec);
         } catch (e) {
@@ -3109,17 +3158,33 @@ async function prepareCatalogEmbeddings(products, onProgress) {
       }
       if (!rec) continue;
       if (!rec.fromStatic) _embMem.set(key, rec);
-      if (!main) main = rec; else aug.push(rec.emb);
-      if (st) {
-        if (sRef) aug.push(...sRef.aug);
-        else if (rec.augV === AUG_VERSION && Array.isArray(rec.aug)) aug.push(...rec.aug);
-      }
+      photos.push({ url, key, rec, sRef, img, bu: typeof rec.bu === 'number' ? rec.bu : (sRef ? sRef.bu : null) });
       if (computed && computed % 4 === 0) await new Promise(r => setTimeout(r, 0)); // deja respirar la pantalla
     }
+    // 2) Fotos con modelo/de ambiente fuera (galleryRefMask). 3) Variantes de las que quedan.
+    const mask = galleryRefMask(photos.map(ph => ({ emb: ph.rec.emb, bu: ph.bu })));
+    const aug = [];
+    for (let k = 0; k < photos.length; k++) {
+      if (!mask[k].keep) continue;
+      const ph = photos[k]; let rec = ph.rec;
+      if (k > 0) aug.push(rec.emb);
+      if (!st) continue;
+      if (ph.sRef && !ph.sRef.excluded) { aug.push(...ph.sRef.aug); continue; }
+      if (!(rec.augV === AUG_VERSION && Array.isArray(rec.aug))) {
+        try {
+          const img = ph.img || await loadCatalogImg(ph.url);
+          rec = { ...(rec.fromStatic ? { emb: rec.emb, color: rec.color, bu: ph.bu, at: Date.now() } : rec), aug: await augmentEmbeddings(eng, img, ph.url, AUG_LIVE_N), augV: AUG_VERSION };
+          delete rec.fromStatic; computed++;
+          await embDbPut(db, ph.key, rec); _embMem.set(ph.key, rec);
+        } catch (e) { console.warn('reconocimiento: sin variantes para', ph.url, e && e.message); }
+      }
+      if (rec.augV === AUG_VERSION && Array.isArray(rec.aug)) aug.push(...rec.aug);
+    }
+    const main = photos.length ? photos[0].rec : null;
     if (!main) failed++;
     else {
       if (aug.length) trained++;
-      items.push({ p, emb: main.emb, color: main.color, aug });
+      items.push({ p, emb: main.emb, color: main.color, aug, refsSkipped: mask.filter(m => !m.keep).length });
     }
     done++;
     if (onProgress) onProgress(done, list.length);
@@ -3295,7 +3360,15 @@ function loadStaticRefs(eng) {
         const n = Math.max(0, e.n | 0);
         if (!e || typeof e.url !== 'string' || e.offset < 0 || e.offset + 1 + n > nVec) continue;
         const aug = []; for (let k = 0; k < n; k++) aug.push(vec(e.offset + 1 + k));
-        map.set(String(id) + '|' + e.url, { base: vec(e.offset), color: Array.isArray(e.color) && e.color.length === 27 ? Float32Array.from(e.color) : null, aug });
+        map.set(String(id) + '|' + e.url, { base: vec(e.offset), color: Array.isArray(e.color) && e.color.length === 27 ? Float32Array.from(e.color) : null, aug, bu: typeof e.bu === 'number' ? e.bu : null });
+      }
+    }
+    // Fotos de galería que la herramienta descartó como referencia (galleryRefMask): solo la huella
+    // base y el borde, para que el panel vuelva a aplicar la regla sin bajar la foto.
+    for (const [id, list] of Object.entries(idx.excluded || {})) {
+      for (const e of (Array.isArray(list) ? list : [])) {
+        if (!e || typeof e.url !== 'string' || !(e.offset >= 0) || e.offset >= nVec) continue;
+        map.set(String(id) + '|' + e.url, { base: vec(e.offset), color: Array.isArray(e.color) && e.color.length === 27 ? Float32Array.from(e.color) : null, aug: [], bu: typeof e.bu === 'number' ? e.bu : null, excluded: true });
       }
     }
     return map;

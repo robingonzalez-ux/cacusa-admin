@@ -103,3 +103,13 @@ export function productUrls(p) {
   for (const u of list) if (typeof u === 'string' && /^https:\/\//.test(u) && !out.includes(u)) out.push(u);
   return out;
 }
+
+// La regla de fotos de galería del panel (galleryRefMask + constantes + dot), tomada tal cual de
+// index.html para usarla en Node: mismas fotos descartadas en las referencias precalculadas.
+export function loadGalleryRule() {
+  const code = extractRecognitionCode();
+  const grab = re => { const m = code.match(re); if (!m) throw new Error('No se encontró en index.html: ' + re); return m[0]; };
+  const src = [grab(/const REF_CONSIST_MIN = [^\n]*/), grab(/const REF_CLEAN_MARGIN = [^\n]*/), grab(/function dot\(a, b\) \{[^\n]*/),
+    grab(/function galleryRefMask\(photos\) \{[\s\S]*?\n\}/)].join('\n');
+  return new Function(src + '\nreturn { galleryRefMask, REF_CONSIST_MIN, REF_CLEAN_MARGIN };')();
+}

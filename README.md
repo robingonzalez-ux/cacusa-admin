@@ -226,6 +226,8 @@ node build-catalog-refs.mjs --download            # baja products.json + fotos d
 node build-catalog-refs.mjs --site ../../cacusa
 ```
 
+**Fotos con modelo / de ambiente (26 nov):** una foto de galería se usa como referencia solo si es coherente con la foto de producto (coseno entre huellas base ≥ `REF_CONSIST_MIN` = 0,25; `galleryRefMask` en `index.html`). La foto principal se usa siempre; si la principal es la foto con modelo y una de galería es claramente la foto de producto (fondo mucho más limpio, `borderUniformity` + 0,3), esa pasa a ser el ancla. La herramienta aplica la misma función (v2 y v3, decide con v3), lista por SKU las fotos descartadas y las deja en `excluded` del índice (solo la huella base y el borde: el panel repite la regla sin bajarlas; la búsqueda por foto de la tienda solo lee `products`). En el panel la regla corre igual para fotos nuevas o cambiadas, antes de calcular sus variantes. Medido en el catálogo: fotos con modelo vs su principal ≤ 0,11, otra toma de la misma pieza ≥ 0,35.
+
 Con productos nuevos alcanza `--keep-proj`: no reaprende las proyecciones (usa las de `models/` tal cual) y solo recalcula las referencias (~1 min, las fotos ya calculadas salen de `tools/.cache/`). Sin esa opción, usa TODAS las fotos: `imageUrl` + `images[]` de todos los productos (también los pausados) y las
 fotos de `ui_kits/store/images/` que ya no usa ningún producto (estas últimas solo para aprender
 la proyección). Por cada foto calcula, con el código del propio panel (bloque entre
