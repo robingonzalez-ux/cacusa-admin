@@ -3677,7 +3677,7 @@ const TWIN_K = 12;
 // (recortes, desenfoques), que hace "parecidas" a piezas que no tienen nada que ver, y siempre se
 // mostraba la más cercana aunque estuviera lejos. Referencia: anillos realmente parecidos
 // (AN032↔AN003) ≈ 0,61; piezas sin relación ≈ 0,2–0,35.
-const TWIN_MIN = 0.45;
+const TWIN_MIN = 0.55; // (27 nov) 0,45 → 0,55: con 0,45 salían modelos distintos del mismo estilo (p. ej. dos anillos dorados sobre el mismo fondo de plantilla)
 const _twinMem = new Map();
 async function computeTwins(items, ver) {
   const sig = 'v2|' + ver + '|' + items.map(it => it.p.id + ':' + (it.p.imageUrl || '').slice(-40)).join(',');
@@ -4261,7 +4261,7 @@ function EnrollPhotosModal({ products, token, onClose, onlyId = null }) {
               <div style={{ fontWeight: 700, fontSize: 14, color: '#1A1118', marginTop: 4 }}>{cur.name}</div>
               <div style={{ fontSize: 12, color: '#7A6880' }}>{cur.category}</div>
               <div data-testid="enrollCount" style={{ fontSize: 12, fontWeight: 700, marginTop: 2, color: cnt(cur) ? '#15803D' : '#B45309' }}>Ya la reconoce por su foto del catálogo · fotos reales: {cnt(cur)} / {ENROLL_MAX_REFS} (opcional)</div>
-              {twinSku(cur) && <div data-testid="twinLabel" style={{ fontSize: 11, fontWeight: 700, color: '#9D174D', marginTop: 2 }}>Se confunde con {(() => { const t = twinOf(cur); const o = t && (products || []).find(x => String(x.id) === t.id); return o && productImageUrl(o) ? <button type="button" data-testid="twinOpen" onClick={() => openLightbox(productImageUrl(o), normalizeSku(o.sku) || o.name, o.name)} style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'inherit', textDecoration: 'underline', cursor: 'zoom-in' }}>{twinSku(cur)} (ver foto)</button> : twinSku(cur); })()}</div>}
+              {twinSku(cur) && <div data-testid="twinLabel" style={{ fontSize: 11, fontWeight: 700, color: '#9D174D', marginTop: 2 }}>Se parece a {(() => { const t = twinOf(cur); const o = t && (products || []).find(x => String(x.id) === t.id); return o && productImageUrl(o) ? <button type="button" data-testid="twinOpen" onClick={() => openLightbox(productImageUrl(o), normalizeSku(o.sku) || o.name, o.name)} style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'inherit', textDecoration: 'underline', cursor: 'zoom-in' }}>{twinSku(cur)} (ver foto)</button> : twinSku(cur); })()}</div>}
             </div>
           </div>
           <button type="button" onClick={() => fileRef.current && fileRef.current.click()} disabled={busy || cnt(cur) >= ENROLL_MAX_REFS}
@@ -4312,7 +4312,7 @@ function EnrollPhotosModal({ products, token, onClose, onlyId = null }) {
                   <ZoomImg inButton src={productImageUrl(p)} title={normalizeSku(p.sku)} sub={p.name} style={thumb} />
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#1A1118', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
-                    <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', fontSize: 11, color: '#7A6880' }}><SkuChip sku={p.sku} />{p.category}{twinSku(p) && <span data-testid="twinLabel" style={{ color: '#9D174D', fontWeight: 700 }}>· Se confunde con {twinSku(p)}</span>}</span>
+                    <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', fontSize: 11, color: '#7A6880' }}><SkuChip sku={p.sku} />{p.category}{twinSku(p) && <span data-testid="twinLabel" style={{ color: '#9D174D', fontWeight: 700 }}>· Se parece a {twinSku(p)}</span>}</span>
                   </span>
                   <RefBadge n={cnt(p)} style={{ fontSize: 12, padding: '3px 9px', flexShrink: 0 }} />
                 </button>
