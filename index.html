@@ -1097,6 +1097,29 @@ function productMatchesSearch(p, q) {
   return String(p.name || '').toLowerCase().includes(s) || String(p.description || '').toLowerCase().includes(s)
     || (!!code && !!p.sku && normalizeSku(p.sku).includes(code)) || String(p.id) === s;
 }
+// Foto grande al tocar una miniatura (piezas parecidas, sugerencias, resultados del identificador).
+let _lightboxSet = null;
+function openLightbox(src, title, sub) { if (_lightboxSet && src) _lightboxSet({ src, title: title || '', sub: sub || '' }); }
+function LightboxHost() {
+  const [lb, setLb] = useState(null);
+  useEffect(() => { _lightboxSet = setLb; return () => { _lightboxSet = null; }; }, []);
+  if (!lb) return null;
+  return (
+    <Modal onClose={() => setLb(null)} label={lb.title ? 'Foto de ' + lb.title : 'Foto'} overlayStyle={{ zIndex: 10050, padding: 12 }} boxStyle={{ maxWidth: 560, width: '100%', padding: 12 }}>
+      <img data-testid="lightboxImg" src={lb.src} alt={lb.title || 'Foto del producto'} style={{ width: '100%', maxHeight: '72vh', objectFit: 'contain', borderRadius: 10, display: 'block', background: '#F3EFF5' }} />
+      {(lb.title || lb.sub) && <div style={{ marginTop: 8, fontSize: 14, color: '#1A1118' }}>{lb.title && <b style={{ fontFamily: 'ui-monospace, Menlo, monospace', color: '#5B3F8A' }}>{lb.title}</b>} {lb.sub}</div>}
+      <button type="button" onClick={() => setLb(null)} style={{ marginTop: 10, width: '100%', padding: 10, background: '#1A1118', color: 'white', border: 'none', borderRadius: 99, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>Cerrar</button>
+    </Modal>
+  );
+}
+// Miniatura que se agranda al tocarla. Dentro de un botón (inButton) no roba el clic del botón:
+// el toque en la foto abre la foto grande y el resto del botón sigue eligiendo la pieza.
+function ZoomImg({ src, title, sub, style, alt, inButton, testid }) {
+  if (!src) return null;
+  const open = e => { e.stopPropagation(); e.preventDefault(); openLightbox(src, title, sub); };
+  const a11y = inButton ? {} : { role: 'button', tabIndex: 0, onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') open(e); } };
+  return <img src={src} alt={alt != null ? alt : ''} title="Ver foto grande" data-zoom="1" data-testid={testid} onClick={open} {...a11y} aria-label={inButton ? undefined : ('Ver foto grande' + (title ? ' de ' + title : ''))} style={{ cursor: 'zoom-in', ...style }} />;
+}
 function SkuChip({ sku, style }) {
   if (!sku) return null;
   return <span data-sku={sku} style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 10, fontWeight: 800, color: '#5B3F8A', background: '#F1EAFB', padding: '2px 7px', borderRadius: 6, letterSpacing: '.04em', whiteSpace: 'nowrap', ...style }}>{sku}</span>;
@@ -1644,11 +1667,11 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
                 </div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
                   <figure style={{ margin: 0, flex: 1, minWidth: 0 }}>
-                    <img src={imgPrev} alt="Foto que subiste" data-testid="dupMine" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 10, display: 'block' }} />
+                    <ZoomImg src={imgPrev} alt="Foto que subiste" title="Tu foto" testid="dupMine" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 10, display: 'block' }} />
                     <figcaption style={{ fontSize: 10, color: '#7A6880', marginTop: 2 }}>Tu foto</figcaption>
                   </figure>
                   <figure style={{ margin: 0, flex: 1, minWidth: 0 }}>
-                    <img src={productImageUrl(c.p)} alt={'Foto del catálogo de ' + c.p.name} data-testid="dupTheirs" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 10, display: 'block' }} />
+                    <ZoomImg src={productImageUrl(c.p)} alt={'Foto del catálogo de ' + c.p.name} title={normalizeSku(c.p.sku)} sub={c.p.name} testid="dupTheirs" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 10, display: 'block' }} />
                     {gal.length > 0 && <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>{gal.map((u, i) => <img key={i} src={u} alt="" style={{ width: 30, height: 30, objectFit: 'cover', borderRadius: 6 }} />)}</div>}
                     <figcaption style={{ fontSize: 10, color: '#7A6880', marginTop: 2 }}>En el catálogo</figcaption>
                   </figure>
@@ -1686,7 +1709,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
                   <span style={{ fontWeight: 700 }}>Se parece a:</span>
                   {sugInfo.neighbors.map(nb => (
                     <span key={nb.id} title={nb.name} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'white', borderRadius: 8, padding: 2, paddingRight: 6, border: '1px solid #EDE3F1' }}>
-                      {nb.img ? <img src={nb.img} alt="" style={{ width: 28, height: 28, borderRadius: 6, objectFit: 'cover' }} /> : null}
+                      {nb.img ? <ZoomImg src={nb.img} title={nb.sku} sub={nb.name} style={{ width: 28, height: 28, borderRadius: 6, objectFit: 'cover' }} /> : null}
                       <span style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontWeight: 800, color: '#5B3F8A' }}>{nb.sku}</span>
                     </span>
                   ))}
@@ -4176,13 +4199,13 @@ function EnrollPhotosModal({ products, token, onClose, onlyId = null }) {
       {cur ? (
         <div>
           <div style={{ display: 'flex', gap: 12, alignItems: 'center', background: '#FAF7FB', borderRadius: 12, padding: 10, marginBottom: 10 }}>
-            <img src={productImageUrl(cur)} alt="" style={{ width: 84, height: 84, borderRadius: 10, objectFit: 'cover' }} />
+            <ZoomImg src={productImageUrl(cur)} title={normalizeSku(cur.sku)} sub={cur.name} style={{ width: 84, height: 84, borderRadius: 10, objectFit: 'cover' }} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <SkuChip sku={cur.sku} style={{ fontSize: 13 }} />
               <div style={{ fontWeight: 700, fontSize: 14, color: '#1A1118', marginTop: 4 }}>{cur.name}</div>
               <div style={{ fontSize: 12, color: '#7A6880' }}>{cur.category}</div>
               <div data-testid="enrollCount" style={{ fontSize: 12, fontWeight: 700, marginTop: 2, color: cnt(cur) ? '#15803D' : '#B45309' }}>Ya la reconoce por su foto del catálogo · fotos reales: {cnt(cur)} / {ENROLL_MAX_REFS} (opcional)</div>
-              {twinSku(cur) && <div data-testid="twinLabel" style={{ fontSize: 11, fontWeight: 700, color: '#9D174D', marginTop: 2 }}>Se confunde con {twinSku(cur)}</div>}
+              {twinSku(cur) && <div data-testid="twinLabel" style={{ fontSize: 11, fontWeight: 700, color: '#9D174D', marginTop: 2 }}>Se confunde con {(() => { const t = twinOf(cur); const o = t && (products || []).find(x => String(x.id) === t.id); return o && productImageUrl(o) ? <button type="button" data-testid="twinOpen" onClick={() => openLightbox(productImageUrl(o), normalizeSku(o.sku) || o.name, o.name)} style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'inherit', textDecoration: 'underline', cursor: 'zoom-in' }}>{twinSku(cur)} (ver foto)</button> : twinSku(cur); })()}</div>}
             </div>
           </div>
           <button type="button" onClick={() => fileRef.current && fileRef.current.click()} disabled={busy || cnt(cur) >= ENROLL_MAX_REFS}
@@ -4230,7 +4253,7 @@ function EnrollPhotosModal({ products, token, onClose, onlyId = null }) {
               {list.map(p => (
                 <button type="button" key={p.id} onClick={() => openProduct(p)}
                   style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', padding: 6, background: cnt(p) ? '#FAF7FB' : '#FFF7ED', border: cnt(p) ? '1.5px solid #EDE3F1' : '1.5px solid #FCD9A8', borderRadius: 10, cursor: 'pointer', fontFamily: 'inherit' }}>
-                  <img src={productImageUrl(p)} alt="" style={thumb} />
+                  <ZoomImg inButton src={productImageUrl(p)} title={normalizeSku(p.sku)} sub={p.name} style={thumb} />
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#1A1118', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
                     <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', fontSize: 11, color: '#7A6880' }}><SkuChip sku={p.sku} />{p.category}{twinSku(p) && <span data-testid="twinLabel" style={{ color: '#9D174D', fontWeight: 700 }}>· Se confunde con {twinSku(p)}</span>}</span>
@@ -4758,7 +4781,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
               <div style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63' }}>Toca la pieza correcta:</div>
               {matches.map(m => (
                 <button type="button" key={m.id} onClick={() => pick(m.id, m.name)} disabled={!!adding} style={{ ...optBtn, opacity: adding && adding !== String(m.id) ? 0.5 : 1 }}>
-                  {m.imageUrl ? <img src={m.imageUrl} alt="" style={thumb} /> : <div style={thumb} />}
+                  {m.imageUrl ? <ZoomImg inButton src={m.imageUrl} title={m.sku} sub={m.name} style={thumb} /> : <div style={thumb} />}
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <span style={{ display: 'block', fontWeight: 700, fontSize: 13, color: '#1A1118' }}>{m.name}</span>
                     <span style={{ display: 'block', fontSize: 11, color: '#7A6880' }}>{m.sku ? m.sku + ' · ' : ''}{m.category}</span>
@@ -4790,7 +4813,7 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
               {q && !manualList.length && <div style={{ fontSize: 12, color: '#7A6880' }}>Sin resultados.</div>}
               {manualList.map(p => (
                 <button type="button" key={p.id} onClick={() => pick(p.id, p.name)} disabled={!!adding} style={{ ...optBtn, padding: 6, opacity: adding && adding !== String(p.id) ? 0.5 : 1 }}>
-                  {productImageUrl(p) ? <img src={productImageUrl(p)} alt="" style={{ ...thumb, width: 40, height: 40 }} /> : <div style={{ ...thumb, width: 40, height: 40 }} />}
+                  {productImageUrl(p) ? <ZoomImg inButton src={productImageUrl(p)} title={normalizeSku(p.sku)} sub={p.name} style={{ ...thumb, width: 40, height: 40 }} /> : <div style={{ ...thumb, width: 40, height: 40 }} />}
                   <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: '#1A1118' }}>
                     {p.name}<span style={{ fontSize: 11, color: '#7A6880' }}> · {p.sku ? normalizeSku(p.sku) + ' · ' : ''}{p.category}{p.available === false ? ' · pausado' : ''}</span>
                     {stockNote(p.id)}
@@ -5260,7 +5283,7 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
           {lovSug.picks && !lovSug.picks.length && !lovSug.error && <div style={{ fontSize: 12, color: '#7A6880' }}>No hay piezas con stock para sugerir.</div>}
           {(lovSug.picks || []).map(x => (
             <div key={x.p.id} data-testid="loversPick" style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'white', borderRadius: 8, padding: 6 }}>
-              <img src={productImageUrl(x.p)} alt="" style={{ width: 44, height: 44, borderRadius: 8, objectFit: 'cover', flexShrink: 0 }} />
+              <ZoomImg src={productImageUrl(x.p)} title={normalizeSku(x.p.sku)} sub={x.p.name} style={{ width: 44, height: 44, borderRadius: 8, objectFit: 'cover', flexShrink: 0 }} />
               <span style={{ flex: 1, minWidth: 0 }}>
                 <span style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#1A1118' }}>{x.p.name} <SkuChip sku={normalizeSku(x.p.sku)} /></span>
                 <span style={{ display: 'block', fontSize: 11, color: '#5B3F8A' }}>{x.line}</span>
@@ -9401,7 +9424,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<ErrorBoundary><App /></ErrorBoundary>);
+ReactDOM.createRoot(document.getElementById('root')).render(<ErrorBoundary><App /><LightboxHost /></ErrorBoundary>);
 
 // Service worker para Web Push (notificaciones de pedidos nuevas, sin apps de terceros).
 // Scope explícito a esta carpeta para no chocar con el /sw.js (solo caché) de la tienda.
