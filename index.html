@@ -1458,7 +1458,8 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
       const sug = localProductSuggestion(q, items, { tone: photoTone(img) });
       if (!sug) throw new Error('No hay piezas del catálogo para comparar.');
       const top3 = sug.neighbors.slice(0, 3);
-      const close = sug.neighbors.filter(x => x.score >= SUGGEST_MIN);
+      const topScore = sug.neighbors.length ? sug.neighbors[0].score : -2;
+      const close = sug.neighbors.filter(x => x.score >= SUGGEST_MIN && x.score >= topScore - SUGGEST_GAP);
       const hasClose = close.length > 0;
       let ai = null, note = '';
       try {
@@ -1504,6 +1505,9 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
     setSugBusy(false); setSugPhase('');
   };
   const [galleryUploading, setGalleryUploading] = useState(false);
+  // Vista previa local de las fotos de galería recién subidas: la URL del sitio tarda ~1 min en
+  // existir (GitHub Pages publica después del commit), y mientras tanto la miniatura salía vacía.
+  const [galleryPrev, setGalleryPrev] = useState({});
   const [galleryMsg, setGalleryMsg] = useState('');
   const [reviews, setReviews] = useState(null);
   const [revLoading, setRevLoading] = useState(false);
@@ -1554,6 +1558,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
       const slug = file.name.replace(/[^a-z0-9]+/gi, '_').toLowerCase().substring(0, 40) || 'extra';
       const fname = `${Date.now()}_${slug}.webp`;
       const res = await apiUpload(token, `${IMAGES_PATH}/${fname}`, b64, `Imagen galería: ${fname}`);
+      setGalleryPrev(m => ({ ...m, [res.url]: 'data:image/webp;base64,' + b64 }));
       setForm(f => ({ ...f, images: [...(f.images || []), res.url] }));
       setGalleryMsg(total > 1 ? '✅ Fotos agregadas a la galería' : '✅ Foto agregada a la galería');
     } catch (e) {
@@ -1782,7 +1787,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
                 {(form.images || []).map((url, i) => (
                   <div key={i} style={{ position: 'relative', width: 76, height: 76, borderRadius: 8, overflow: 'hidden', border: '1.5px solid #e0e0e0', background: '#eee' }}>
-                    <img src={url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    <ZoomImg src={galleryPrev[url] || url} title={'Foto ' + (i + 1)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                     <button onClick={() => setForm(f => ({ ...f, images: f.images.filter((_, j) => j !== i) }))}
                       title="Quitar foto"
                       style={{ position: 'absolute', top: 2, right: 2, width: 20, height: 20, borderRadius: '50%', background: 'rgba(26,17,36,.75)', color: 'white', fontSize: 11, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', cursor: 'pointer' }}>✕</button>
@@ -3500,7 +3505,11 @@ const SUGGEST_K = 7, SUGGEST_STRONG = 0.6; // voto "fuerte" = ≥ 60 % del peso
 // Por debajo de este puntaje una pieza del catálogo NO se considera parecida: no se muestra en
 // "Se parece a" ni se usa para el precio/categoría (las piezas nuevas reales del taller dieron
 // máx. 0,369 contra el catálogo, ver DUP_*). Así un diseño nuevo no se fuerza a parecerse a nada.
-const SUGGEST_MIN = 0.33;
+const SUGGEST_MIN = 0.40;
+// (27 nov) Además de pasar SUGGEST_MIN, una parecida tiene que estar cerca de la MEJOR (a no más de
+// SUGGEST_GAP): si una pieza se parece mucho (p. ej. 0,7) y las otras apenas (0,4), solo se muestra
+// la que de verdad se parece. Robin vio "Se parece a" con anillos que no tenían nada que ver.
+const SUGGEST_GAP = 0.10;
 function voteBy(list, key) {
   const acc = new Map(); let tot = 0;
   for (const x of list) { const v = key(x.p); if (v == null || v === '') continue; acc.set(v, (acc.get(v) || 0) + x.w); tot += x.w; }
