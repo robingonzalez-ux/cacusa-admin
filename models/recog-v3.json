@@ -82,5 +82,12 @@
   }
  },
  "layout": "huella = [√α · v2 proyectada (512) ; √(1−α) · DINOv2 proyectada (384)], rellenada con ceros hasta 1280",
- "generated": "2026-11-26T11:55:48.563Z"
+ "generated": "2026-11-26T11:55:48.563Z",
+ "piece": {
+  "model": "models/u2netp/u2netp.onnx",
+  "sha256": "309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8",
+  "bytes": 4574861,
+  "ver": "piece-v1",
+  "refs": "models/catalog-refs-v3-piece.json"
+ }
 }

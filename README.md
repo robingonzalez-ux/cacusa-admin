@@ -224,7 +224,8 @@ los parches junto al CLS (no mejora). `tools/build-catalog-refs.mjs` genera tamb
   error (503, 429, red) MyMemory como antes, en silencio. Solo traduce campos vacíos.
 - **Fondo parejo**: evaluado con u2netp (Apache-2.0, 4,6 MB) y no se agregó: recorta bien piezas
   sueltas sobre fondo liso, pero con la mano, el mantel estampado, cadenas finas o bandejas se
-  queda con la mano o el fondo.
+  queda con la mano o el fondo. (28 nov: sí se usa u2netp para la similitud entre productos, ver
+  "Similitud solo de la pieza".)
 
 ### "¿Ya existe?" en Nuevo producto (25 nov)
 
@@ -238,6 +239,94 @@ esa pieza y cierra sin crear el producto. Nunca suma solo; al editar no se revis
 |---|---|---|---|---|
 | alto ≥ 0,55 | 39 % / 53 % | 39 % / 57 % | 0 % | 1 % (precisión 99 %) |
 | medio ≥ 0,40 | 73 % / 67 % | 74 % / 83 % | 0 % | 20 % (precisión 77 %) |
+
+### Similitud solo de la pieza (28 nov)
+
+Robin vio que las funciones que comparan productos entre sí juntaban piezas por el **fondo**: los 8
+anillos fotografiados en la misma bandeja gris sobre el cartel rosado salían "gemelos", AN023 y AN025
+(misma plantilla beige con el logo y los íconos) "parecidos", y "Se parece a" de Sugerir datos mostraba
+anillos que no tenían nada que ver. Ahora **gemelas** ("Se parece a" en Registrar fotos), **Sugerir
+datos** (vecinas, voto de categoría/material/precio), **"¿ya existe?"**, **"similar"** de la tienda y
+**Lovers** ("no parecido a lo que ya recibió") usan una huella aparte, solo de la pieza:
+
+1. **u2netp** (U²-Netp, Apache-2.0, 4,6 MB, `models/u2netp/`, ver `SOURCE.md`; corre en el mismo ONNX
+   Runtime que DINOv2) estima lo saliente de la foto. Si lo saliente es un contenedor (más del 35 % de
+   la foto y tocando 2 bordes o más: la bandeja), se acerca a esa zona y prueba otra vez (hasta 3
+   pasadas; el acercamiento vale solo si da algo compacto y seguro).
+2. Se recorta a la pieza (el logo y los íconos de la plantilla no son salientes: quedan afuera) y todo
+   lo demás pasa a **blanco** (máscara suave). Si lo saliente es un exhibidor (busto, mano de maniquí:
+   ≥ 33 % de la foto y mayormente gris claro sin color), esos píxeles también pasan a blanco.
+3. Huella v3 de siempre sobre ese recorte (`embedPiece`).
+
+Una foto en la que la pieza no se puede aislar (la bandeja con el anillo diminuto: AN008, AN010,
+AN013; la hoja de stickers de HO001; fotos con modelo) **no participa**: mejor no comparar que comparar
+fondos. Esos productos quedan sin gemela, con "similar" vacío y fuera de las listas de los demás hasta
+que tengan foto de producto (fondo blanco). "¿ya existe?" igual reconoce la **misma foto** (coseno de la
+foto entera ≥ `DUP_SAME` = 0,93; dos piezas distintas del catálogo nunca pasan de 0,84). El
+**identificador** (Pedidos, "Agregar pieza con foto", fotos reales aprendidas, el Worker) **no cambia**.
+
+Archivos: `models/catalog-refs-v3-piece.json` + `.bin` (1 vector int8 de 896 por foto de producto;
+`offset: null` = no se pudo aislar) los genera `tools/build-catalog-refs.mjs` (también con
+`--keep-proj`, sin reaprender proyecciones); `models/recog-v3.json` suma la sección `piece`. Las fotos
+nuevas o cambiadas se calculan en el panel (u2netp se baja la primera vez que hace falta, ~1 s + la
+huella por foto) y se guardan en IndexedDB. Sin u2netp (motor v2/v1 de respaldo) estas funciones usan
+la foto entera como antes. "Similar" al publicar se recalcula solo si las huellas de pieza ya estaban
+listas en la sesión (nunca con la foto entera).
+
+Medido con `node tools/eval-piece-sim.mjs --site … [--real <carpeta>]` (funciones reales del panel;
+fotos del catálogo al 26 nov, 96 productos / 145 fotos; las 30 fotos reales del taller NO están en el
+repo). Coseno entre las fotos ancla:
+
+| pares | foto entera | solo pieza |
+|---|---|---|
+| bandeja (AN006–AN013, piezas distintas), máx / media / ≥ umbral de gemela | 0,84 / 0,55 / 4 de 15 | 0,28 / 0,21 / 0 (3 de 6 sin pieza aislable) |
+| plantilla AN021–AN027 + AR003–AR006, máx / media | 0,64 / 0,19 | 0,64 / 0,22 (0 gemelas con 0,66) |
+| AN023–AN025 | 0,64 | 0,62 |
+| AN031–AN033 (solitarios dorados tubulares, sí parecidos) | 0,79 | 0,79 |
+| AN032–AN003 / AN032–AN033 | 0,60 / 0,52 | 0,60 / 0,50 |
+| busto CA010–CA017 (cadenas finas con dije), máx / media | 0,80 / 0,67 | 0,79 / 0,53 |
+
+Cambio de fondo (17 piezas de fotos con fondo blanco, recortadas y pegadas en otros fondos sacados del
+catálogo con la pieza borrada): misma pieza en ese fondo vs en blanco (media) | dos piezas distintas en
+el mismo fondo (media):
+
+| fondo | foto entera | solo pieza |
+|---|---|---|
+| plantilla beige con logo | 0,81 \| 0,19 | 0,95 \| 0,14 |
+| otra plantilla (piedra) | 0,56 \| 0,40 | 0,94 \| 0,14 |
+| bandeja, pieza chica (como las fotos reales) | −0,02 \| 0,83 | 0,74 \| 0,19 (3 de 17 sin aislar) |
+| bandeja, pieza grande | 0,34 \| 0,48 | 0,80 \| 0,12 |
+| terciopelo | 0,83 \| 0,20 | 0,91 \| 0,15 |
+| cartel rosado | 0,53 \| 0,28 | 0,89 \| 0,14 |
+
+Umbrales recalibrados (productos separados en mitades por código; se eligió con la de ajuste):
+
+- `TWIN_MIN` 0,55 → **0,66**: gemelas 24 → 13 pares; ya ninguna por la bandeja (antes 4) ni por la
+  plantilla; quedan AN031–AN033 y 12 pares de cadenas finas con dije del busto (piezas de verdad
+  parecidas; el busto se blanquea).
+- `SUGGEST_MIN` 0,40 → **0,60** (`SUGGEST_GAP` sigue 0,10): ninguna pieza nueva real llega a 0,50; de la
+  plantilla solo pasan los 2 pares más cercanos (AN021–AN026 0,64, AN023–AN025 0,62: anillos dorados
+  esculpidos, parecido de la pieza, no del fondo).
+- Lovers: "muy parecida a lo que ya recibió" = coseno de pieza > `TWIN_MIN` (antes > 0,8 con la foto
+  entera); una pieza sin pieza aislada cuenta como no parecida.
+- `DUP_HIGH` 0,55 → **0,66** (= `TWIN_MIN`: AN023/AN025 ya no son "ya existe"), `DUP_MEDIUM` 0,40 → **0,50**. "¿ya existe?" (detecta = el 1ro es la pieza
+  correcta y pasa el umbral, con fotos del taller sintéticas y otra foto del producto; precisión =
+  avisos correctos / avisos, contando como falsa alarma cada producto contra el catálogo sin él y las
+  piezas nuevas reales). "Antes" = foto entera sin variantes ni color, mismo cálculo:
+
+| | antes ajuste / prueba | ahora ajuste / prueba |
+|---|---|---|
+| alto (antes ≥ 0,55, ahora ≥ 0,66): precisión | 71 / 67 % | 88 / 85 % |
+| alto: detecta | 37 / 35 % | 25 / 22 % |
+| medio (antes ≥ 0,40, ahora ≥ 0,50): precisión | 72 / 68 % | 77 / 76 % |
+| medio: detecta | 68 / 63 % | 41 / 42 % |
+| falsa alarma en piezas nuevas reales (medio) | 0 / 0 % | 0 / 0 % |
+
+Con la pieza sola el aviso medio avisa menos (las fotos sintéticas del taller cortan la pieza o la
+tapan con un dedo) pero se equivoca menos. Probado y descartado: máscara por distancia al color del
+borde en vez de u2netp (no saca el logo ni las sombras de la plantilla), blanquear siempre los grises
+claros (borra las piezas plateadas), solo la parte DINOv2 o solo EfficientNet de la huella (no separan
+AN023–AN025 de AN032–AN003).
 
 ### Regenerar (cuando haya muchos productos nuevos o fotos cambiadas)
 

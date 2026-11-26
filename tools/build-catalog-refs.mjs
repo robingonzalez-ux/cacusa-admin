@@ -21,6 +21,8 @@
 //   node build-catalog-refs.mjs --site ../../cacusa  # usa una copia local del repo de la tienda
 // Opciones: --n 12 (variantes por foto), --tfjs <tf.min.js local> (sin acceso a jsdelivr),
 //           --keep-proj (no reaprende las proyecciones: solo recalcula las referencias, p. ej. productos nuevos).
+// Escribe además models/catalog-refs-v3-piece.* (huella solo de la pieza de cada foto, para gemelas,
+// "Sugerir datos", "¿ya existe?", "similar" y Lovers; ver README "Similitud solo de la pieza").
 // Las fotos de galería con modelo/de ambiente no se usan como referencia (galleryRefMask del panel):
 // se listan por SKU en la salida y quedan en "excluded" del índice (solo huella base + borde).
 // Tarda ~10–15 min (la mayor parte, los autovalores de 2 matrices de 1952×1952 en JS).
@@ -28,7 +30,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { Matrix, EigenvalueDecomposition } from 'ml-matrix';
-import { ADMIN_DIR, SITE_ORIGIN, openRecognitionPage, downloadSite, productUrls, loadGalleryRule } from './recog-page.mjs';
+import { ADMIN_DIR, SITE_ORIGIN, openRecognitionPage, downloadSite, productUrls, loadGalleryRule, extractRecognitionCode } from './recog-page.mjs';
 
 // Descriptor v2 (medido con eval-catalog-refs.mjs; ver README). Cambiar cualquiera de estos
 // valores cambia la huella → cambiar `emb` y regenerar (las fotos reales aprendidas quedan viejas).
@@ -322,9 +324,54 @@ const man3 = {
   layout: 'huella = [√α · v2 proyectada (512) ; √(1−α) · DINOv2 proyectada (384)], rellenada con ceros hasta 1280',
   generated,
 };
+// Huella solo de la pieza (u2netp; similitud entre productos, ver README "Similitud solo de la pieza").
+const SEG_REL = 'models/u2netp/u2netp.onnx', segBuf = fs.readFileSync(path.join(ADMIN_DIR, SEG_REL)), segSha = sha(segBuf);
+const PIECE_VER = (extractRecognitionCode().match(/const PIECE_VER = '([^']+)'/) || [])[1];
+if (!PIECE_VER) throw new Error('No se encontró PIECE_VER en index.html');
+man3.piece = { model: SEG_REL, sha256: segSha, bytes: segBuf.length, ver: PIECE_VER, refs: 'models/catalog-refs-v3-piece.json' };
 fs.writeFileSync(path.join(MODELS, 'recog-v3-proj-dino.bin'), dinoProjBin);
 fs.writeFileSync(path.join(MODELS, 'catalog-refs-v3.bin'), bin3);
 fs.writeFileSync(path.join(MODELS, 'catalog-refs-v3.json'), JSON.stringify(refs3));
 fs.writeFileSync(path.join(MODELS, 'recog-v3.json'), JSON.stringify(man3, null, 1) + '\n');
 for (const f of ['recog-v3.json', 'recog-v3-proj-dino.bin', 'catalog-refs-v3.bin', 'catalog-refs-v3.json']) console.log(`  models/${f}  ${(fs.statSync(path.join(MODELS, f)).size / 1024).toFixed(0)} KB`);
+
+// ── 5) Huellas solo de la pieza de cada foto de producto (con el motor v3 recién escrito) ──
+// embedPiece del panel (u2netp + recorte + fondo blanco + huella v3). Una foto sin pieza aislable
+// (ok = false) queda en el índice sin vector. Caché local por foto (url + hash) y versión.
+{
+  const CACHEP = path.join(ADMIN_DIR, 'tools', '.cache', `piece-${PIECE_VER}-${SPEC3.emb}-${segSha.slice(0, 12)}.json`);
+  let cacheP = {}; try { cacheP = JSON.parse(fs.readFileSync(CACHEP, 'utf8')); } catch (_) {}
+  let rpp = null;
+  const prodPhotos = photos.filter(p => p.id);
+  for (const [i, p] of prodPhotos.entries()) {
+    const ckey = `${p.url}|${p.sha}`;
+    if (!cacheP[ckey]) {
+      rpp ||= await openRecognitionPage({ siteDir, tfjsFile: opt('tfjs', null), extraJs, warmup: true });
+      cacheP[ckey] = await rpp.page.evaluate(async src => {
+        const eng = await loadRecognitionModel();
+        if (!pieceAvailable(eng)) throw new Error('el motor cargado no tiene huella de pieza (' + eng.kind + ')');
+        const r = await embedPiece(eng, await loadImg(src, false));
+        return { ok: r.ok, prop: r.prop, emb: r.emb ? __b64f32(r.emb.subarray(0, eng.dino.proj.dOut + eng.proj.dOut)) : null };
+      }, rpp.localUrl(p.url));
+    }
+    process.stdout.write(`\r  5/5 pieza: ${i + 1}/${prodPhotos.length} fotos · ${secs()}   `);
+  }
+  if (rpp) await rpp.close();
+  fs.writeFileSync(CACHEP, JSON.stringify(cacheP));
+  const chunksP = [], indexP = {}; let offP = 0, nOk = 0;
+  for (const p of prodPhotos) {
+    const c = cacheP[`${p.url}|${p.sha}`], e = { url: p.url, sha256: p.sha, ok: !!(c && c.ok), prop: !!(c && c.prop), offset: null };
+    if (c && c.ok && c.emb) { const v = f32of(c.emb); if (v.length !== dim3) throw new Error('dimensión inesperada de la huella de pieza'); chunksP.push(Buffer.from(q8(v).buffer)); e.offset = offP++; nOk++; }
+    (indexP[p.id] ||= []).push(e);
+  }
+  const binP = Buffer.concat(chunksP);
+  const refsP = { format: 'cacusa-catalog-refs-piece', version: 1, model: SPEC3.emb + '|' + PIECE_VER, dim: dim3, quant: 'int8-maxabs',
+    layout: 'por foto: offset = huella solo de la pieza (null = no se pudo aislar la pieza: no se usa para similitud)',
+    generated, bin: 'catalog-refs-v3-piece.bin', binBytes: binP.length, binSha256: sha(binP), vectors: offP, products: indexP };
+  fs.writeFileSync(path.join(MODELS, 'catalog-refs-v3-piece.bin'), binP);
+  fs.writeFileSync(path.join(MODELS, 'catalog-refs-v3-piece.json'), JSON.stringify(refsP));
+  const noIso = prodPhotos.filter(p => !(cacheP[`${p.url}|${p.sha}`] || {}).ok);
+  console.log(`\n  huellas de pieza: ${nOk}/${prodPhotos.length} fotos con la pieza aislada; sin aislar: ${noIso.map(p => skuOf.get(p.id) + ' ' + p.url.split('/').pop().slice(0, 18)).join(', ') || 'ninguna'}`);
+  for (const f of ['catalog-refs-v3-piece.bin', 'catalog-refs-v3-piece.json']) console.log(`  models/${f}  ${(fs.statSync(path.join(MODELS, f)).size / 1024).toFixed(0)} KB`);
+}
 if (skipped) console.log(`  ${skipped} foto(s) omitidas (sin archivo o ilegibles).`);

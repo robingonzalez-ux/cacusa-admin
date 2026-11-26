@@ -1332,8 +1332,27 @@ function ImageEditor({ imgSrc, focalX, focalY, zoom, onChange, adjust = true, ch
 }
 
 // ── Product Modal ──────────────────────────────────────────────────────────
-// "¿Ya existe?" (25 nov): umbrales sobre el puntaje del 1ro (huella v3; ver README).
-const DUP_HIGH = 0.55, DUP_MEDIUM = 0.40;
+// "¿Ya existe?" (25 nov): umbrales sobre el puntaje del 1ro (ver README).
+// (28 nov) Con la huella SOLO DE LA PIEZA (rankPiece; el fondo no cuenta), recalibrados con
+// tools/eval-piece-sim.mjs. Además, la MISMA foto (coseno de la foto entera ≥ DUP_SAME: otra
+// pieza del catálogo nunca pasa de 0,84) siempre es "alto": cubre las fotos en las que no se
+// puede aislar la pieza (bandeja). Sin huellas de pieza (motor de respaldo) se usa la foto entera.
+// (28 nov) alto 0,55 → 0,66 (= TWIN_MIN: dos diseños distintos de la misma plantilla, AN021–AN026 0,64 y
+// AN023–AN025 0,62, no son "ya existe"); medio 0,40 → 0,50 (con 0,40–0,45 fotos reales de piezas nuevas
+// ya se parecían a algo del catálogo).
+const DUP_HIGH = 0.66, DUP_MEDIUM = 0.50, DUP_SAME = 0.93;
+async function dupCandidates(q, items) {
+  if (!q.piece || !(await preparePieceItems(items).catch(() => false))) return rankCatalog(q, items, null, 'Todas', 3);
+  const r = rankPiece(q.piece, items, Infinity), byId = new Map(r.map(x => [String(x.p.id), x]));
+  for (const it of items) {
+    const same = dot(q.emb, it.emb);
+    if (same < DUP_SAME) continue;
+    const x = byId.get(String(it.p.id));
+    if (x) x.score = Math.max(x.score, same); else r.push({ p: it.p, score: same, emb: same });
+  }
+  r.sort((a, b) => b.score - a.score);
+  return r.slice(0, 3);
+}
 function ProductModal({ product, onSave, onClose, token, categories, materials, fbSurcharges = {}, fbMarkets = {}, allProducts = [], skuSeq = {}, onEnroll, onDupStock }) {
   const refCountsPM = useRefCounts(token);
   const cats = (categories && categories.length) ? categories : DEFAULT_CATEGORIES;
@@ -1391,6 +1410,8 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
     const r = eng.kind === 'v3' ? await embedV3Both(eng, img, null) : null;
     const emb = r ? r.all : await embedPhoto(eng, img, 'base');
     const q = { emb, embRef: r ? r.ref : null, color: colorDescriptor(img), kind: eng.kind, cw: eng.cw, margin: eng.margin, pct: eng.pct };
+    // Huella solo de la pieza (similitud sin el fondo; la usan "¿ya existe?" y "Sugerir datos").
+    if (pieceAvailable(eng)) { try { const pe = await embedPiece(eng, img); q.piece = pe.emb; q.pieceOk = pe.ok; } catch (e) { console.warn('pieza:', e && e.message); } }
     photoQRef.current = { src, q, img };
     return photoQRef.current;
   };
@@ -1401,7 +1422,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
     (async () => {
       const cat = await prepareCatalogShared(allProducts);
       const { q } = await photoQuery(imgPrev);
-      const ranked = rankCatalog(q, cat.items, null, 'Todas', 3);
+      const ranked = await dupCandidates(q, cat.items);
       if (!alive) return;
       const top = ranked.length ? ranked[0].score : -1;
       const level = top >= DUP_HIGH ? 'high' : top >= DUP_MEDIUM ? 'medium' : null;
@@ -1455,6 +1476,8 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
       const items = cat.items.filter(it => String(it.p.id) !== String(product && product.id));
       const pq = /^(blob:|data:)/.test(imgPrev) ? await photoQuery(imgPrev) : null; // misma huella que "¿ya existe?"
       const q = pq ? pq.q : { emb: await embedPhoto(eng, img, 'base'), color: colorDescriptor(img), kind: eng.kind, cw: eng.cw, margin: eng.margin };
+      if (!q.piece && pieceAvailable(eng)) { try { q.piece = (await embedPiece(eng, img)).emb; } catch (_) {} }
+      if (q.piece) await preparePieceItems(cat.items).catch(() => false); // items es un filtro de cat.items: comparten it.piece
       const sug = localProductSuggestion(q, items, { tone: photoTone(img) });
       if (!sug) throw new Error('No hay piezas del catálogo para comparar.');
       const top3 = sug.neighbors.slice(0, 3);
@@ -2792,7 +2815,8 @@ async function loadV3(tf) {
   const sess = await ort.InferenceSession.create(new Uint8Array(bytes), { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
   return { tf, model, kind: 'v3', ver: man.emb, size: man.eff.size, proj: effProj, parts: man.eff.parts, views: man.views,
            dino: { ort, sess, size: man.dino.size, proj: dinoProj, nreg: man.dino.registers || 0 }, alpha: man.alpha,
-           cw: man.cw, margin: man.margin, pct: man.pct, refsUrl: man.refs };
+           cw: man.cw, margin: man.margin, pct: man.pct, refsUrl: man.refs,
+           piece: man.piece && man.piece.model && man.piece.sha256 ? man.piece : null }; // similitud solo de la pieza (u2netp)
 }
 async function loadV1(tf) {
   const model = await loadGraphCached(tf, MNV2_URL, MNV2_IDB);
@@ -2846,8 +2870,12 @@ function productVectors(items) {
 }
 // Hasta k productos más parecidos a cada uno (coseno entre vectores de producto). → Map id → [ids]
 const SIMILAR_K = 8;
+// Con huellas de pieza (preparePieceItems), cada producto se compara solo por su pieza; uno sin pieza
+// aislada queda con la lista vacía (y no aparece en la de nadie): nunca se recomienda por el fondo.
 function computeSimilarMap(items, k = SIMILAR_K) {
-  const vecs = productVectors(items), ids = [...vecs.keys()], out = new Map();
+  const piece = (items || []).some(it => it.piece);
+  const vecs = piece ? pieceVectors(items) : productVectors(items), ids = [...vecs.keys()], out = new Map();
+  if (piece) for (const it of items) if (!vecs.has(String(it.p.id))) out.set(String(it.p.id), []);
   for (const a of ids) {
     const va = vecs.get(a), sc = [];
     for (const b of ids) if (b !== a) sc.push([dot(va, vecs.get(b)), b]);
@@ -3253,7 +3281,8 @@ async function prepareCatalogEmbeddings(products, onProgress) {
     if (!main) failed++;
     else {
       if (aug.length) trained++;
-      items.push({ p, emb: main.emb, color: main.color, aug, refsSkipped: mask.filter(m => !m.keep).length });
+      const ai = Math.max(0, mask.findIndex(m => m.anchor)); // foto ancla (la de producto) y fotos que sirven de referencia: para la huella de pieza
+      items.push({ p, emb: main.emb, color: main.color, aug, refsSkipped: mask.filter(m => !m.keep).length, anchorUrl: photos[ai].url, refUrls: photos.filter((_, k) => mask[k].keep).map(ph => ph.url) });
     }
     done++;
     if (onProgress) onProgress(done, list.length);
@@ -3505,7 +3534,10 @@ const SUGGEST_K = 7, SUGGEST_STRONG = 0.6; // voto "fuerte" = ≥ 60 % del peso
 // Por debajo de este puntaje una pieza del catálogo NO se considera parecida: no se muestra en
 // "Se parece a" ni se usa para el precio/categoría (las piezas nuevas reales del taller dieron
 // máx. 0,369 contra el catálogo, ver DUP_*). Así un diseño nuevo no se fuerza a parecerse a nada.
-const SUGGEST_MIN = 0.40;
+// (28 nov) Con la huella solo de la pieza: 0,40 → 0,60 (ninguna pieza nueva real llega a 0,50 contra el
+// catálogo; diseños distintos de la misma familia —anillos dorados esculpidos de la plantilla— quedan en
+// 0,50–0,64: solo los 2 más cercanos pasan, y solo si son la mejor o están a ≤ SUGGEST_GAP de ella).
+const SUGGEST_MIN = 0.60;
 // (27 nov) Además de pasar SUGGEST_MIN, una parecida tiene que estar cerca de la MEJOR (a no más de
 // SUGGEST_GAP): si una pieza se parece mucho (p. ej. 0,7) y las otras apenas (0,4), solo se muestra
 // la que de verdad se parece. Robin vio "Se parece a" con anillos que no tenían nada que ver.
@@ -3546,7 +3578,8 @@ const SUGGEST_WORDS = {
 };
 function localProductSuggestion(q, items, opts) {
   const o = opts || {};
-  const ranked = rankCatalog(q, items, null, 'Todas', o.k || SUGGEST_K);
+  // (28 nov) Con huella de pieza (q.piece e items con it.piece) se compara solo la pieza.
+  const ranked = q.piece && items.some(it => it.piece) ? rankPiece(q.piece, items, o.k || SUGGEST_K) : rankCatalog(q, items, null, 'Todas', o.k || SUGGEST_K);
   if (!ranked.length) return null;
   const top = ranked[0].score, nb = ranked.map(r => ({ p: r.p, score: r.score, w: Math.exp((r.score - top) / 0.05) }));
   const cat = voteBy(nb, p => p.category), mat = voteBy(nb, p => p.material), col = voteBy(nb, p => p.color);
@@ -3677,9 +3710,13 @@ const TWIN_K = 12;
 // (recortes, desenfoques), que hace "parecidas" a piezas que no tienen nada que ver, y siempre se
 // mostraba la más cercana aunque estuviera lejos. Referencia: anillos realmente parecidos
 // (AN032↔AN003) ≈ 0,61; piezas sin relación ≈ 0,2–0,35.
-const TWIN_MIN = 0.55; // (27 nov) 0,45 → 0,55: con 0,45 salían modelos distintos del mismo estilo (p. ej. dos anillos dorados sobre el mismo fondo de plantilla)
+const TWIN_MIN = 0.66; // (27 nov) 0,45 → 0,55 (foto entera). (28 nov) huella solo de la pieza (computeTwinsPiece): 0,66 —
+// piezas distintas de la misma plantilla ≤ 0,64 (AN021–AN026; AN023–AN025 0,62), la bandeja ya no cuenta,
+// realmente parecidas (AN031–AN033, solitarios dorados tubulares) 0,79. Ver README, "Similitud solo de la pieza".
 const _twinMem = new Map();
 async function computeTwins(items, ver) {
+  const usePiece = await preparePieceItems(items, null, { cachedOnly: true }).catch(() => false);
+  if (usePiece) return computeTwinsPiece(items, ver);
   const sig = 'v2|' + ver + '|' + items.map(it => it.p.id + ':' + (it.p.imageUrl || '').slice(-40)).join(',');
   const key = 'twins|' + strHash(sig).toString(36) + '|' + items.length;
   if (_twinMem.has(key)) return _twinMem.get(key);
@@ -3710,6 +3747,223 @@ async function computeTwins(items, ver) {
   const m = new Map(items.map((it, i) => [String(it.p.id), best[i]]).filter(x => x[1] && x[1].sim >= TWIN_MIN));
   _twinMem.set(key, m);
   await embDbPut(db, key, { sig, list: [...m] });
+  return m;
+}
+// ── Similitud solo de la pieza (28 nov) ──
+// Las funciones que comparan productos del catálogo entre sí o con una foto nueva (gemelas "Se
+// parece a", "Sugerir datos", "¿ya existe?", "similar" de la tienda y Lovers) comparaban la foto
+// entera: 8 anillos en la misma bandeja gris o los de la misma plantilla beige con el logo salían
+// "parecidos" por el FONDO. Ahora usan una huella aparte, solo de la pieza:
+//   1) u2netp (U²-Netp, Apache-2.0, 4,6 MB, models/u2netp/) estima la saliencia a 320 px. Si lo
+//      saliente es un "contenedor" (grande y tocando 2 bordes o más: una bandeja), se acerca a esa
+//      zona y prueba otra vez (hasta 3 pasadas); el acercamiento vale solo si da algo compacto y seguro.
+//   2) Se recorta a la pieza (sin el logo ni los íconos de la plantilla, que quedan afuera de lo
+//      saliente) y TODO lo demás pasa a blanco (máscara suave). Si lo que queda es un exhibidor
+//      (busto, mano de maniquí: zona grande y mayormente gris claro sin color), esos píxeles claros
+//      también pasan a blanco.
+//   3) Huella v3 de siempre (embedV3Both) sobre ese recorte.
+// Una foto en la que no se puede aislar la pieza (sigue siendo un contenedor: bandeja con la pieza
+// diminuta, hoja de stickers, foto con modelo) queda AFUERA de estas funciones (ok = false): mejor
+// no comparar que comparar fondos. El identificador (Pedidos, "Agregar pieza con foto") NO usa esto.
+// Las fotos del catálogo traen esta huella precalculada (models/catalog-refs-v3-piece.*, la genera
+// tools/build-catalog-refs.mjs); las nuevas o cambiadas se calculan acá y se guardan en IndexedDB.
+// Medido con tools/eval-piece-sim.mjs (ver README, "Similitud solo de la pieza").
+const PIECE_VER = 'piece-v1';
+const PIECE_SEG = { size: 320, t: 0.5, keep: 0.15, passes: 3, compact: 0.35, minFrac: 0.004, minConf: 0.75, out: 448, margin: 1.12, propFrac: 0.33, propShare: 0.5, propL: 160, propC: 22 };
+let _segPromise = null;
+function loadPieceSeg(eng) {
+  if (_segPromise) return _segPromise;
+  const m = eng.piece;
+  _segPromise = (async () => {
+    const buf = await fetchCachedBin(new URL(m.model, location.href).href, m.sha256, m.bytes);
+    return eng.dino.ort.InferenceSession.create(new Uint8Array(buf), { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+  })();
+  _segPromise.catch(() => { _segPromise = null; });
+  return _segPromise;
+}
+function pieceAvailable(eng) { return !!(eng && eng.kind === 'v3' && eng.piece); }
+// Canvas (lado mayor máx) de un rectángulo de la foto.
+function cropRect(img, x, y, w, h, maxSide) {
+  const k = maxSide / Math.max(w, h), cv = document.createElement('canvas');
+  cv.width = Math.max(1, Math.round(w * k)); cv.height = Math.max(1, Math.round(h * k));
+  cv.getContext('2d').drawImage(img, x, y, w, h, 0, 0, cv.width, cv.height);
+  return cv;
+}
+// Saliencia u2netp (0–1, normalizada) de un canvas, a N×N.
+async function segSaliency(eng, cv) {
+  const sess = await loadPieceSeg(eng), ort = eng.dino.ort, N = PIECE_SEG.size;
+  const c = document.createElement('canvas'); c.width = N; c.height = N; const ctx = c.getContext('2d'); ctx.drawImage(cv, 0, 0, N, N);
+  const d = ctx.getImageData(0, 0, N, N).data; let mx = 0; for (let i = 0; i < d.length; i += 4) mx = Math.max(mx, d[i], d[i + 1], d[i + 2]);
+  const M = [0.485, 0.456, 0.406], SD = [0.229, 0.224, 0.225], x = new Float32Array(3 * N * N);
+  for (let p = 0; p < N * N; p++) for (let k = 0; k < 3; k++) x[k * N * N + p] = (d[p * 4 + k] / (mx || 1) - M[k]) / SD[k];
+  const out = await sess.run({ [sess.inputNames[0]]: new ort.Tensor('float32', x, [1, 3, N, N]) });
+  const t = out[sess.outputNames[0]].data; let a = Infinity, b = -Infinity; for (const v of t) { if (v < a) a = v; if (v > b) b = v; }
+  return { N, prob: Float32Array.from(t.subarray(0, N * N), v => (v - a) / ((b - a) || 1)) };
+}
+// Máscara (prob > t) → componentes conectados; se quedan los de tamaño ≥ keep × el mayor.
+// → { x0, y0, x1, y1 (fracciones), frac, conf (prob media), touch (bordes tocados), inMask(p) } o null.
+function segRegion(u) {
+  const N = u.N, P = PIECE_SEG, lab = new Int32Array(N * N).fill(-1), comps = [], st = new Int32Array(N * N);
+  for (let p = 0; p < N * N; p++) {
+    if (u.prob[p] <= P.t || lab[p] >= 0) continue;
+    let sp = 0, n = 0, x0 = N, y0 = N, x1 = 0, y1 = 0, pm = 0; st[sp++] = p; lab[p] = comps.length;
+    while (sp) {
+      const q = st[--sp], x = q % N, y = (q / N) | 0; n++; pm += u.prob[q];
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= N || yy >= N) continue;
+        const r = yy * N + xx; if (u.prob[r] > P.t && lab[r] < 0) { lab[r] = comps.length; st[sp++] = r; }
+      }
+    }
+    comps.push({ n, x0, y0, x1, y1, pm });
+  }
+  if (!comps.length) return null;
+  const big = Math.max(...comps.map(c => c.n)), keep = new Set();
+  comps.forEach((c, k) => { if (c.n >= P.keep * big) keep.add(k); });
+  let x0 = N, y0 = N, x1 = 0, y1 = 0, n = 0, pm = 0;
+  for (const k of keep) { const c = comps[k]; x0 = Math.min(x0, c.x0); y0 = Math.min(y0, c.y0); x1 = Math.max(x1, c.x1); y1 = Math.max(y1, c.y1); n += c.n; pm += c.pm; }
+  const e = 2, touch = (x0 <= e) + (y0 <= e) + (x1 >= N - 1 - e) + (y1 >= N - 1 - e);
+  return { x0: x0 / N, y0: y0 / N, x1: (x1 + 1) / N, y1: (y1 + 1) / N, frac: n / (N * N), conf: pm / n, touch, inMask: p => lab[p] >= 0 && keep.has(lab[p]) };
+}
+// Foto → { cv: recorte cuadrado de la pieza sobre blanco (out×out) o null, ok, prop, box (px) }.
+async function pieceCanvas(eng, img) {
+  const P = PIECE_SEG, w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+  let R = [0, 0, w, h], best = null;
+  for (let pass = 0; pass < P.passes; pass++) {
+    const cv = cropRect(img, R[0], R[1], R[2] - R[0], R[3] - R[1], 640);
+    const u = await segSaliency(eng, cv), e = segRegion(u);
+    if (!e) break;
+    const compact = e.frac < P.compact && e.touch <= 1;
+    if (pass === 0) best = { R, cv, u, e };
+    else if (compact && e.frac >= P.minFrac && e.conf >= P.minConf) { best = { R, cv, u, e }; break; }
+    if (compact || !(e.frac > P.compact && e.touch >= 2)) break;
+    const rw = R[2] - R[0], rh = R[3] - R[1];
+    R = [R[0] + e.x0 * rw, R[1] + e.y0 * rh, R[0] + e.x1 * rw, R[1] + e.y1 * rh];
+  }
+  if (!best) return { cv: null, ok: false, prop: false, box: null };
+  const { R: BR, cv: rc, u, e } = best, N = u.N, W = rc.width, H = rc.height;
+  const mc = document.createElement('canvas'); mc.width = N; mc.height = N; const mctx = mc.getContext('2d'), mi = mctx.createImageData(N, N);
+  for (let p = 0; p < N * N; p++) mi.data[p * 4 + 3] = e.inMask(p) ? Math.round(255 * u.prob[p]) : 0;
+  mctx.putImageData(mi, 0, 0);
+  const fg = document.createElement('canvas'); fg.width = W; fg.height = H; const fctx = fg.getContext('2d');
+  fctx.drawImage(rc, 0, 0); fctx.globalCompositeOperation = 'destination-in'; fctx.drawImage(mc, 0, 0, W, H);
+  const bx0 = e.x0 * W, by0 = e.y0 * H, bx1 = e.x1 * W, by1 = e.y1 * H, side = Math.max(bx1 - bx0, by1 - by0) * P.margin;
+  const out = document.createElement('canvas'); out.width = P.out; out.height = P.out; const octx = out.getContext('2d');
+  octx.fillStyle = '#fff'; octx.fillRect(0, 0, P.out, P.out);
+  octx.drawImage(fg, (bx0 + bx1) / 2 - side / 2, (by0 + by1) / 2 - side / 2, side, side, 0, 0, P.out, P.out);
+  const frac = e.frac * ((BR[2] - BR[0]) * (BR[3] - BR[1])) / (w * h);
+  // Exhibidor (busto, maniquí): lo saliente es grande y en su mayoría gris claro sin color → a blanco.
+  const im = octx.getImageData(0, 0, P.out, P.out), d = im.data; let nn = 0, nl = 0;
+  const light = i => { const mx = Math.max(d[i], d[i + 1], d[i + 2]), mn = Math.min(d[i], d[i + 1], d[i + 2]); return 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2] >= P.propL && mx - mn <= P.propC; };
+  for (let i = 0; i < d.length; i += 4) { if (Math.min(d[i], d[i + 1], d[i + 2]) > 250) continue; nn++; if (light(i)) nl++; }
+  const prop = frac >= P.propFrac && nn > 0 && nl / nn >= P.propShare;
+  if (prop) { for (let i = 0; i < d.length; i += 4) if (light(i)) d[i] = d[i + 1] = d[i + 2] = 255; octx.putImageData(im, 0, 0); }
+  const sx = (BR[2] - BR[0]) / W, sy = (BR[3] - BR[1]) / H;
+  return { cv: out, ok: !(e.frac > P.compact && e.touch >= 2), prop, box: [BR[0] + bx0 * sx, BR[1] + by0 * sy, BR[0] + bx1 * sx, BR[1] + by1 * sy] };
+}
+// Huella solo de la pieza: { emb (EMB_DIM), ok, prop }. emb null si no hubo nada saliente.
+async function embedPiece(eng, img) {
+  const pc = await pieceCanvas(eng, img);
+  if (!pc.cv) return { emb: null, ok: false, prop: false };
+  return { emb: (await embedV3Both(eng, pc.cv, null)).all, ok: pc.ok, prop: pc.prop };
+}
+// Huellas de pieza precalculadas (models/catalog-refs-v3-piece.json + .bin): Map "id|url" → { emb, ok }.
+let _pieceRefsPromise = null;
+function loadStaticPieceRefs(eng) {
+  if (_pieceRefsPromise) return _pieceRefsPromise;
+  _pieceRefsPromise = (async () => {
+    const url = eng.piece && eng.piece.refs; if (!url) return null;
+    const res = await fetch(url, { cache: 'no-cache' }); if (!res.ok) return null;
+    const idx = await res.json();
+    if (!idx || idx.model !== eng.ver + '|' + PIECE_VER || !(idx.dim > 0 && idx.dim <= EMB_DIM)) return null;
+    const buf = await fetchCachedBin(new URL(idx.bin, new URL(url, location.href)).href, idx.binSha256, idx.binBytes);
+    const i8 = new Int8Array(buf), map = new Map();
+    for (const [id, list] of Object.entries(idx.products || {})) for (const e of (Array.isArray(list) ? list : [])) {
+      if (!e || typeof e.url !== 'string') continue;
+      if (e.offset == null) { map.set(String(id) + '|' + e.url, { emb: null, ok: false }); continue; }
+      if (!(e.offset >= 0) || (e.offset + 1) * idx.dim > i8.length) continue;
+      const v = new Float32Array(EMB_DIM); v.set(l2norm(Float32Array.from(i8.subarray(e.offset * idx.dim, (e.offset + 1) * idx.dim))));
+      map.set(String(id) + '|' + e.url, { emb: v, ok: e.ok !== false });
+    }
+    return map;
+  })().catch(e => { console.warn('huellas de pieza precalculadas:', e && e.message); _pieceRefsPromise = null; return null; });
+  return _pieceRefsPromise;
+}
+// Completa it.piece = { anchor, refs } en los items de prepareCatalogEmbeddings (fotos que sirven de
+// referencia, con la pieza aislada; anchor = la de la foto ancla). Una vez por lista de items.
+// → true si hay huellas de pieza; false si el motor no las tiene (v2/v1 de respaldo).
+// opts.cachedOnly: solo las ya calculadas (precalculadas, memoria o IndexedDB), sin bajar fotos ni correr
+// u2netp (gemelas en Registrar fotos: no trabar la pantalla); una foto sin huella todavía queda afuera.
+const _pieceMem = new Map(), _pieceDone = new WeakMap(), _pieceDoneCached = new WeakMap();
+function preparePieceItems(items, onProgress, opts) {
+  if (!items) return Promise.resolve(false);
+  const cachedOnly = !!(opts && opts.cachedOnly);
+  if (_pieceDone.has(items)) return _pieceDone.get(items);
+  if (cachedOnly && _pieceDoneCached.has(items)) return _pieceDoneCached.get(items);
+  const pr = (async () => {
+    const eng = await loadRecognitionModel();
+    if (!pieceAvailable(eng)) return false;
+    const st = await loadStaticPieceRefs(eng), db = await embDb();
+    let done = 0;
+    for (const it of items) {
+      const id = String(it.p.id), urls = it.refUrls || [], refs = []; let anchor = null;
+      for (const url of urls) {
+        const key = 'piece|' + PIECE_VER + '|' + eng.ver + '|' + url;
+        let r = _pieceMem.get(key) || (st && st.get(id + '|' + url)) || null;
+        if (!r) { const c = await embDbGet(db, key); if (c && (c.emb === null || (c.emb && c.emb.length === EMB_DIM))) r = c; }
+        if (!r && cachedOnly) continue;
+        if (!r) {
+          try { const img = await loadCatalogImg(url); const e = await embedPiece(eng, img); r = { emb: e.emb, ok: e.ok }; await embDbPut(db, key, r); }
+          catch (e) { console.warn('pieza: foto no utilizable', url, e && e.message); continue; }
+        }
+        _pieceMem.set(key, r);
+        if (r.ok && r.emb) { refs.push(r.emb); if (url === it.anchorUrl) anchor = r.emb; }
+      }
+      it.piece = { anchor, refs };
+      if (onProgress) onProgress(++done, items.length);
+    }
+    return true;
+  })();
+  const memo = cachedOnly ? _pieceDoneCached : _pieceDone;
+  memo.set(items, pr);
+  pr.catch(() => memo.delete(items));
+  return pr;
+}
+// Similitud de una huella de pieza con un producto = la mejor con sus fotos de referencia.
+// → [{ p, score, same }] ordenado (solo productos con pieza aislada). Sin color (es de la foto entera).
+function rankPiece(qPiece, items, topN = 5) {
+  const out = [];
+  for (const it of items) {
+    const refs = it.piece ? it.piece.refs : [];
+    if (!qPiece || !refs.length) continue;
+    let s = -2; for (const r of refs) s = Math.max(s, dot(qPiece, r));
+    out.push({ p: it.p, score: s, emb: s });
+  }
+  out.sort((a, b) => b.score - a.score);
+  return out.slice(0, topN);
+}
+// Vector de producto para "similar" y Lovers = la huella de pieza de su foto ancla (sin pieza aislada: no tiene).
+function pieceVectors(items) {
+  const m = new Map();
+  for (const it of items || []) if (it.piece && it.piece.anchor) m.set(String(it.p.id), it.piece.anchor);
+  return m;
+}
+// Gemelas con la huella de pieza (28 nov): coseno entre las huellas de pieza de las fotos ancla.
+// Una pieza sin pieza aislada no tiene gemela ni es gemela de nadie.
+function computeTwinsPiece(items, ver) {
+  const sig = PIECE_VER + '|' + ver + '|' + items.map(it => it.p.id + ':' + (it.anchorUrl || '').slice(-40) + (it.piece && it.piece.anchor ? '' : '-')).join(',');
+  const key = 'twins|' + strHash(sig).toString(36) + '|' + items.length;
+  if (_twinMem.has(key)) return _twinMem.get(key);
+  const best = new Map();
+  for (let a = 0; a < items.length; a++) for (let b = a + 1; b < items.length; b++) {
+    const va = items[a].piece && items[a].piece.anchor, vb = items[b].piece && items[b].piece.anchor;
+    if (!va || !vb) continue;
+    const s = dot(va, vb), ia = String(items[a].p.id), ib = String(items[b].p.id);
+    if (!best.has(ia) || s > best.get(ia).sim) best.set(ia, { id: ib, sim: s });
+    if (!best.has(ib) || s > best.get(ib).sim) best.set(ib, { id: ia, sim: s });
+  }
+  const m = new Map([...best].filter(x => x[1].sim >= TWIN_MIN));
+  _twinMem.set(key, m);
   return m;
 }
 // Acierto real en este teléfono: por cada pieza elegida después de identificar por foto se guarda
@@ -4891,7 +5145,9 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
 // Lovers anteriores con su mismo email, o su teléfono si no hay email) y las MUY parecidas a esas
 // (coseno de la huella v3 > LOVERS_SIM_MAX). Se eligen distintas: otra categoría si se puede y
 // poco parecidas entre sí. Nunca se agregan solas.
-const LOVERS_SIM_MAX = 0.8, LOVERS_STEEL_RE = /acero/i;
+// (28 nov) Con la huella solo de la pieza (pieceVectors) "muy parecida" = gemela: 0,8 → TWIN_MIN (0,66);
+// una pieza sin pieza aislada no tiene vector y cuenta como no parecida (0).
+const LOVERS_SIM_MAX = TWIN_MIN, LOVERS_STEEL_RE = /acero/i;
 function loversSubscriberKey(o) {
   const c = (o && o.cliente) || {}, email = String(c.email || '').trim().toLowerCase();
   if (email) return 'e:' + email;
@@ -4950,7 +5206,7 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
     if (!n || (lovSug && lovSug.busy)) return;
     setLovSug({ busy: true });
     let vecs = null, notes = [];
-    try { const r = await prepareCatalogShared(products); vecs = productVectors(r.items); }
+    try { const r = await prepareCatalogShared(products); vecs = (await preparePieceItems(r.items)) ? pieceVectors(r.items) : productVectors(r.items); }
     catch (_) { notes = ['El identificador no cargó: se sugiere sin comparar parecidos.']; }
     const res = suggestLoversPieces(order, orders, products, stock, vecs, n);
     setLovSug({ busy: false, picks: res.picks, notes: [...notes, ...res.notes] });
@@ -9865,6 +10121,8 @@ function App() {
     setRecoBusy(true); setRecoMsg('Preparando las huellas del catálogo (la primera vez descarga ~55 MB)…');
     try {
       const r = await prepareCatalogShared(products);
+      setRecoMsg('Aislando la pieza en cada foto (solo la primera vez para cada foto nueva)…');
+      await preparePieceItems(r.items);
       const sim = computeSimilarMap(r.items);
       setProducts(ps => withSimilar(ps, sim)); setDirty(true);
       setRecoMsg(`✓ Recomendaciones listas para ${sim.size} productos. Publica los cambios para subirlas a la tienda.`);
@@ -9924,9 +10182,10 @@ function App() {
       const seqOut = { ...asg.seq };
       prodsOut.forEach(p => { const s = normalizeSku(p.sku); if (SKU_RE.test(s)) { const k = s.slice(0, 2), n = parseInt(s.slice(2), 10); if (!(seqOut[k] >= n)) seqOut[k] = n; } });
       setSkuSeq(seqOut);
-      // "similar" (También te puede gustar): solo si el identificador ya preparó el catálogo en esta
-      // sesión (nunca se fuerza la descarga al publicar); si no, quedan los valores que ya tenían.
-      if (_prepLast && Array.isArray(_prepLast.items) && _prepLast.items.length > 1) {
+      // "similar" (También te puede gustar): solo si el identificador ya preparó el catálogo Y las
+      // huellas de pieza en esta sesión (nunca se fuerza la descarga al publicar, y nunca se recalcula
+      // con la foto entera: comparaba fondos); si no, quedan los valores que ya tenían.
+      if (_prepLast && Array.isArray(_prepLast.items) && _prepLast.items.length > 1 && _prepLast.items.some(it => it.piece)) {
         prodsOut = withSimilar(prodsOut, computeSimilarMap(_prepLast.items)); setProducts(prodsOut);
       }
       setSyncMsg('☁️ Guardando de forma segura…');
