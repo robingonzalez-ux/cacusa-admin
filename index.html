@@ -8523,7 +8523,7 @@ function computeSales(orders, products, now = new Date(), rangeDays = 30) {
       const cp = l.id != null && !l.isCombo ? byId.get(String(l.id)) : null;
       const key = cp ? 'p:' + cp.id : l.isCombo ? 'c:' + l.id : 'n:' + String(l.name || '').trim().toLowerCase();
       const qty = lineQty(l), rev = linePrice(l) * qty;
-      const e = prodMap.get(key) || { key, name: (cp && cp.name) || l.name || 'Sin nombre', sku: cp ? normalizeSku(cp.sku) : '', units: 0, revenue: 0 };
+      const e = prodMap.get(key) || { key, name: (cp && cp.name) || l.name || 'Sin nombre', sku: cp ? normalizeSku(cp.sku) : '', img: cp ? productImageUrl(cp) : '', units: 0, revenue: 0 };
       e.units += qty; e.revenue += rev; prodMap.set(key, e);
       const cat = cp ? (cp.category || 'Sin categoría') : l.isCombo ? 'Combos' : 'Sin categoría (línea manual)';
       const c = catMap.get(cat) || { cat, units: 0, revenue: 0 };
@@ -8630,6 +8630,7 @@ function SalesTab({ orders, products }) {
           {list.map((e, i) => (
             <li key={e.key} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
               <span style={{ width: 18, color: '#7A6880', fontWeight: 700, flexShrink: 0 }}>{i + 1}.</span>
+              <ZoomImg src={e.img} title={e.sku} sub={e.name} style={{ width: 28, height: 28, borderRadius: 6, objectFit: 'cover', flexShrink: 0 }} />
               {e.sku ? <SkuChip sku={e.sku} /> : null}
               <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.name}</span>
               <strong style={{ flexShrink: 0 }}>{field === 'units' ? e.units + ' u.' : fmtUsd(e.revenue)}</strong>
@@ -9250,7 +9251,7 @@ function BulkEditModal({ products, categories, stock, onApply, onSaveStock, onCl
               <thead><tr style={{ background: '#FAF7FB' }}><th scope="col" style={{ textAlign: 'left', padding: 6 }}>Producto</th><th scope="col" style={{ textAlign: 'left', padding: 6 }}>Antes</th><th scope="col" style={{ textAlign: 'left', padding: 6 }}>Después</th></tr></thead>
               <tbody>{res.rows.map(r => (
                 <tr key={r.p.id} style={{ borderTop: '1px solid #F5F0F7', opacity: r.patch ? 1 : 0.6 }} data-testid="bulkRow">
-                  <td style={{ padding: 6, minWidth: 120 }}><SkuChip sku={r.p.sku} /> <span>{r.p.name}</span></td>
+                  <td style={{ padding: 6, minWidth: 120 }}><span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><ZoomImg src={productImageUrl(r.p)} title={normalizeSku(r.p.sku)} sub={r.p.name} style={{ width: 30, height: 30, borderRadius: 6, objectFit: 'cover', flexShrink: 0 }} /><span><SkuChip sku={r.p.sku} /> {r.p.name}</span></span></td>
                   <td style={{ padding: 6 }}>{r.before}</td>
                   <td style={{ padding: 6 }}>{r.patch ? <strong>→ {r.after}</strong> : <span style={{ color: '#7A6880' }}>Se salta: {r.skip}</span>}</td>
                 </tr>
