@@ -252,3 +252,32 @@ tensorflowjs 4.17, pesos de storage.googleapis.com/tensorflow/keras-applications
 prueba con transformaciones distintas a las del entrenamiento (`eval-transforms.js`) y compara
 hit@1/hit@5 sin y con las referencias precalculadas, con y sin filtro de categoría, con las
 funciones reales del panel (`prepareCatalogEmbeddings` + `rankCatalog`).
+
+## Gestión (26 nov): Ventas, Clientas, Preparar pedidos y Edición masiva
+
+Todo se calcula en el navegador con lo que el panel ya carga (pedidos, productos, stock); no hay
+rutas nuevas en el Worker. Fechas en la hora local del dispositivo.
+
+- **◇ Ventas** (`SalesTab`, `computeSales`): hoy / esta semana (desde el lunes) / este mes contra el
+  mismo tramo del período anterior (ingresos, pedidos, ticket promedio); barras de los últimos 30
+  días (SVG, con resumen en texto y tabla); más vendidos por unidades e ingresos, por categoría y por
+  canal. Venta = todo pedido no Cancelado. Canal: Lovers (`pago: 'Lovers'` o `lote`), Manual
+  (`createdBy` = cuenta del panel), Tienda (el resto). Las cajas de Lovers se guardan en $0, así que
+  no suman ingresos ni entran en el ticket/top: se cuentan aparte.
+- **♡ Clientas** (`CustomersTab`, `buildCustomers`): una fila por correo (sin mayúsculas) o, sin correo,
+  por teléfono; un pedido con correo y teléfono une la ficha "solo teléfono". Filtros recurrentes,
+  top 20 por gasto, inactivas (+90 días), Lovers sí/no, búsqueda. CSV (BOM, celdas a prueba de
+  fórmulas) con aviso de datos personales.
+- **Pedidos → ▦ Preparar (tablero)** (`FulfillmentBoard`): columnas = estados reales (Nuevo,
+  Confirmado, En proceso, Enviado, Entregado de los últimos 14 días). Mover (botones o arrastrar) usa
+  el mismo `order/update {estado}` que la tarjeta y las mismas reglas (`loversBlockMsg`; Enviado y
+  Entregado no vuelven atrás). **Hoja de preparación** (`PackingSlipView`, una página por pedido,
+  `@media print` oculta el panel): número, fecha, enviar a (del pedido), código + QR, cantidad,
+  personalización y notas. También desde cada tarjeta ("▤ Hoja de preparación").
+- **Productos → ☑ Selección múltiple** (`BulkEditModal`, `computeBulk`): precio (% o monto, redondeo
+  .00/.99), oferta (% o precio fijo, etiqueta, "válida hasta"), quitar oferta, categoría,
+  activar/pausar → vista previa antes/después → cambia el formulario y se sube con "Publicar cambios".
+  Stock → `/stock/set` por producto, al instante. La tienda no entiende fecha de inicio de oferta
+  (`promo.price`/`label`/`endsAt` solamente): la oferta empieza al publicar.
+
+Prueba: `pwmgmt.js` (escritorio y 390 px).

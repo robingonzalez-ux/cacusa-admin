@@ -1216,10 +1216,17 @@ function RefBadge({ n, style }) {
     style={{ fontSize: 10, fontWeight: 800, color: n ? '#15803D' : '#B45309', background: n ? '#DCFCE7' : '#FEF3C7', padding: '2px 7px', borderRadius: 99, whiteSpace: 'nowrap', ...style }}>◇ {n} foto{n === 1 ? '' : 's'} real{n === 1 ? '' : 'es'}</span>;
 }
 
-function ProductCard({ p, onEdit, onDelete, onToggle, onMoveUp, onMoveDown, canUp, canDown, stockQty, onStockSave, refN }) {
+function ProductCard({ p, onEdit, onDelete, onToggle, onMoveUp, onMoveDown, canUp, canDown, stockQty, onStockSave, refN, select }) {
   const active = p.available !== false;
   return (
-    <div style={{ background: 'white', borderRadius: 18, overflow: 'hidden', boxShadow: '0 2px 14px rgba(0,0,0,.07)', opacity: active ? 1 : .52, transition: 'all .25s', display: 'flex', flexDirection: 'column', animation: 'fadeIn .3s ease' }}>
+    <div data-testid="productCard" style={{ background: 'white', borderRadius: 18, overflow: 'hidden', boxShadow: select && select.checked ? '0 0 0 3px #9B5DE5' : '0 2px 14px rgba(0,0,0,.07)', opacity: active || select ? 1 : .52, transition: 'all .25s', display: 'flex', flexDirection: 'column', animation: 'fadeIn .3s ease' }}>
+      {select && (
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: select.checked ? '#F1EAFB' : '#FAF7FB', fontSize: 12, fontWeight: 700, color: '#5B3F8A', cursor: 'pointer' }}>
+          <input type="checkbox" checked={select.checked} onChange={select.onChange} style={{ width: 18, height: 18, accentColor: '#9B5DE5' }} />
+          <span style={SR_ONLY}>Elegir {p.name}</span><span aria-hidden="true">{select.checked ? 'Elegido' : 'Elegir'}</span>
+          {!active && <span style={{ marginLeft: 'auto', fontSize: 10, color: '#DC2626' }}>Pausado</span>}
+        </label>
+      )}
       <div style={{ height: 128, position: 'relative', flexShrink: 0, overflow: 'hidden' }}>
         {p.imageUrl
           ? <img src={p.imageUrl} alt={p.name} style={{ width: '100%', height: '100%', objectFit: 'cover', objectPosition: `${p.focalX ?? 50}% ${p.focalY ?? 50}%`, transform: `scale(${p.zoom ?? 1})`, transformOrigin: `${p.focalX ?? 50}% ${p.focalY ?? 50}%` }} />
@@ -4881,7 +4888,7 @@ function suggestLoversPieces(order, orders, products, stock, vecs, n) {
     }),
   };
 }
-function OrderCard({ order, token, uspsDefault, products, categories, stock, onStockRefresh, onStatusChange, onDelete, onTrackingChange, onCarrierChange, onClienteUpdate, onLabelGenerated, onProductsChange, orders = [] }) {
+function OrderCard({ order, token, uspsDefault, products, categories, stock, onStockRefresh, onStatusChange, onDelete, onTrackingChange, onCarrierChange, onClienteUpdate, onLabelGenerated, onProductsChange, onPrintSlip, orders = [] }) {
   const [showLabelModal, setShowLabelModal] = React.useState(false);
   // ── Agregar pieza con foto ──
   const canLoadPieces = orderAllowsPieceLoad(order);
@@ -5264,6 +5271,12 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
             onStockRefresh && onStockRefresh();
           }}
           onTeach={teachPiece} />
+      )}
+      {onPrintSlip && (
+        <button type="button" onClick={() => onPrintSlip(order)} aria-label={'Hoja de preparación del pedido' + (order.numero ? ' #' + order.numero : '')}
+          style={{ alignSelf: 'flex-start', fontSize: 12, fontWeight: 700, color: '#5B3F8A', background: '#F1EAFB', border: 'none', borderRadius: 99, padding: '5px 12px', cursor: 'pointer' }}>
+          ▤ Hoja de preparación
+        </button>
       )}
       {teachMsg && <div role="status" aria-live="polite" style={{ fontSize: 11, color: teachMsg.warn ? '#92400E' : '#5B3F8A', background: teachMsg.warn ? '#FEF3C7' : '#F1EAFB', borderRadius: 8, padding: '4px 8px' }}>{teachMsg.text}</div>}
       {order.lote && <div style={{ display: 'inline-block', fontSize: 11, fontWeight: 700, color: '#C0336E', background: '#FCE8F3', borderRadius: 99, padding: '2px 10px', width: 'fit-content' }}>♡ Lote Lovers {order.lote} · sale del 15 al 21</div>}
@@ -8448,6 +8461,822 @@ function MercadoTab({ products, token }) {
 }
 
 // ── App ────────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+// Gestión (26 nov): Ventas, Clientas, Preparar pedidos (tablero + hoja) y Edición masiva.
+// Todo se calcula en el navegador con lo que el panel ya carga (pedidos, productos, stock):
+// no hay rutas nuevas en el Worker. Fechas en la hora local del dispositivo (el panel no usa
+// otra zona horaria en ningún lado). Sin datos de clientas en el código: todo sale de los
+// pedidos en tiempo de ejecución.
+// ════════════════════════════════════════════════════════════════════════════
+const SR_ONLY = { position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clip: 'rect(0,0,0,0)', whiteSpace: 'nowrap', border: 0 };
+// Venta = todo pedido que no esté Cancelado. Canal: Lovers (pago 'Lovers' o con lote), Manual
+// (lo creó una cuenta del panel: createdBy, igual que orderAllowsPieceLoad) y Tienda (el resto:
+// checkout web con Square/Zelle/WhatsApp).
+function orderIsSale(o) { return !!o && (o.estado || 'Nuevo') !== 'Cancelado'; }
+function orderChannel(o) { if (isLoversBox(o)) return 'lovers'; if (PANEL_USERS.includes(o && o.createdBy)) return 'manual'; return 'tienda'; }
+const CHANNEL_LABEL = { tienda: 'Tienda web', manual: 'Manual (panel)', lovers: 'Cacusa Lovers' };
+function orderTime(o) { const t = Date.parse(o && o.fecha); return Number.isFinite(t) ? t : NaN; }
+function orderTotal(o) { const n = parseFloat(o && o.total); return Number.isFinite(n) ? n : 0; }
+function lineQty(l) { const q = Number(l && l.qty); return Number.isInteger(q) && q > 0 ? q : 1; }
+function linePrice(l) { const n = parseFloat(l && l.price); return Number.isFinite(n) ? n : 0; }
+function fmtUsd(n) { return '$' + (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function dayStart(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
+function weekStart(d) { const x = dayStart(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; } // lunes
+function monthStart(d) { const x = dayStart(d); x.setDate(1); return x; }
+function localDayKey(t) { const d = new Date(t); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+function fmtDay(t, opts) { return new Date(t).toLocaleDateString('es-EC', opts || { day: 'numeric', month: 'short' }); }
+
+function salesSummary(list) {
+  const revenue = list.reduce((s, o) => s + orderTotal(o), 0);
+  return { revenue, count: list.length, avg: list.length ? revenue / list.length : 0 };
+}
+// Las cajas de Lovers se guardan en $0 (la suscripción se cobra con factura de Square, fuera del
+// pedido): no entran en ingresos/ticket/top para no bajar el promedio; se cuentan aparte.
+function computeSales(orders, products, now = new Date(), rangeDays = 30) {
+  const nowT = now.getTime();
+  const sales = (orders || []).filter(o => orderIsSale(o) && Number.isFinite(orderTime(o)));
+  const paid = sales.filter(o => orderChannel(o) !== 'lovers');
+  const between = (list, a, b) => list.filter(o => { const t = orderTime(o); return t >= a && t <= b; });
+  const period = (start, prevStart) => {
+    const s = start.getTime(), ps = prevStart.getTime();
+    const pe = Math.min(ps + (nowT - s), s - 1); // mismo tramo del período anterior (nunca se pisa con el actual)
+    return { cur: salesSummary(between(paid, s, nowT)), prev: salesSummary(between(paid, ps, pe)), start: s };
+  };
+  const today = dayStart(now), yest = new Date(today); yest.setDate(yest.getDate() - 1);
+  const wk = weekStart(now), pwk = new Date(wk); pwk.setDate(pwk.getDate() - 7);
+  const mo = monthStart(now), pmo = new Date(mo); pmo.setMonth(pmo.getMonth() - 1);
+  const periods = { today: period(today, yest), week: period(wk, pwk), month: period(mo, pmo) };
+  // Últimos 30 días, día por día
+  const days = [];
+  for (let i = 29; i >= 0; i--) { const d = new Date(today); d.setDate(d.getDate() - i); days.push({ key: localDayKey(d.getTime()), t: d.getTime(), revenue: 0, count: 0 }); }
+  const dayIdx = new Map(days.map((d, i) => [d.key, i]));
+  for (const o of paid) { const i = dayIdx.get(localDayKey(orderTime(o))); if (i != null && orderTime(o) <= nowT) { days[i].revenue += orderTotal(o); days[i].count++; } }
+  // Rango para top productos / categorías / canales
+  const rangeStart = rangeDays ? (() => { const d = new Date(today); d.setDate(d.getDate() - (rangeDays - 1)); return d.getTime(); })() : -Infinity;
+  const inRange = between(sales, rangeStart, nowT);
+  const byId = new Map((products || []).map(p => [String(p.id), p]));
+  const prodMap = new Map(), catMap = new Map();
+  for (const o of inRange) {
+    if (orderChannel(o) === 'lovers') continue;
+    for (const l of (o.productos || [])) {
+      if (!l) continue;
+      const cp = l.id != null && !l.isCombo ? byId.get(String(l.id)) : null;
+      const key = cp ? 'p:' + cp.id : l.isCombo ? 'c:' + l.id : 'n:' + String(l.name || '').trim().toLowerCase();
+      const qty = lineQty(l), rev = linePrice(l) * qty;
+      const e = prodMap.get(key) || { key, name: (cp && cp.name) || l.name || 'Sin nombre', sku: cp ? normalizeSku(cp.sku) : '', units: 0, revenue: 0 };
+      e.units += qty; e.revenue += rev; prodMap.set(key, e);
+      const cat = cp ? (cp.category || 'Sin categoría') : l.isCombo ? 'Combos' : 'Sin categoría (línea manual)';
+      const c = catMap.get(cat) || { cat, units: 0, revenue: 0 };
+      c.units += qty; c.revenue += rev; catMap.set(cat, c);
+    }
+  }
+  const prods = [...prodMap.values()];
+  const channels = ['tienda', 'manual', 'lovers'].map(ch => {
+    const list = inRange.filter(o => orderChannel(o) === ch);
+    return { ch, label: CHANNEL_LABEL[ch], count: list.length, revenue: list.reduce((s, o) => s + orderTotal(o), 0) };
+  });
+  return {
+    periods, days,
+    topUnits: [...prods].sort((a, b) => b.units - a.units || b.revenue - a.revenue).slice(0, 10),
+    topRevenue: [...prods].sort((a, b) => b.revenue - a.revenue || b.units - a.units).slice(0, 10),
+    categories: [...catMap.values()].sort((a, b) => b.revenue - a.revenue),
+    channels, rangeCount: inRange.length,
+  };
+}
+function deltaText(cur, prev, isMoney) {
+  if (!prev && !cur) return { txt: 'sin movimiento', dir: 0 };
+  if (!prev) return { txt: '▲ nuevo (antes ' + (isMoney ? fmtUsd(0) : '0') + ')', dir: 1 };
+  const pct = Math.round(((cur - prev) / prev) * 100);
+  if (pct === 0) return { txt: '= igual (' + (isMoney ? fmtUsd(prev) : prev) + ')', dir: 0 };
+  return { txt: (pct > 0 ? '▲ ' : '▼ ') + Math.abs(pct) + ' % (antes ' + (isMoney ? fmtUsd(prev) : prev) + ')', dir: pct > 0 ? 1 : -1 };
+}
+function roundedBarPath(x, y, w, h) {
+  const r = Math.min(4, w / 2, h);
+  return `M${x},${y + h}L${x},${y + r}Q${x},${y} ${x + r},${y}L${x + w - r},${y}Q${x + w},${y} ${x + w},${y + r}L${x + w},${y + h}Z`;
+}
+function DailyBars({ days }) {
+  const [hover, setHover] = useState(null);
+  const W = 600, H = 160, gap = 2, bw = W / days.length - gap;
+  const max = Math.max(0, ...days.map(d => d.revenue));
+  const total = days.reduce((s, d) => s + d.revenue, 0), orders = days.reduce((s, d) => s + d.count, 0);
+  const best = days.reduce((b, d) => (d.revenue > (b ? b.revenue : 0) ? d : b), null);
+  const summary = total
+    ? `Últimos 30 días: ${fmtUsd(total)} en ${orders} pedido${orders === 1 ? '' : 's'}, promedio de ${fmtUsd(total / 30)} por día. Mejor día: ${fmtDay(best.t, { weekday: 'long', day: 'numeric', month: 'long' })} con ${fmtUsd(best.revenue)}.`
+    : 'Últimos 30 días: sin ventas con cobro registradas.';
+  const h = hover != null ? days[hover] : null;
+  return (
+    <figure style={{ margin: 0 }} data-testid="salesChart">
+      <figcaption id="salesChartSummary" style={{ fontSize: 13, color: '#5B4A63', marginBottom: 8 }}>{summary}</figcaption>
+      <div style={{ fontSize: 11, color: '#7A6880', marginBottom: 2 }}>{max ? 'Máx. ' + fmtUsd(max) : ''}</div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height="160" preserveAspectRatio="none" role="img" aria-labelledby="salesChartSummary"
+        style={{ display: 'block', overflow: 'visible' }} onMouseLeave={() => setHover(null)}>
+        <line x1="0" y1={H - 0.5} x2={W} y2={H - 0.5} stroke="#E5DDEA" strokeWidth="1" />
+        {days.map((d, i) => {
+          const bh = max ? Math.max(d.revenue ? 2 : 0, (d.revenue / max) * (H - 6)) : 0;
+          const x = i * (bw + gap) + gap / 2;
+          return (
+            <g key={d.key} onMouseEnter={() => setHover(i)} onClick={() => setHover(i)}>
+              <rect x={x - gap / 2} y="0" width={bw + gap} height={H} fill="transparent" />
+              {bh > 0 && <path d={roundedBarPath(x, H - bh, bw, bh)} fill={hover === i ? '#B83A6C' : '#E8508A'} />}
+              <title>{fmtDay(d.t) + ': ' + fmtUsd(d.revenue) + ' · ' + d.count + ' pedido' + (d.count === 1 ? '' : 's')}</title>
+            </g>
+          );
+        })}
+      </svg>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#7A6880', marginTop: 4 }}>
+        <span>{fmtDay(days[0].t)}</span><span>{fmtDay(days[15].t)}</span><span>Hoy</span>
+      </div>
+      <div role="status" aria-live="polite" style={{ minHeight: 18, fontSize: 12, color: '#1A1118', marginTop: 4 }}>
+        {h ? fmtDay(h.t, { weekday: 'short', day: 'numeric', month: 'short' }) + ': ' + fmtUsd(h.revenue) + ' · ' + h.count + ' pedido' + (h.count === 1 ? '' : 's') : ''}
+      </div>
+      <details style={{ marginTop: 4 }}>
+        <summary style={{ fontSize: 12, color: '#5B3F8A', fontWeight: 700, cursor: 'pointer' }}>Ver los 30 días en tabla</summary>
+        <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse', marginTop: 6 }}>
+          <thead><tr><th scope="col" style={{ textAlign: 'left' }}>Día</th><th scope="col" style={{ textAlign: 'right' }}>Ingresos</th><th scope="col" style={{ textAlign: 'right' }}>Pedidos</th></tr></thead>
+          <tbody>{days.map(d => <tr key={d.key}><td>{fmtDay(d.t, { weekday: 'short', day: 'numeric', month: 'short' })}</td><td style={{ textAlign: 'right' }}>{fmtUsd(d.revenue)}</td><td style={{ textAlign: 'right' }}>{d.count}</td></tr>)}</tbody>
+        </table>
+      </details>
+    </figure>
+  );
+}
+const MGMT_CARD = { background: 'white', borderRadius: 14, padding: 16, boxShadow: '0 1px 6px rgba(0,0,0,.06)', minWidth: 0 };
+const MGMT_H = { fontWeight: 800, fontSize: 14, color: '#1A1118', marginBottom: 10 };
+function SalesTab({ orders, products }) {
+  const [range, setRange] = useState(30);
+  const s = React.useMemo(() => computeSales(orders, products, new Date(), range), [orders, products, range]);
+  const kpi = (title, p) => (
+    <div style={MGMT_CARD} data-testid={'salesKpi'}>
+      <div style={{ fontSize: 12, fontWeight: 800, color: '#7A6880', letterSpacing: '.05em', marginBottom: 8 }}>{title}</div>
+      {[['Ingresos', p.cur.revenue, p.prev.revenue, true], ['Pedidos', p.cur.count, p.prev.count, false], ['Ticket promedio', p.cur.avg, p.prev.avg, true]].map(([l, c, pv, m]) => {
+        const d = deltaText(m ? Math.round(c * 100) / 100 : c, m ? Math.round(pv * 100) / 100 : pv, m);
+        return (
+          <div key={l} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8, padding: '3px 0', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 12, color: '#5B4A63' }}>{l}</span>
+            <span style={{ textAlign: 'right' }}>
+              <strong style={{ fontSize: 16, color: '#1A1118' }}>{m ? fmtUsd(c) : c}</strong>
+              <span style={{ display: 'block', fontSize: 11, color: d.dir > 0 ? '#15803D' : d.dir < 0 ? '#B91C1C' : '#7A6880' }}>{d.txt}</span>
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+  const maxCat = Math.max(0, ...s.categories.map(c => c.revenue));
+  const topList = (title, list, field) => (
+    <div style={MGMT_CARD}>
+      <div style={MGMT_H}>{title}</div>
+      {!list.length ? <div style={{ fontSize: 12, color: '#7A6880' }}>Sin ventas en este rango.</div> : (
+        <ol style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {list.map((e, i) => (
+            <li key={e.key} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+              <span style={{ width: 18, color: '#7A6880', fontWeight: 700, flexShrink: 0 }}>{i + 1}.</span>
+              {e.sku ? <SkuChip sku={e.sku} /> : null}
+              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.name}</span>
+              <strong style={{ flexShrink: 0 }}>{field === 'units' ? e.units + ' u.' : fmtUsd(e.revenue)}</strong>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+  return (
+    <div data-testid="salesTab">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 6 }}>
+        <div style={{ fontWeight: 800, fontSize: 18, color: '#1A1118' }}>Ventas</div>
+      </div>
+      <p style={{ fontSize: 12, color: '#7A6880', marginBottom: 14, lineHeight: 1.5 }}>
+        Calculado con los pedidos del panel (todos menos los Cancelados), en dólares y con la hora de este dispositivo. Ingresos = total cobrado del pedido (incluye envío e impuesto).
+        Las cajas de Cacusa Lovers se guardan en $0 (la suscripción se cobra con factura de Square), así que no suman ingresos: se cuentan aparte en "Por canal".
+        Cada período se compara con el mismo tramo del período anterior.
+      </p>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(230px,1fr))', gap: 12, marginBottom: 14 }}>
+        {kpi('HOY · vs. ayer', s.periods.today)}
+        {kpi('ESTA SEMANA · vs. semana pasada', s.periods.week)}
+        {kpi('ESTE MES · vs. mes pasado', s.periods.month)}
+      </div>
+      <div style={{ ...MGMT_CARD, marginBottom: 14 }}>
+        <div style={MGMT_H}>Ingresos por día (últimos 30 días)</div>
+        <DailyBars days={s.days} />
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+        <label htmlFor="salesRange" style={{ fontSize: 13, fontWeight: 700, color: '#5B4A63' }}>Productos, categorías y canales de:</label>
+        <select id="salesRange" value={range} onChange={e => setRange(Number(e.target.value))}
+          style={{ padding: '7px 10px', border: '1.5px solid #E5DDEA', borderRadius: 8, fontSize: 13, background: 'white' }}>
+          <option value={7}>Últimos 7 días</option>
+          <option value={30}>Últimos 30 días</option>
+          <option value={90}>Últimos 90 días</option>
+          <option value={365}>Últimos 12 meses</option>
+          <option value={0}>Todo el historial</option>
+        </select>
+        <span style={{ fontSize: 12, color: '#7A6880' }}>{s.rangeCount} pedido{s.rangeCount === 1 ? '' : 's'}</span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(280px,1fr))', gap: 12, marginBottom: 12 }}>
+        {topList('Más vendidos por unidades', s.topUnits, 'units')}
+        {topList('Más vendidos por ingresos', s.topRevenue, 'revenue')}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(280px,1fr))', gap: 12 }}>
+        <div style={MGMT_CARD}>
+          <div style={MGMT_H}>Por categoría</div>
+          {!s.categories.length ? <div style={{ fontSize: 12, color: '#7A6880' }}>Sin ventas en este rango.</div> : s.categories.map(c => (
+            <div key={c.cat} style={{ marginBottom: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 13 }}><span>{c.cat}</span><span><strong>{fmtUsd(c.revenue)}</strong> · {c.units} u.</span></div>
+              <div aria-hidden="true" style={{ height: 6, background: '#F3EFF5', borderRadius: 99, marginTop: 3 }}><div style={{ height: 6, width: (maxCat ? (c.revenue / maxCat) * 100 : 0) + '%', background: '#E8508A', borderRadius: 99 }} /></div>
+            </div>
+          ))}
+          <div style={{ fontSize: 11, color: '#7A6880', marginTop: 6 }}>Por precio de cada pieza en el pedido (antes de cupones y envío).</div>
+        </div>
+        <div style={MGMT_CARD}>
+          <div style={MGMT_H}>Por canal</div>
+          <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+            <thead><tr style={{ color: '#7A6880', fontSize: 11 }}><th scope="col" style={{ textAlign: 'left', paddingBottom: 4 }}>Canal</th><th scope="col" style={{ textAlign: 'right' }}>Pedidos</th><th scope="col" style={{ textAlign: 'right' }}>Ingresos</th></tr></thead>
+            <tbody>{s.channels.map(c => (
+              <tr key={c.ch} data-testid={'channel-' + c.ch}><td style={{ padding: '4px 0' }}>{c.label}</td><td style={{ textAlign: 'right' }}>{c.count}</td><td style={{ textAlign: 'right' }}>{c.ch === 'lovers' ? <span title="Las cajas se guardan en $0">{fmtUsd(c.revenue)}*</span> : fmtUsd(c.revenue)}</td></tr>
+            ))}</tbody>
+          </table>
+          <div style={{ fontSize: 11, color: '#7A6880', marginTop: 6 }}>* Cajas enviadas; el cobro de la suscripción no está en el pedido.</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Clientas (CRM) ──
+// Agrupa los pedidos (menos Cancelados) por correo sin mayúsculas; sin correo, por teléfono (igual
+// que loversSubscriberKey). Un pedido con correo Y teléfono une a la ficha "solo teléfono" anterior.
+const CRM_INACTIVE_DAYS = 90, CRM_TOP_N = 20;
+function buildCustomers(orders) {
+  const map = new Map(), phoneIdx = new Map();
+  let noKey = 0;
+  const sorted = (orders || []).filter(orderIsSale).slice().sort((a, b) => (orderTime(a) || 0) - (orderTime(b) || 0));
+  for (const o of sorted) {
+    const cl = o.cliente || {};
+    const email = String(cl.email || '').trim().toLowerCase();
+    const tel = String(cl.telefono || '').replace(/\D/g, '');
+    const telOk = tel.length >= 7;
+    let key = email ? 'e:' + email : telOk ? (phoneIdx.get(tel) || 't:' + tel) : '';
+    if (!key) { noKey++; continue; }
+    if (email && telOk && phoneIdx.get(tel) && phoneIdx.get(tel).startsWith('t:') && !map.has(key)) {
+      const old = map.get(phoneIdx.get(tel)); map.delete(old.key); old.key = key; map.set(key, old); // la ficha "solo teléfono" pasa a ser la del correo
+    }
+    if (telOk && (!phoneIdx.has(tel) || phoneIdx.get(tel).startsWith('t:'))) phoneIdx.set(tel, key);
+    let c = map.get(key);
+    if (!c) { c = { key, name: '', email: '', phone: '', total: 0, orders: 0, last: NaN, lovers: false, lang: 'es' }; map.set(key, c); }
+    c.orders++;
+    if (isLoversBox(o)) c.lovers = true; else c.total += orderTotal(o);
+    const t = orderTime(o);
+    if (Number.isFinite(t) && !(t < c.last)) c.last = t;
+    // El pedido más nuevo manda (nombre, idioma, contacto); los vacíos no pisan lo anterior.
+    const n = orderFullName(cl); if (n) c.name = n;
+    if (email) c.email = email;
+    if (cl.telefono) c.phone = String(cl.telefono).trim();
+    c.lang = orderLang(o);
+  }
+  return { list: [...map.values()].map(c => ({ ...c, total: Math.round(c.total * 100) / 100 })), noKey };
+}
+function filterCustomers(list, { seg = 'all', lov = 'all', q = '', now = Date.now() } = {}) {
+  let out = list;
+  if (seg === 'repeat') out = out.filter(c => c.orders >= 2);
+  if (seg === 'inactive') out = out.filter(c => Number.isFinite(c.last) && now - c.last > CRM_INACTIVE_DAYS * 86400000);
+  if (seg === 'top') { const top = new Set([...list].filter(c => c.total > 0).sort((a, b) => b.total - a.total).slice(0, CRM_TOP_N).map(c => c.key)); out = out.filter(c => top.has(c.key)); }
+  if (lov === 'yes') out = out.filter(c => c.lovers);
+  if (lov === 'no') out = out.filter(c => !c.lovers);
+  const terms = String(q || '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length) out = out.filter(c => { const txt = [c.name, c.email, c.phone].join(' ').toLowerCase(); const dig = String(c.phone).replace(/\D/g, ''); return terms.every(t => txt.includes(t) || (/\d{3,}/.test(t) && dig.includes(t.replace(/\D/g, '')))); });
+  return out;
+}
+// Celda CSV: comillas dobles y, si empieza con = + - @ (fórmula en Excel/Sheets), un apóstrofo delante.
+function csvCell(v) { let s = String(v == null ? '' : v); if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return /[",\n\r;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+function customersCsv(list) {
+  const head = ['nombre', 'email', 'telefono', 'total_gastado_usd', 'pedidos', 'ultima_compra', 'lovers', 'idioma'];
+  const rows = list.map(c => [c.name, c.email, c.phone, c.total.toFixed(2), c.orders, Number.isFinite(c.last) ? localDayKey(c.last) : '', c.lovers ? 'si' : 'no', c.lang]);
+  return '﻿' + [head, ...rows].map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
+}
+function CustomersTab({ orders }) {
+  const [seg, setSeg] = useState('all');
+  const [lov, setLov] = useState('all');
+  const [q, setQ] = useState('');
+  const [sort, setSort] = useState('total');
+  const [msg, setMsg] = useState('');
+  const { list, noKey } = React.useMemo(() => buildCustomers(orders), [orders]);
+  const filtered = filterCustomers(list, { seg, lov, q }).slice().sort((a, b) =>
+    sort === 'last' ? (b.last || 0) - (a.last || 0) : sort === 'orders' ? b.orders - a.orders || b.total - a.total : sort === 'name' ? a.name.localeCompare(b.name, 'es') : b.total - a.total || b.orders - a.orders);
+  const exportCsv = () => {
+    const url = URL.createObjectURL(new Blob([customersCsv(filtered)], { type: 'text/csv;charset=utf-8' }));
+    const a = document.createElement('a'); a.href = url; a.download = 'clientas-' + localDayKey(Date.now()) + '.csv';
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
+    setMsg('✓ Descargado: ' + filtered.length + ' clienta' + (filtered.length === 1 ? '' : 's') + '.');
+  };
+  const pill = on => ({ fontSize: 12, fontWeight: 700, padding: '7px 12px', borderRadius: 99, cursor: 'pointer', border: on ? '1.5px solid #E8508A' : '1.5px solid #E5DDEA', background: on ? '#FCE8F3' : 'white', color: on ? '#B83A6C' : '#5B4A63' });
+  const th = { textAlign: 'left', padding: '8px 10px', fontSize: 11, color: '#7A6880', fontWeight: 800, whiteSpace: 'nowrap', borderBottom: '1px solid #EDE8EA' };
+  const td = { padding: '8px 10px', fontSize: 13, borderBottom: '1px solid #F5F0F7', verticalAlign: 'top' };
+  return (
+    <div data-testid="customersTab">
+      <div style={{ fontWeight: 800, fontSize: 18, color: '#1A1118', marginBottom: 6 }}>Clientas</div>
+      <p style={{ fontSize: 12, color: '#7A6880', marginBottom: 12, lineHeight: 1.5 }}>
+        Armado con los pedidos del panel (menos los Cancelados), una fila por correo o, si no hay correo, por teléfono. Total gastado sin las cajas de Lovers ($0 en el pedido).
+        {noKey ? ' ' + noKey + ' pedido' + (noKey === 1 ? '' : 's') + ' sin correo ni teléfono no aparece' + (noKey === 1 ? '' : 'n') + '.' : ''}
+      </p>
+      <div style={{ position: 'relative', marginBottom: 10 }}>
+        <label htmlFor="crmSearch" style={SR_ONLY}>Buscar clientas</label>
+        <input id="crmSearch" value={q} onChange={e => setQ(e.target.value)} placeholder="Buscar por nombre, correo o teléfono…"
+          style={{ width: '100%', padding: '10px 14px', border: '1.5px solid #e4e4e4', borderRadius: 10, fontSize: 14, outline: 'none', background: 'white' }} />
+      </div>
+      <div role="group" aria-label="Segmento" style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+        {[['all', 'Todas'], ['repeat', 'Recurrentes (2+ pedidos)'], ['top', 'Top ' + CRM_TOP_N + ' por gasto'], ['inactive', 'Inactivas (+' + CRM_INACTIVE_DAYS + ' días)']].map(([k, t]) => (
+          <button type="button" key={k} aria-pressed={seg === k} onClick={() => setSeg(k)} style={pill(seg === k)}>{t}</button>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+        <div role="group" aria-label="Cacusa Lovers" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {[['all', 'Lovers y no Lovers'], ['yes', '♡ Solo Lovers'], ['no', 'Sin Lovers']].map(([k, t]) => (
+            <button type="button" key={k} aria-pressed={lov === k} onClick={() => setLov(k)} style={pill(lov === k)}>{t}</button>
+          ))}
+        </div>
+        <label htmlFor="crmSort" style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63', marginLeft: 4 }}>Ordenar:</label>
+        <select id="crmSort" value={sort} onChange={e => setSort(e.target.value)} style={{ padding: '6px 8px', border: '1.5px solid #E5DDEA', borderRadius: 8, fontSize: 12, background: 'white' }}>
+          <option value="total">Total gastado</option><option value="last">Última compra</option><option value="orders">N.º de pedidos</option><option value="name">Nombre</option>
+        </select>
+      </div>
+      <div style={{ ...MGMT_CARD, marginBottom: 12, display: 'flex', gap: 10, alignItems: 'flex-start', flexWrap: 'wrap', background: '#FFFBEB', border: '1px solid #FDE68A' }}>
+        <div style={{ flex: 1, minWidth: 220, fontSize: 12, color: '#92400E', lineHeight: 1.5 }} id="crmPrivacy">
+          <strong>Datos personales.</strong> El CSV trae nombre, correo y teléfono de clientas reales: guárdalo solo en tu equipo, no lo compartas ni lo subas a grupos o drives públicos, y bórralo al terminar.
+          Para campañas escribe solo a quienes aceptaron recibir correos y respeta las bajas (la pestaña ✉ Marketing ya las respeta sola).
+        </div>
+        <button type="button" onClick={exportCsv} disabled={!filtered.length} aria-describedby="crmPrivacy" data-testid="crmExport"
+          style={{ padding: '9px 16px', borderRadius: 99, border: 'none', background: filtered.length ? 'linear-gradient(135deg,#E8508A,#9B5DE5)' : '#ddd', color: 'white', fontWeight: 700, fontSize: 13, cursor: filtered.length ? 'pointer' : 'default', whiteSpace: 'nowrap' }}>
+          ⬇ Exportar {filtered.length} a CSV
+        </button>
+      </div>
+      <div role="status" aria-live="polite" style={{ fontSize: 12, color: '#15803D', minHeight: msg ? 18 : 0, marginBottom: msg ? 6 : 0 }}>{msg}</div>
+      <div style={{ fontSize: 12, color: '#7A6880', marginBottom: 6 }} data-testid="crmCount">{filtered.length} de {list.length} clientas</div>
+      <div style={{ background: 'white', borderRadius: 12, overflowX: 'auto', boxShadow: '0 1px 6px rgba(0,0,0,.05)' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 640 }} data-testid="crmTable">
+          <caption style={SR_ONLY}>Lista de clientas</caption>
+          <thead><tr><th scope="col" style={th}>Nombre</th><th scope="col" style={{ ...th, textAlign: 'right' }}>Total gastado</th><th scope="col" style={{ ...th, textAlign: 'right' }}>Pedidos</th><th scope="col" style={th}>Última compra</th><th scope="col" style={th}>Lovers</th><th scope="col" style={th}>Idioma</th></tr></thead>
+          <tbody>
+            {filtered.slice(0, 500).map(c => (
+              <tr key={c.key}>
+                <td style={td}><div style={{ fontWeight: 700 }}>{c.name || 'Sin nombre'}</div><div style={{ fontSize: 11, color: '#7A6880', wordBreak: 'break-all' }}>{[c.email, c.phone].filter(Boolean).join(' · ')}</div></td>
+                <td style={{ ...td, textAlign: 'right', fontWeight: 700 }}>{fmtUsd(c.total)}</td>
+                <td style={{ ...td, textAlign: 'right' }}>{c.orders}</td>
+                <td style={{ ...td, whiteSpace: 'nowrap' }}>{Number.isFinite(c.last) ? fmtDay(c.last, { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}</td>
+                <td style={td}>{c.lovers ? '♡ Sí' : 'No'}</td>
+                <td style={td}>{c.lang === 'en' ? 'EN' : 'ES'}</td>
+              </tr>
+            ))}
+            {!filtered.length && <tr><td colSpan={6} style={{ ...td, textAlign: 'center', color: '#7A6880', padding: 30 }}>Ninguna clienta con estos filtros.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {filtered.length > 500 && <div style={{ fontSize: 12, color: '#7A6880', marginTop: 6 }}>Se muestran las primeras 500 (el CSV trae las {filtered.length}).</div>}
+    </div>
+  );
+}
+
+// ── Preparar pedidos: tablero por estado ──
+// Columnas = los estados reales del pedido (ORDER_STATES, sin Cancelado). Mover una tarjeta usa el
+// mismo camino que el botón "→ estado" de la tarjeta (onStatusChange → order/update) y las mismas
+// reglas: una caja de Lovers sin sus 2 joyas no pasa a Enviado/Entregado.
+const BOARD_STATES = ['Nuevo', 'Confirmado', 'En proceso', 'Enviado', 'Entregado'];
+const BOARD_HINT = { Nuevo: 'Por confirmar', Confirmado: 'Por preparar', 'En proceso': 'Preparando', Enviado: 'En camino', Entregado: 'Últimos 14 días' };
+const BOARD_DONE_DAYS = 14;
+function boardMoveProblem(order, to) {
+  const from = order.estado || 'Nuevo';
+  if (from === to) return 'Ya está en ' + to + '.';
+  if (!BOARD_STATES.includes(to)) return 'Estado no válido.';
+  if (from === 'Cancelado') return 'Un pedido cancelado no se mueve desde el tablero.';
+  if (from === 'Entregado') return 'Un pedido entregado ya no vuelve atrás desde el tablero.';
+  if (from === 'Enviado' && BOARD_STATES.indexOf(to) < BOARD_STATES.indexOf(from)) return 'Un pedido Enviado ya avisó el envío: no vuelve atrás desde el tablero.';
+  if ((to === 'Enviado' || to === 'Entregado') && loversMissingPieces(order)) return loversBlockMsg(order);
+  return '';
+}
+function orderLabel(o) { return o.numero ? '#' + o.numero : 'pedido ' + o.id; }
+function FulfillmentBoard({ orders, products, onMove, onPrint }) {
+  const [sel, setSel] = useState([]);
+  const [msg, setMsg] = useState(null); // { text, err }
+  const [dragId, setDragId] = useState(null);
+  const now = Date.now();
+  const visible = orders.filter(o => {
+    const st = o.estado || 'Nuevo';
+    if (!BOARD_STATES.includes(st)) return false;
+    if (st === 'Entregado') { const t = orderTime(o); return Number.isFinite(t) && now - t <= BOARD_DONE_DAYS * 86400000; }
+    return true;
+  });
+  const byId = new Map((products || []).map(p => [String(p.id), p]));
+  const move = (o, to) => {
+    const pr = boardMoveProblem(o, to);
+    if (pr) { setMsg({ text: orderLabel(o) + ': ' + pr, err: true }); return; }
+    onMove(o, to);
+    setMsg({ text: '✓ ' + orderLabel(o) + ' → ' + to, err: false });
+  };
+  const toggle = id => setSel(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
+  const selOrders = visible.filter(o => sel.includes(o.id));
+  return (
+    <div data-testid="board">
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+        <span style={{ fontSize: 12, color: '#7A6880', flex: 1, minWidth: 200 }}>Mueve cada pedido con sus botones o arrastrándolo a otra columna. Marca varios para imprimir sus hojas de preparación juntas.</span>
+        <button type="button" disabled={!selOrders.length} onClick={() => onPrint(selOrders)} data-testid="boardPrintSel"
+          style={{ padding: '8px 14px', borderRadius: 99, border: '1.5px solid #D9C9EE', background: selOrders.length ? 'white' : '#F3EFF5', color: '#5B3F8A', fontWeight: 700, fontSize: 12, cursor: selOrders.length ? 'pointer' : 'default' }}>
+          ▤ Imprimir hojas ({selOrders.length})
+        </button>
+        {selOrders.length > 0 && <button type="button" onClick={() => setSel([])} style={{ fontSize: 12, color: '#7A6880', textDecoration: 'underline' }}>Quitar selección</button>}
+      </div>
+      <div role={msg && msg.err ? 'alert' : 'status'} aria-live={msg && msg.err ? 'assertive' : 'polite'} data-testid="boardMsg"
+        style={{ fontSize: 12, fontWeight: 600, borderRadius: 8, padding: msg ? '6px 10px' : 0, marginBottom: msg ? 10 : 0, background: msg ? (msg.err ? '#FEF3C7' : '#DCFCE7') : 'transparent', color: msg && msg.err ? '#92400E' : '#166534' }}>
+        {msg ? msg.text : ''}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 10, alignItems: 'start' }}>
+        {BOARD_STATES.map((st, ci) => {
+          const col = visible.filter(o => (o.estado || 'Nuevo') === st).sort((a, b) => (orderTime(a) || 0) - (orderTime(b) || 0));
+          return (
+            <section key={st} aria-label={st + ': ' + col.length + ' pedido' + (col.length === 1 ? '' : 's')} data-testid={'boardCol-' + st}
+              onDragOver={e => { if (dragId != null) e.preventDefault(); }}
+              onDrop={e => { e.preventDefault(); const o = visible.find(x => String(x.id) === String(dragId)); setDragId(null); if (o && (o.estado || 'Nuevo') !== st) move(o, st); }}
+              style={{ background: '#F7F3FA', borderRadius: 12, padding: 8, minWidth: 0, minHeight: 80 }}>
+              <h3 style={{ fontSize: 12, fontWeight: 800, color: '#5B4A63', display: 'flex', alignItems: 'center', gap: 6, margin: '2px 4px 8px' }}>
+                <span style={{ background: STATE_COLORS[st], color: 'white', padding: '2px 9px', borderRadius: 99, fontSize: 11 }}>{st}</span>
+                <span style={{ fontWeight: 600, color: '#7A6880' }}>{BOARD_HINT[st]} · {col.length}</span>
+              </h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {col.map(o => {
+                  const items = (o.productos || []).filter(Boolean);
+                  const miss = loversMissingPieces(o);
+                  const prev = BOARD_STATES[ci - 1], next = BOARD_STATES[ci + 1];
+                  const canBack = prev && st !== 'Enviado' && st !== 'Entregado';
+                  return (
+                    <article key={o.id} draggable onDragStart={e => { setDragId(o.id); try { e.dataTransfer.setData('text/plain', String(o.id)); e.dataTransfer.effectAllowed = 'move'; } catch (_) {} }} onDragEnd={() => setDragId(null)}
+                      data-testid="boardCard" data-order={o.id}
+                      style={{ background: 'white', borderRadius: 10, padding: 10, boxShadow: '0 1px 4px rgba(0,0,0,.06)', border: sel.includes(o.id) ? '2px solid #9B5DE5' : '2px solid transparent', cursor: 'grab' }}>
+                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                        <input type="checkbox" id={'bsel-' + o.id} checked={sel.includes(o.id)} onChange={() => toggle(o.id)} style={{ marginTop: 3 }} />
+                        <label htmlFor={'bsel-' + o.id} style={{ flex: 1, minWidth: 0, cursor: 'pointer' }}>
+                          <span style={SR_ONLY}>Elegir para imprimir: </span>
+                          <span style={{ display: 'block', fontSize: 13, fontWeight: 800, color: '#1A1118', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{orderFullName(o.cliente) || 'Cliente'}</span>
+                          <span style={{ display: 'block', fontSize: 11, color: '#7A6880' }}>{orderLabel(o)} · {Number.isFinite(orderTime(o)) ? fmtDay(orderTime(o)) : ''}</span>
+                        </label>
+                        {isLoversBox(o) && <span style={{ fontSize: 10, fontWeight: 800, color: '#C0336E', background: '#FCE8F3', borderRadius: 99, padding: '2px 7px', flexShrink: 0 }}>♡ Lovers</span>}
+                      </div>
+                      <ul style={{ listStyle: 'none', margin: '6px 0', fontSize: 12, color: '#333' }}>
+                        {items.slice(0, 4).map((l, i) => {
+                          const cp = l.id != null ? byId.get(String(l.id)) : null;
+                          return <li key={i} style={{ display: 'flex', gap: 4, alignItems: 'center', minWidth: 0 }}>{cp && cp.sku ? <SkuChip sku={normalizeSku(cp.sku)} /> : null}<span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{lineQty(l) > 1 ? lineQty(l) + '× ' : ''}{l.name}</span>{l.personalization ? <span title={'Personalización: ' + l.personalization} style={{ color: '#E8508A', flexShrink: 0 }}>✦</span> : null}</li>;
+                        })}
+                        {items.length > 4 && <li style={{ color: '#7A6880' }}>+{items.length - 4} más</li>}
+                        {!items.length && <li style={{ color: '#7A6880', fontStyle: 'italic' }}>Sin piezas cargadas</li>}
+                      </ul>
+                      {miss > 0 && <div style={{ fontSize: 11, color: '#92400E', background: '#FEF3C7', borderRadius: 6, padding: '3px 6px', marginBottom: 6 }}>Faltan {miss} joya{miss === 1 ? '' : 's'} por cargar</div>}
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        {canBack && <button type="button" onClick={() => move(o, prev)} aria-label={'Mover ' + orderLabel(o) + ' a ' + prev}
+                          style={{ padding: '5px 8px', borderRadius: 99, background: '#F3EFF5', color: '#5B4A63', fontSize: 11, fontWeight: 700 }}>← {prev}</button>}
+                        {next && <button type="button" onClick={() => move(o, next)} aria-label={'Mover ' + orderLabel(o) + ' a ' + next}
+                          style={{ padding: '5px 8px', borderRadius: 99, background: STATE_COLORS[next], color: 'white', fontSize: 11, fontWeight: 700 }}>{next} →</button>}
+                        <button type="button" onClick={() => onPrint([o])} aria-label={'Hoja de preparación de ' + orderLabel(o)}
+                          style={{ padding: '5px 8px', borderRadius: 99, background: 'white', border: '1px solid #D9C9EE', color: '#5B3F8A', fontSize: 11, fontWeight: 700, marginLeft: 'auto' }}>▤ Hoja</button>
+                      </div>
+                    </article>
+                  );
+                })}
+                {!col.length && <div style={{ fontSize: 12, color: '#9A8BA3', textAlign: 'center', padding: '14px 0' }}>Vacío</div>}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Hoja de preparación (imprimible) ──
+// Una página por pedido. Nombre y dirección salen del pedido en tiempo de ejecución.
+function PackingSlipView({ orders, products, onClose }) {
+  const [host] = useState(() => { const d = document.createElement('div'); d.id = 'slipPrintHost'; return d; });
+  const [qrs, setQrs] = useState({});
+  const [err, setErr] = useState('');
+  const byId = new Map((products || []).map(p => [String(p.id), p]));
+  useEffect(() => {
+    document.body.appendChild(host);
+    const onKey = e => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    const first = host.querySelector('button'); if (first) first.focus();
+    return () => { document.removeEventListener('keydown', onKey); host.remove(); };
+  }, []);
+  const skus = [...new Set(orders.flatMap(o => (o.productos || []).map(l => { const cp = l && l.id != null && !l.isCombo ? byId.get(String(l.id)) : null; return cp ? normalizeSku(cp.sku) : ''; }).filter(s => SKU_RE.test(s))))];
+  useEffect(() => {
+    let alive = true;
+    if (!skus.length) return;
+    loadVendor('qrcode').then(qrcode => { if (!alive) return; const m = {}; skus.forEach(s => { m[s] = qrDataUrl(qrcode, s); }); setQrs(m); })
+      .catch(e => alive && setErr('No se pudieron generar los QR (' + ((e && e.message) || 'error') + '). La hoja se imprime igual con los códigos.'));
+    return () => { alive = false; };
+  }, [skus.join(',')]);
+  const css = `
+#slipPrintHost{position:fixed;inset:0;z-index:10000;background:#E9E4EC;overflow:auto;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;color:#111}
+#slipPrintHost .sp-bar{position:sticky;top:0;z-index:1;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 14px;background:white;box-shadow:0 2px 10px rgba(0,0,0,.08)}
+#slipPrintHost .sp-pages{display:flex;flex-direction:column;align-items:center;gap:16px;padding:16px}
+#slipPrintHost .sp-page{width:100%;max-width:190mm;background:white;padding:12mm;box-shadow:0 2px 12px rgba(0,0,0,.12)}
+#slipPrintHost h2{font-size:18pt;margin:0}
+#slipPrintHost .sp-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;border-bottom:2px solid #111;padding-bottom:6px;margin-bottom:10px}
+#slipPrintHost .sp-meta{font-size:10pt;line-height:1.5}
+#slipPrintHost .sp-r{text-align:right}
+#slipPrintHost .sp-to{border:1px solid #999;border-radius:6px;padding:8px 10px;font-size:11pt;line-height:1.45;margin-bottom:12px}
+#slipPrintHost table{width:100%;border-collapse:collapse;font-size:10.5pt}
+#slipPrintHost th{text-align:left;border-bottom:1.5px solid #111;padding:4px}
+#slipPrintHost td{border-bottom:1px solid #ccc;padding:6px 4px;vertical-align:middle}
+#slipPrintHost td img{width:22mm;height:22mm;image-rendering:pixelated;display:block}
+#slipPrintHost .sp-sku{font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:12pt}
+#slipPrintHost .sp-pers{font-weight:700}
+#slipPrintHost .sp-check{margin-top:14px;font-size:11pt;display:flex;gap:18px;flex-wrap:wrap}
+@media (max-width:600px){#slipPrintHost .sp-r{text-align:left}#slipPrintHost .sp-pages{padding:8px}#slipPrintHost .sp-page{padding:14px}#slipPrintHost td img{width:16mm;height:16mm}}
+@media print{
+  @page{margin:12mm}
+  html,body{background:white!important}
+  body>*:not(#slipPrintHost){display:none!important}
+  #slipPrintHost{position:static;overflow:visible;background:white}
+  #slipPrintHost .sp-bar{display:none}
+  #slipPrintHost .sp-pages{padding:0;gap:0;display:block}
+  #slipPrintHost .sp-page{max-width:none;box-shadow:none;padding:0;break-after:page;page-break-after:always}
+  #slipPrintHost .sp-page:last-child{break-after:auto;page-break-after:auto}
+}`;
+  const btn = { padding: '8px 16px', borderRadius: 99, fontWeight: 700, fontSize: 13, cursor: 'pointer', border: '1.5px solid #D9C9EE', background: 'white', color: '#5B3F8A' };
+  return ReactDOM.createPortal(
+    <div role="dialog" aria-modal="true" aria-label="Hoja de preparación">
+      <style>{css}</style>
+      <div className="sp-bar">
+        <button type="button" onClick={onClose} style={btn}>← Volver</button>
+        <button type="button" onClick={() => window.print()} style={{ ...btn, background: 'linear-gradient(135deg,#C0336E,#9B5DE5)', color: 'white', border: 'none' }}>⎙ Imprimir</button>
+        <span style={{ fontSize: 12, color: '#5B4A63' }}>{orders.length} hoja{orders.length === 1 ? '' : 's'} de preparación</span>
+        {err && <span role="alert" style={{ fontSize: 12, color: '#92400E' }}>{err}</span>}
+      </div>
+      <div className="sp-pages">
+        {orders.map(o => {
+          const c = o.cliente || {};
+          const addr = [c.direccion, c.apto].filter(Boolean).join(', ');
+          const city = [orderCiudad(c), c.estado, c.zip].filter(Boolean).join(', ');
+          const items = (o.productos || []).filter(Boolean);
+          return (
+            <section className="sp-page" key={o.id} data-testid="slipPage">
+              <div className="sp-head">
+                <div><div style={{ fontSize: '9pt', letterSpacing: '.15em', fontWeight: 700 }}>CACUSA BY TAITUS</div><h2>Hoja de preparación</h2></div>
+                <div className="sp-meta sp-r">
+                  <div style={{ fontSize: '14pt', fontWeight: 800 }}>{orderLabel(o)}</div>
+                  <div>{Number.isFinite(orderTime(o)) ? fmtDay(orderTime(o), { day: '2-digit', month: 'long', year: 'numeric' }) : ''}</div>
+                  <div>{CHANNEL_LABEL[orderChannel(o)]}{o.lote ? ' · Lote ' + o.lote : ''} · {o.estado || 'Nuevo'}</div>
+                </div>
+              </div>
+              <div className="sp-to" data-testid="slipShipTo">
+                <div style={{ fontSize: '8.5pt', fontWeight: 700, letterSpacing: '.08em', marginBottom: 2 }}>ENVIAR A</div>
+                <div style={{ fontWeight: 800 }}>{orderFullName(c) || 'Sin nombre'}</div>
+                {addr && <div>{addr}</div>}
+                {city && <div>{city}</div>}
+                {c.pais && <div>{c.pais}</div>}
+                {!addr && !city && <div style={{ fontStyle: 'italic' }}>Sin dirección en el pedido</div>}
+                {c.telefono && <div>Tel. {c.telefono}</div>}
+              </div>
+              <table>
+                <thead><tr><th scope="col">QR</th><th scope="col">Código</th><th scope="col">Pieza</th><th scope="col" style={{ textAlign: 'center' }}>Cant.</th><th scope="col">Personalización</th></tr></thead>
+                <tbody>
+                  {items.map((l, i) => {
+                    const cp = l.id != null && !l.isCombo ? byId.get(String(l.id)) : null;
+                    const sku = cp ? normalizeSku(cp.sku) : '';
+                    return (
+                      <tr key={i} data-testid="slipItem">
+                        <td>{sku && qrs[sku] ? <img src={qrs[sku]} alt={'QR ' + sku} /> : <span aria-hidden="true">—</span>}</td>
+                        <td className="sp-sku">{sku || (l.isCombo ? 'Combo' : '—')}</td>
+                        <td>{l.name || (cp && cp.name) || 'Pieza'}{l.material ? <div style={{ fontSize: '9pt' }}>{l.material}</div> : null}</td>
+                        <td style={{ textAlign: 'center', fontWeight: 800, fontSize: '13pt' }}>{lineQty(l)}</td>
+                        <td className="sp-pers">{l.personalization || ''}</td>
+                      </tr>
+                    );
+                  })}
+                  {!items.length && <tr><td colSpan={5} style={{ fontStyle: 'italic' }}>Todavía sin piezas cargadas{isLoversBox(o) ? ' (caja de Lovers: carga las 2 joyas antes de enviar)' : ''}.</td></tr>}
+                </tbody>
+              </table>
+              {o.notas && <div style={{ marginTop: 10, fontSize: '10.5pt' }}><strong>Notas:</strong> {o.notas}</div>}
+              <div className="sp-check"><span>☐ Piezas correctas</span><span>☐ Personalización revisada</span><span>☐ Empacado</span></div>
+            </section>
+          );
+        })}
+      </div>
+    </div>,
+    host
+  );
+}
+
+// ── Edición masiva de productos ──
+// Precio/oferta/categoría/disponible cambian el formulario (setProducts) y se suben con "Publicar
+// cambios" como cualquier edición. El stock va al Worker al instante (/stock/set por producto).
+// La tienda solo entiende promo.price, promo.label y promo.endsAt (sin fecha de inicio): la oferta
+// empieza cuando se publica.
+const BULK_ACTIONS = [
+  ['price', 'Cambiar precio'], ['promo', 'Poner oferta'], ['unpromo', 'Quitar oferta'],
+  ['category', 'Cambiar categoría'], ['available', 'Activar / pausar'], ['stock', 'Fijar stock'],
+];
+function bulkRound(x, mode) {
+  if (mode === '00') return Math.round(x);
+  if (mode === '99') return Math.max(0.99, Math.round(x + 0.01) - 0.01);
+  return x;
+}
+function money2(x) { return Math.round(x * 100) / 100; }
+function promoIsActive(p, now = new Date()) { return !!(p && p.promo && p.promo.price && !(p.promo.endsAt && new Date(p.promo.endsAt) < now)); }
+function computeBulk(action, prm, products, stock) {
+  const today = localDayKey(Date.now());
+  let globalErr = '';
+  const num = v => (v === '' || v == null ? NaN : Number(v));
+  if (action === 'price' && !Number.isFinite(num(prm.amount))) globalErr = 'Escribe cuánto cambia el precio.';
+  if (action === 'promo') {
+    if (!Number.isFinite(num(prm.amount)) || num(prm.amount) <= 0) globalErr = prm.kind === 'pct' ? 'Escribe el % de descuento.' : 'Escribe el precio de oferta.';
+    else if (prm.kind === 'pct' && num(prm.amount) >= 100) globalErr = 'El descuento tiene que ser menor que 100 %.';
+    else if (prm.endsAt && prm.endsAt < today) globalErr = 'La fecha de fin ya pasó.';
+  }
+  if (action === 'category' && !prm.category) globalErr = 'Elige la categoría.';
+  if (action === 'stock' && !(Number.isInteger(num(prm.qty)) && num(prm.qty) >= 0 && num(prm.qty) <= 9999)) globalErr = 'El stock es un entero de 0 a 9999.';
+  const rows = products.map(p => {
+    const price = Number(p.price);
+    const row = { p, before: '', after: '', patch: null, skip: '' };
+    if (globalErr) return row;
+    if (action === 'price') {
+      row.before = fmtUsd(price);
+      if (!(price > 0)) { row.skip = 'Sin precio válido'; return row; }
+      const a = num(prm.amount);
+      const raw = prm.kind === 'pct' ? price * (1 + a / 100) : price + a;
+      const np = money2(bulkRound(raw, prm.round));
+      row.after = fmtUsd(np);
+      if (!(np > 0)) { row.skip = 'Quedaría en $0 o menos'; return row; }
+      if (promoIsActive(p) && np <= Number(p.promo.price)) { row.skip = 'Quedaría ≤ su oferta activa (' + fmtUsd(p.promo.price) + ')'; return row; }
+      if (np === price) { row.skip = 'Sin cambio'; return row; }
+      row.patch = { price: np };
+    } else if (action === 'promo') {
+      row.before = promoIsActive(p) ? 'Oferta ' + fmtUsd(p.promo.price) + ' (precio ' + fmtUsd(price) + ')' : fmtUsd(price);
+      if (!(price > 0)) { row.skip = 'Sin precio válido'; return row; }
+      const a = num(prm.amount);
+      const pp = money2(bulkRound(prm.kind === 'pct' ? price * (1 - a / 100) : a, prm.round));
+      row.after = 'Oferta ' + fmtUsd(pp) + (prm.endsAt ? ' hasta ' + prm.endsAt : '');
+      if (!(pp > 0)) { row.skip = 'La oferta quedaría en $0'; return row; }
+      if (pp >= price) { row.skip = 'La oferta no es menor que el precio'; return row; }
+      row.patch = { promo: { price: pp, label: String(prm.label || '').trim() || 'Oferta', endsAt: prm.endsAt || null } };
+    } else if (action === 'unpromo') {
+      row.before = p.promo && p.promo.price ? 'Oferta ' + fmtUsd(p.promo.price) + (p.promo.endsAt ? ' hasta ' + p.promo.endsAt : '') : 'Sin oferta';
+      row.after = 'Sin oferta · ' + fmtUsd(price);
+      if (!(p.promo && p.promo.price)) { row.skip = 'No tiene oferta'; return row; }
+      row.patch = { promo: null };
+    } else if (action === 'category') {
+      row.before = p.category || '—'; row.after = prm.category;
+      if (p.category === prm.category) { row.skip = 'Ya está en esa categoría'; return row; }
+      row.patch = { category: prm.category };
+    } else if (action === 'available') {
+      const on = prm.available !== 'paused';
+      row.before = p.available !== false ? 'Activo' : 'Pausado'; row.after = on ? 'Activo' : 'Pausado';
+      if ((p.available !== false) === on) { row.skip = 'Sin cambio'; return row; }
+      row.patch = { available: on };
+    } else if (action === 'stock') {
+      const cur = stock ? stockOf(stock, p.id) : null, q = num(prm.qty);
+      row.before = cur == null ? '?' : String(cur); row.after = String(q);
+      if (cur === q) { row.skip = 'Sin cambio'; return row; }
+      row.patch = { stock: q };
+    }
+    return row;
+  });
+  return { rows, globalErr, changes: rows.filter(r => r.patch) };
+}
+function BulkEditModal({ products, categories, stock, onApply, onSaveStock, onClose }) {
+  const [action, setAction] = useState('price');
+  const [prm, setPrm] = useState({ kind: 'pct', amount: '', round: 'none', label: 'Oferta', endsAt: '', category: '', available: 'active', qty: '' });
+  const [progress, setProgress] = useState(null); // stock: { done, total, failed: [] , finished }
+  const set = (k, v) => setPrm(x => ({ ...x, [k]: v }));
+  const res = computeBulk(action, prm, products, stock);
+  const lbl = { display: 'block', fontSize: 11, fontWeight: 700, color: '#5B4A63', marginBottom: 4 };
+  const inp = { padding: '8px 10px', border: '1.5px solid #E5DDEA', borderRadius: 8, fontSize: 13, outline: 'none', width: '100%', fontFamily: 'inherit', background: 'white' };
+  const pill = on => ({ fontSize: 12, fontWeight: 700, padding: '6px 11px', borderRadius: 99, cursor: 'pointer', border: on ? '1.5px solid #9B5DE5' : '1.5px solid #E5DDEA', background: on ? '#F1EAFB' : 'white', color: on ? '#5B3F8A' : '#5B4A63' });
+  const busy = progress && !progress.finished;
+  const apply = async () => {
+    if (!res.changes.length || busy) return;
+    if (action !== 'stock') { onApply(res.changes.map(r => ({ id: r.p.id, patch: r.patch })), action); return; }
+    const total = res.changes.length, failed = [];
+    setProgress({ done: 0, total, failed, finished: false });
+    for (let i = 0; i < total; i++) {
+      const r = res.changes[i];
+      try { await onSaveStock(r.p.id, r.patch.stock); } catch (e) { failed.push((normalizeSku(r.p.sku) || r.p.name) + ': ' + ((e && e.message) || 'error')); }
+      setProgress({ done: i + 1, total, failed: [...failed], finished: false });
+    }
+    setProgress({ done: total, total, failed, finished: true });
+  };
+  const roundSel = (
+    <div>
+      <label htmlFor="bulkRound" style={lbl}>Redondeo</label>
+      <select id="bulkRound" value={prm.round} onChange={e => set('round', e.target.value)} style={inp}>
+        <option value="none">Sin redondear (centavos)</option><option value="00">A dólar entero (.00)</option><option value="99">Terminado en .99</option>
+      </select>
+    </div>
+  );
+  return (
+    <Modal onClose={() => { if (!busy) onClose(); }} labelledBy="bulkTitle" closeOnOverlayClick={!busy}
+      boxStyle={{ maxWidth: 640, maxHeight: '92vh', overflowY: 'auto', padding: 20 }} overlayStyle={{ padding: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8 }}>
+        <div id="bulkTitle" style={{ fontWeight: 800, fontSize: 17, color: '#1A1118' }}>Editar {products.length} producto{products.length === 1 ? '' : 's'}</div>
+        <button type="button" onClick={onClose} disabled={busy} aria-label="Cerrar" style={{ width: 32, height: 32, borderRadius: '50%', background: '#F9F5F7', color: '#7A6880', fontSize: 16, flexShrink: 0 }}>✕</button>
+      </div>
+      <div style={lbl} id="bulkActionLbl">¿Qué cambias?</div>
+      <div role="group" aria-labelledby="bulkActionLbl" style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
+        {BULK_ACTIONS.map(([k, t]) => <button type="button" key={k} aria-pressed={action === k} disabled={busy} onClick={() => { setAction(k); setProgress(null); }} style={pill(action === k)}>{t}</button>)}
+      </div>
+      {action === 'price' && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(160px,1fr))', gap: 10, marginBottom: 10 }}>
+          <div>
+            <label htmlFor="bulkKind" style={lbl}>Tipo de cambio</label>
+            <select id="bulkKind" value={prm.kind} onChange={e => set('kind', e.target.value)} style={inp}><option value="pct">Porcentaje (%)</option><option value="fixed">Monto fijo (USD)</option></select>
+          </div>
+          <div>
+            <label htmlFor="bulkAmount" style={lbl}>{prm.kind === 'pct' ? '% (negativo para bajar)' : 'USD (negativo para bajar)'}</label>
+            <input id="bulkAmount" type="number" step="0.01" value={prm.amount} onChange={e => set('amount', e.target.value)} placeholder={prm.kind === 'pct' ? '10 o -15' : '5 o -3'} style={inp} />
+          </div>
+          {roundSel}
+        </div>
+      )}
+      {action === 'promo' && (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(160px,1fr))', gap: 10, marginBottom: 10 }}>
+            <div>
+              <label htmlFor="bulkKind" style={lbl}>Precio de oferta</label>
+              <select id="bulkKind" value={prm.kind} onChange={e => set('kind', e.target.value)} style={inp}><option value="pct">% de descuento</option><option value="fixed">Precio fijo (USD)</option></select>
+            </div>
+            <div>
+              <label htmlFor="bulkAmount" style={lbl}>{prm.kind === 'pct' ? '% de descuento' : 'Precio de oferta USD'}</label>
+              <input id="bulkAmount" type="number" min="0" step="0.01" value={prm.amount} onChange={e => set('amount', e.target.value)} placeholder={prm.kind === 'pct' ? '20' : '29.99'} style={inp} />
+            </div>
+            {roundSel}
+            <div>
+              <label htmlFor="bulkLabel" style={lbl}>Etiqueta</label>
+              <input id="bulkLabel" value={prm.label} onChange={e => set('label', e.target.value)} placeholder="Oferta" style={inp} />
+            </div>
+            <div>
+              <label htmlFor="bulkEnds" style={lbl}>Válida hasta (opcional)</label>
+              <input id="bulkEnds" type="date" value={prm.endsAt} onChange={e => set('endsAt', e.target.value)} style={inp} />
+            </div>
+          </div>
+          <div role="note" style={{ fontSize: 11, color: '#5B4A63', background: '#F7F3FA', borderRadius: 8, padding: '6px 10px', marginBottom: 10 }}>
+            La oferta empieza al publicar: la tienda todavía no entiende una fecha de inicio. Si un producto ya tiene oferta, se reemplaza.
+          </div>
+        </>
+      )}
+      {action === 'category' && (
+        <div style={{ marginBottom: 10 }}>
+          <label htmlFor="bulkCat" style={lbl}>Nueva categoría</label>
+          <select id="bulkCat" value={prm.category} onChange={e => set('category', e.target.value)} style={inp}>
+            <option value="">Elige…</option>{(categories || []).map(c => <option key={c}>{c}</option>)}
+          </select>
+          <div style={{ fontSize: 11, color: '#7A6880', marginTop: 4 }}>Los códigos (AN001…) no cambian al mover de categoría.</div>
+        </div>
+      )}
+      {action === 'available' && (
+        <div role="group" aria-label="Estado" style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+          {[['active', 'Activar (se ven en la tienda)'], ['paused', 'Pausar (ocultar)']].map(([k, t]) => <button type="button" key={k} aria-pressed={prm.available === k} onClick={() => set('available', k)} style={pill(prm.available === k)}>{t}</button>)}
+        </div>
+      )}
+      {action === 'stock' && (
+        <div style={{ marginBottom: 10 }}>
+          <label htmlFor="bulkQty" style={lbl}>Stock para todas las elegidas</label>
+          <input id="bulkQty" type="number" min="0" max="9999" step="1" inputMode="numeric" value={prm.qty} onChange={e => set('qty', e.target.value)} disabled={busy} style={{ ...inp, maxWidth: 160 }} />
+          <div role="note" style={{ fontSize: 12, color: '#92400E', background: '#FEF3C7', borderRadius: 8, padding: '6px 10px', marginTop: 8 }}>
+            El stock se guarda al instante en el servidor al confirmar (no espera a "Publicar cambios") y la tienda lo usa enseguida.
+          </div>
+        </div>
+      )}
+      {res.globalErr && <div role="alert" style={{ fontSize: 12, color: '#B91C1C', marginBottom: 8 }}>{res.globalErr}</div>}
+      {!res.globalErr && (
+        <>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63', margin: '4px 0 6px' }} data-testid="bulkSummary">Vista previa: cambian {res.changes.length} de {products.length}{res.changes.length < products.length ? ' (las demás se saltan)' : ''}</div>
+          <div style={{ maxHeight: 260, overflow: 'auto', border: '1px solid #F0EAF3', borderRadius: 8, marginBottom: 12 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }} data-testid="bulkPreview">
+              <caption style={SR_ONLY}>Antes y después de cada producto</caption>
+              <thead><tr style={{ background: '#FAF7FB' }}><th scope="col" style={{ textAlign: 'left', padding: 6 }}>Producto</th><th scope="col" style={{ textAlign: 'left', padding: 6 }}>Antes</th><th scope="col" style={{ textAlign: 'left', padding: 6 }}>Después</th></tr></thead>
+              <tbody>{res.rows.map(r => (
+                <tr key={r.p.id} style={{ borderTop: '1px solid #F5F0F7', opacity: r.patch ? 1 : 0.6 }} data-testid="bulkRow">
+                  <td style={{ padding: 6, minWidth: 120 }}><SkuChip sku={r.p.sku} /> <span>{r.p.name}</span></td>
+                  <td style={{ padding: 6 }}>{r.before}</td>
+                  <td style={{ padding: 6 }}>{r.patch ? <strong>→ {r.after}</strong> : <span style={{ color: '#7A6880' }}>Se salta: {r.skip}</span>}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        </>
+      )}
+      {progress && (
+        <div role="status" aria-live="polite" data-testid="bulkProgress" style={{ fontSize: 12, marginBottom: 10, color: progress.failed.length ? '#B91C1C' : '#15803D' }}>
+          {progress.finished ? (progress.failed.length ? 'Stock guardado en ' + (progress.total - progress.failed.length) + ' de ' + progress.total + '. No se guardó: ' + progress.failed.join(' · ') : '✓ Stock guardado en ' + progress.total + ' producto' + (progress.total === 1 ? '' : 's') + '.') : 'Guardando stock… ' + progress.done + ' de ' + progress.total}
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button type="button" onClick={onClose} disabled={busy} style={{ flex: 1, minWidth: 120, padding: 11, border: '1.5px solid #e0e0e0', borderRadius: 99, fontWeight: 600, color: '#666', background: 'white' }}>{progress && progress.finished ? 'Listo' : 'Cancelar'}</button>
+        {!(progress && progress.finished) && (
+          <button type="button" onClick={apply} disabled={!res.changes.length || busy} data-testid="bulkApply"
+            style={{ flex: 2, minWidth: 180, padding: 11, borderRadius: 99, fontWeight: 700, color: 'white', background: !res.changes.length || busy ? '#C9B8D3' : 'linear-gradient(135deg,#C0336E,#9B5DE5)', cursor: !res.changes.length || busy ? 'default' : 'pointer' }}>
+            {busy ? 'Guardando…' : action === 'stock' ? 'Guardar stock de ' + res.changes.length + ' ya' : 'Aplicar a ' + res.changes.length + ' (luego Publicar)'}
+          </button>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 function App() {
   const [session, setSession]         = useState(() => {
     try { const s = sessionStorage.getItem('cacusa_session'); return s ? JSON.parse(s) : null; }
@@ -8500,6 +9329,11 @@ function App() {
   const [recoBusy, setRecoBusy]             = useState(false); // "También te puede gustar" (similar)
   const [recoMsg, setRecoMsg]               = useState('');
   const [enrollOnly, setEnrollOnly]         = useState(null); // id: "Registrar fotos" de una sola pieza
+  const [bulkMode, setBulkMode]             = useState(false); // Edición masiva (26 nov)
+  const [bulkSel, setBulkSel]               = useState([]);    // ids (string) elegidos
+  const [showBulk, setShowBulk]             = useState(false);
+  const [bulkMsg, setBulkMsg]               = useState('');
+  const [slipOrders, setSlipOrders]         = useState(null);  // Hoja de preparación: pedidos a imprimir
   const refCounts = useRefCounts(session && session.token);
   const [tiktokExportBusy, setTiktokExportBusy] = useState(false);
   const [tiktokExportMsg, setTiktokExportMsg]   = useState('');
@@ -8860,6 +9694,13 @@ function App() {
       else setSyncMsg('❌ No se pudo eliminar el pedido (' + (e && e.message || 'error de red') + '). Recarga los datos.');
     });
   };
+  const changeOrderState = (ord, newState) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, estado: newState } : x)); updateOrderRemote(ord.id, { estado: newState }); if (newState === 'Cancelado') setTimeout(loadStock, 1500); };
+  const applyBulk = (changes, action) => {
+    const m = new Map(changes.map(c => [String(c.id), c.patch]));
+    setProducts(prev => prev.map(x => m.has(String(x.id)) ? { ...x, ...m.get(String(x.id)) } : x));
+    setDirty(true); setShowBulk(false);
+    setBulkMsg('✓ ' + changes.length + ' producto' + (changes.length === 1 ? '' : 's') + ' cambiado' + (changes.length === 1 ? '' : 's') + ' en el panel. Revisa y pulsa "☁️ Publicar cambios" para subirlos a la tienda.');
+  };
   const toggleProd = p => { setProducts(prev => prev.map(x => x.id === p.id ? { ...x, available: !x.available } : x)); setDirty(true); };
   const deleteProd = p => { setProducts(prev => prev.filter(x => x.id !== p.id)); setDelConfirm(null); setDirty(true); };
   const moveProd = (p, dir) => {
@@ -8986,6 +9827,8 @@ function App() {
           {[
             ['products',   '💎 Productos',  products.length],
             ['orders',     '📦 Pedidos',    pendingOrders],
+            ['ventas',     '◇ Ventas',      0],
+            ['clientas',   '♡ Clientas',    0],
             ['descuentos', '🏷️ Descuentos', products.filter(p => p.promo && p.promo.price && (!p.promo.endsAt || new Date(p.promo.endsAt) >= new Date())).length + combos.length],
             ['mercado',    '🌍 Mercado',    0],
             ['landing',    '🏠 Landing',    0],
@@ -9033,6 +9876,10 @@ function App() {
                 style={{ padding: '10px 16px', background: 'white', color: '#5B3F8A', border: '1.5px solid #D9C9EE', borderRadius: 99, fontWeight: 700, fontSize: 13, whiteSpace: 'nowrap', cursor: 'pointer' }}>
                 🏷️ Etiquetas
               </button>
+              <button type="button" onClick={() => { setBulkMode(v => !v); setBulkSel([]); setBulkMsg(''); }} aria-pressed={bulkMode} data-testid="bulkToggle"
+                style={{ padding: '10px 16px', background: bulkMode ? '#5B3F8A' : 'white', color: bulkMode ? 'white' : '#5B3F8A', border: '1.5px solid #D9C9EE', borderRadius: 99, fontWeight: 700, fontSize: 13, whiteSpace: 'nowrap', cursor: 'pointer' }}>
+                {bulkMode ? '✕ Salir de selección' : '☑ Selección múltiple'}
+              </button>
               {refCounts && (() => {
                 const pool = products.filter(p => p.available !== false && productImageUrl(p));
                 const withN = pool.filter(p => refCounts[String(p.id)]).length;
@@ -9048,6 +9895,30 @@ function App() {
                 {recoBusy ? 'Calculando…' : '✦ Actualizar recomendaciones'}
               </button>
             </div>
+            {bulkMode && (() => {
+              const selSet = new Set(bulkSel);
+              const outside = bulkSel.filter(id => !filtered.some(p => String(p.id) === id)).length;
+              const allIn = filtered.length > 0 && filtered.every(p => selSet.has(String(p.id)));
+              return (
+                <div data-testid="bulkBar" style={{ background: '#F1EAFB', borderRadius: 12, padding: '10px 14px', marginBottom: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <span role="status" aria-live="polite" style={{ fontSize: 13, fontWeight: 700, color: '#5B3F8A', flex: 1, minWidth: 160 }}>
+                    {bulkSel.length} elegido{bulkSel.length === 1 ? '' : 's'}{outside ? ' (' + outside + ' fuera del filtro)' : ''}
+                  </span>
+                  <button type="button" onClick={() => setBulkSel(s => allIn ? s.filter(id => !filtered.some(p => String(p.id) === id)) : [...new Set([...s, ...filtered.map(p => String(p.id))])])}
+                    style={{ padding: '7px 12px', borderRadius: 99, background: 'white', border: '1.5px solid #D9C9EE', color: '#5B3F8A', fontWeight: 700, fontSize: 12 }}>
+                    {allIn ? 'Quitar los ' + filtered.length + ' del filtro' : 'Elegir los ' + filtered.length + ' del filtro'}
+                  </button>
+                  {bulkSel.length > 0 && <button type="button" onClick={() => setBulkSel([])} style={{ padding: '7px 12px', borderRadius: 99, background: 'white', border: '1.5px solid #D9C9EE', color: '#7A6880', fontWeight: 700, fontSize: 12 }}>Quitar selección</button>}
+                  <button type="button" disabled={!bulkSel.length} onClick={() => { setBulkMsg(''); setShowBulk(true); }} data-testid="bulkOpen"
+                    style={{ padding: '8px 16px', borderRadius: 99, border: 'none', background: bulkSel.length ? 'linear-gradient(135deg,#C0336E,#9B5DE5)' : '#C9B8D3', color: 'white', fontWeight: 700, fontSize: 13, cursor: bulkSel.length ? 'pointer' : 'default' }}>
+                    Editar {bulkSel.length || ''} elegido{bulkSel.length === 1 ? '' : 's'}…
+                  </button>
+                </div>
+              );
+            })()}
+            {bulkMsg && <div role="status" aria-live="polite" data-testid="bulkMsg" style={{ fontSize: 13, fontWeight: 600, color: '#065F46', background: '#D1FAE5', borderRadius: 10, padding: '8px 12px', marginBottom: 12 }}>{bulkMsg}</div>}
+            {showBulk && <BulkEditModal products={products.filter(p => bulkSel.includes(String(p.id)))} categories={categories} stock={stock}
+              onApply={applyBulk} onSaveStock={saveStock} onClose={() => setShowBulk(false)} />}
             {recoMsg && <div role="status" aria-live="polite" data-testid="recoMsg" style={{ fontSize: 12, color: recoMsg.startsWith('✓') ? '#15803D' : '#7A6880', margin: '-6px 0 10px' }}>{recoMsg}</div>}
             {showLabels && <LabelsModal products={products} categories={categories} stock={stock} onClose={() => setShowLabels(false)} />}
             {showEnroll && !enrollOnly && <EnrollPhotosModal products={products} token={session.token} onClose={() => setShowEnroll(false)} />}
@@ -9110,6 +9981,7 @@ function App() {
                       stockQty={stock ? stockOf(stock, p.id) : null}
                       onStockSave={stock ? saveStock : null}
                       refN={refCounts ? (refCounts[String(p.id)] || 0) : null}
+                      select={bulkMode ? { checked: bulkSel.includes(String(p.id)), onChange: () => setBulkSel(s => s.includes(String(p.id)) ? s.filter(x => x !== String(p.id)) : [...s, String(p.id)]) } : null}
                     />
                   );
                 })}
@@ -9183,9 +10055,9 @@ function App() {
               )}
 
               {/* Sub-nav Activos / Historial */}
-              <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: '#F3EFF5', borderRadius: 12, padding: 4, width: 'fit-content' }}>
-                {[['active', '📦 Activos', activeOrders.length], ['history', '📋 Historial', histOrders.length]].map(([v, label, count]) => (
-                  <button key={v} onClick={() => setOrdersView(v)}
+              <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: '#F3EFF5', borderRadius: 12, padding: 4, width: 'fit-content', maxWidth: '100%', flexWrap: 'wrap' }}>
+                {[['active', '📦 Activos', activeOrders.length], ['board', '▦ Preparar (tablero)', 0], ['history', '📋 Historial', histOrders.length]].map(([v, label, count]) => (
+                  <button key={v} onClick={() => setOrdersView(v)} aria-pressed={ordersView === v}
                     style={{ padding: '8px 18px', borderRadius: 9, border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: 13, fontFamily: 'inherit',
                       background: ordersView === v ? 'white' : 'transparent',
                       color: ordersView === v ? '#E8508A' : '#7A6880',
@@ -9196,7 +10068,7 @@ function App() {
                   </button>
                 ))}
               </div>
-              {ordersView === 'active' && loteCount > 0 && (
+              {(ordersView === 'active' || ordersView === 'board') && loteCount > 0 && (
                 <button onClick={() => setLoteOnly(v => !v)}
                   style={{ marginBottom: 16, padding: '7px 16px', borderRadius: 99, fontSize: 12, fontWeight: 700, fontFamily: 'inherit', cursor: 'pointer',
                     background: loteOnly ? '#C0336E' : 'white', color: loteOnly ? 'white' : '#C0336E', border: '1.5px solid #C0336E' }}>
@@ -9230,7 +10102,7 @@ function App() {
                               <OrderCard key={o.id} order={o} orders={orders} token={session.token} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
                                 products={products} categories={categories} stock={stock} onStockRefresh={loadStock}
                                 onProductsChange={(ord, productos) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, productos } : x)); }}
-                                onStatusChange={(ord, newState) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, estado: newState } : x)); updateOrderRemote(ord.id, { estado: newState }); if (newState === 'Cancelado') setTimeout(loadStock, 1500); }}
+                                onStatusChange={changeOrderState} onPrintSlip={ord => setSlipOrders([ord])}
                                 onDelete={ord => { setOrders(prev => prev.filter(x => x.id !== ord.id)); deleteOrderRemote(ord.id); }}
                                 onTrackingChange={(ord, tracking) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, tracking } : x)); updateOrderRemote(ord.id, { tracking }); }}
                                 onCarrierChange={(ord, carrier) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, carrier } : x)); updateOrderRemote(ord.id, { carrier }); }}
@@ -9244,6 +10116,12 @@ function App() {
                     })}
                   </div>
                 )
+              )}
+
+              {/* Vista: Tablero de preparación (26 nov) */}
+              {ordersView === 'board' && (
+                <FulfillmentBoard products={products} onMove={changeOrderState} onPrint={list => setSlipOrders(list)}
+                  orders={orders.filter(o => (!loteOnly || o.lote) && orderMatchesSearch(o, histSearch))} />
               )}
 
               {/* Vista: Historial */}
@@ -9302,7 +10180,7 @@ function App() {
                                 <OrderCard key={o.id} order={o} orders={orders} token={session.token} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
                                   products={products} categories={categories} stock={stock} onStockRefresh={loadStock}
                                   onProductsChange={(ord, productos) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, productos } : x)); }}
-                                  onStatusChange={(ord, newState) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, estado: newState } : x)); updateOrderRemote(ord.id, { estado: newState }); if (newState === 'Cancelado') setTimeout(loadStock, 1500); }}
+                                  onStatusChange={changeOrderState} onPrintSlip={ord => setSlipOrders([ord])}
                                   onDelete={ord => { setOrders(prev => prev.filter(x => x.id !== ord.id)); deleteOrderRemote(ord.id); }}
                                   onTrackingChange={(ord, tracking) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, tracking } : x)); updateOrderRemote(ord.id, { tracking }); }}
                                   onCarrierChange={(ord, carrier) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, carrier } : x)); updateOrderRemote(ord.id, { carrier }); }}
@@ -9321,6 +10199,11 @@ function App() {
             </div>
           );
         })()}
+
+        {/* ── Ventas / Clientas (26 nov) ── */}
+        {activeTab === 'ventas' && <SalesTab orders={orders} products={products} />}
+        {activeTab === 'clientas' && <CustomersTab orders={orders} />}
+        {slipOrders && <PackingSlipView orders={slipOrders} products={products} onClose={() => setSlipOrders(null)} />}
 
         {/* ── Landing tab ── */}
         {activeTab === 'landing' && (
