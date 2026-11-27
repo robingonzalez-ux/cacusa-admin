@@ -6498,7 +6498,7 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
   const waStatusUrl = buildStatusWaUrl();
 
   return (
-    <div style={{ background: 'white', borderRadius: 16, padding: 18, boxShadow: '0 2px 12px rgba(0,0,0,0.07)', border: '1px solid #f0ecf0', display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <div data-testid="orderCard" data-id={order.id} data-estado={estado} style={{ background: 'white', borderRadius: 16, padding: 18, boxShadow: '0 2px 12px rgba(0,0,0,0.07)', border: '1px solid #f0ecf0', display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
           <div style={{ fontWeight: 700, fontSize: 15, color: '#1A1118' }}>{orderFullName(order.cliente) || 'Cliente'}</div>
@@ -11033,6 +11033,7 @@ function App() {
   const orderVerRef   = React.useRef(new Map());  // 'id|updatedAt visto' → updatedAt que dejó NUESTRO cambio
   const orderBusyRef  = React.useRef(new Set());  // pedidos con cambios en vuelo (el refresco no los pisa)
   const rebaseRef     = React.useRef(null);       // "Recargar y volver a aplicar": base = catálogo nuevo
+  const [baseTick, setBaseTick] = useState(0);    // re-render tras cambiar la base (el contador se recalcula)
   const [loading, setLoading]         = useState(false);
   const [syncing, setSyncing]         = useState(false);
   const [syncMsg, setSyncMsg]         = useState('');
@@ -11121,6 +11122,7 @@ function App() {
       const rb = rebaseRef.current; rebaseRef.current = null; takePubSnap();
       pubBaseRef.current.prods = rb.prods; pubBaseRef.current.order = rb.order;
       for (const k of rb.cfgChanged) pubBaseRef.current.cfg[k] = rb.oldCfg[k];
+      setBaseTick(t => t + 1);
     } else if (resnapRef.current) { resnapRef.current = false; takePubSnap(); }
   });
   const prevDirtyRef = React.useRef(false);
@@ -11136,7 +11138,7 @@ function App() {
     if (common.join(',') !== baseCommon.join(',')) n++;
     for (const [k, v] of Object.entries(cfgNow)) if (base.cfg[k] !== JSON.stringify(v)) n++;
     return n;
-  }, [dirty, products, whatsappNum, categories, materials, shipping, texts, campaign, home, lovers, pages, combos]);
+  }, [dirty, products, whatsappNum, categories, materials, shipping, texts, campaign, home, lovers, pages, combos, baseTick]);
   latestRef.current = { products, skuSeq };
   const pendingText = pendingCount ? `Tienes ${pendingCount} cambio${pendingCount === 1 ? '' : 's'} sin publicar` : 'Tienes cambios sin publicar';
 
