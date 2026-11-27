@@ -301,8 +301,31 @@ async function apiCall(endpoint, payload) {
   });
   let data = {};
   try { data = await r.json(); } catch (_) {}
-  if (!r.ok) { const e = new Error(data.error || `Error ${r.status}`); e.status = r.status; throw e; }
+  if (!r.ok) { const e = new Error(data.error || `Error ${r.status}`); e.status = r.status; e.data = data; throw e; }
   return data;
+}
+// Wave 1: id de operación para que un reintento de /stock/adjust no sume dos veces.
+function newOpId() { return 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10); }
+// Suma (o resta) unidades a UNA pieza como movimiento (no como valor absoluto): una venta que
+// entra al mismo tiempo ya no se pierde. Con un Worker viejo (sin /stock/adjust) cae al camino
+// de antes (leer /stock/list y fijar con /stock/set). Devuelve { from, to }.
+async function stockAddRelative(token, id, n, reason) {
+  const sid = String(id), opId = newOpId();
+  const body = { token, items: [{ id: sid, delta: n, reason: reason || (n > 0 ? 'Ingreso de stock' : 'Ajuste (−)') }], opId };
+  try {
+    let r;
+    try { r = await apiCall('stock/adjust', body); }
+    catch (e) { if (e && e.status) throw e; r = await apiCall('stock/adjust', body); } // corte de red: 1 reintento, mismo opId
+    const res = (r.results || []).find(x => String(x.id) === sid);
+    const to = r.stock && Number.isInteger(r.stock[sid]) ? r.stock[sid] : null;
+    return { from: res ? res.before : (to != null ? to - n : null), to };
+  } catch (e) {
+    if (!(e && e.status === 404)) throw e;
+    let cur = 1; try { const r = await apiCall('stock/list', { token }); cur = stockOf(r && r.stock, sid); } catch (_) {}
+    const next = Math.max(0, Math.min(9999, cur + n));
+    await apiCall('stock/set', { token, id: sid, qty: next });
+    return { from: cur, to: next };
+  }
 }
 // Abre un PDF base64 vía blob: (los navegadores bloquean navegar a data: en pestaña nueva)
 function openPdfBase64(b64) {
@@ -1012,6 +1035,39 @@ function stockOf(stock, id) {
   const v = stock && stock[String(id)];
   return Number.isInteger(v) ? v : STOCK_DEFAULT;
 }
+// Historial de stock de UNA pieza (wave 1): últimos movimientos guardados por el Worker
+// (/stock/history): cuándo, quién, cuánto, por qué y con cuánto quedó.
+function StockHistory({ token, productId }) {
+  const [st, setSt] = React.useState(null); // null | 'loading' | { items } | { error }
+  const load = async () => {
+    setSt('loading');
+    try { const r = await apiCall('stock/history', { token, id: String(productId) }); setSt({ items: r.items || [], unavailable: !!r.unavailable }); }
+    catch (e) { setSt({ error: e && e.status === 404 ? 'El servidor todavía no tiene el historial (falta actualizar el Worker).' : 'No se pudo cargar el historial.' }); }
+  };
+  const who = u => String(u || '').split('.')[0] || '—';
+  return (
+    <details data-testid="stockHistory" onToggle={e => { if (e.currentTarget.open && st === null) load(); }}
+      style={{ background: '#FAF7FB', borderRadius: 10, padding: '8px 12px', border: '1px solid #EDE8EA' }}>
+      <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 700, color: '#5B3F8A', minHeight: 28, display: 'flex', alignItems: 'center' }}>Historial de stock</summary>
+      <div role="status" aria-live="polite" style={{ marginTop: 6 }}>
+        {st === 'loading' && <div style={{ fontSize: 12, color: '#7A6880' }}>Cargando…</div>}
+        {st && st.error && <div style={{ fontSize: 12, color: '#DC2626' }}>{st.error}</div>}
+        {st && st.items && !st.items.length && <div style={{ fontSize: 12, color: '#7A6880' }}>{st.unavailable ? 'El historial todavía no está activo en el servidor.' : 'Sin movimientos registrados todavía.'}</div>}
+        {st && st.items && st.items.length > 0 && (
+          <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
+            {st.items.map((x, i) => (
+              <li key={i} data-testid="stockMove" style={{ display: 'grid', gridTemplateColumns: 'auto 1fr auto', gap: 8, alignItems: 'baseline', fontSize: 12, padding: '4px 0', borderBottom: '1px solid #F1ECF3' }}>
+                <strong style={{ color: x.d > 0 ? '#15803D' : x.d < 0 ? '#B91C1C' : '#5B4A63', minWidth: 30 }}>{x.d > 0 ? '+' + x.d : x.d}</strong>
+                <span style={{ minWidth: 0, color: '#1A1118' }}>{x.r || 'Movimiento'}{x.ref ? ' · ' + x.ref : ''}<span style={{ display: 'block', color: '#7A6880', fontSize: 11 }}>{new Date(x.t).toLocaleString('es-EC', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })} · {who(x.by)}</span></span>
+                <span style={{ color: '#5B4A63', whiteSpace: 'nowrap' }}>quedan {x.q}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </details>
+  );
+}
 function StockBadge({ qty, style }) {
   if (qty > 2) return null;
   const out = qty <= 0;
@@ -1027,7 +1083,7 @@ function StockEditor({ productId, sku, qty, onSave, hintId }) {
     const n = Number(t);
     if (t === '' || !Number.isInteger(n) || n < 0 || n > 9999) { setState('Entero de 0 a 9999'); setDraft(String(qty)); return; }
     setState('saving');
-    try { await onSave(productId, n); setState('ok'); setTimeout(() => setState(s => s === 'ok' ? '' : s), 2000); }
+    try { await onSave(productId, n, { delta: n - qty }); setState('ok'); setTimeout(() => setState(s => s === 'ok' ? '' : s), 2000); }
     catch (e) { setState(e.message || 'No se guardó'); setDraft(String(qty)); }
   };
   const inputId = `stock-${productId}`;
@@ -2065,9 +2121,8 @@ function BatchIntakeModal({ token, products, categories, materials, costs, margi
     try {
       if (g.action === 'stock') {
         const c = g.match.cands[g.match.idx], id = String(c.p.id);
-        let cur = 1; try { const r = await apiCall('stock/list', { token }); cur = stockOf(r && r.stock, id); } catch (_) {}
-        const next = Math.min(9999, cur + Number(g.qty));
-        await apiCall('stock/set', { token, id, qty: next });
+        const mv = await stockAddRelative(token, id, Number(g.qty), 'Ingreso por lote');
+        const cur = mv.from != null ? mv.from : 0, next = mv.to != null ? mv.to : cur + Number(g.qty);
         // Las fotos del taller sirven como fotos reales aprendidas de esa pieza (como "Sí, es el mismo").
         for (const ph of gph.slice(0, 3)) if (ph.q.kind === RECOG_KIND && ph.q.embRef) apiCall('identify/ref/add', { token, id, vector: learnedRefVector(ph.q) }).then(r => { if (r && Number.isInteger(r.count)) setRefCount(id, r.count); }).catch(() => {});
         if (g.cost !== '') { try { const r = await apiCall('cost/set', { token, items: [{ id, cost: Number(g.cost), currency: g.currency }] }); onCostsSaved && onCostsSaved(r); } catch (_) {} }
@@ -2451,10 +2506,8 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
     if (!c || dup.busy) return;
     setDup(d => ({ ...d, busy: true, err: '' }));
     try {
-      let cur = stockOf(dup.stock, c.p.id);
-      try { const r = await apiCall('stock/list', { token }); if (r && r.stock) cur = stockOf(r.stock, c.p.id); } catch (_) {}
-      const next = cur + dup.qty;
-      await apiCall('stock/set', { token, id: String(c.p.id), qty: next });
+      const mv = await stockAddRelative(token, c.p.id, dup.qty, 'Ingreso (pieza repetida)');
+      const cur = mv.from != null ? mv.from : stockOf(dup.stock, c.p.id), next = mv.to != null ? mv.to : cur + dup.qty;
       // La foto del taller sirve como foto real aprendida de esa pieza (solo con la huella actual).
       const pq = photoQRef.current;
       if (pq && pq.src === imgPrev && pq.q.kind === RECOG_KIND) {
@@ -2580,43 +2633,50 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
     } finally { setGalleryUploading(false); }
   };
 
+  // Wave 1: las reseñas se leen y moderan por el Worker con sesión (/reviews/list, /reviews/moderate),
+  // así Firebase puede cerrar la lectura pública. Con un Worker viejo (404) o sin FB_DB_SECRET (503)
+  // se usa el camino de antes (lectura pública + rutas de cacusa-lovers-webhook).
+  const [revErr, setRevErr] = React.useState('');
   const loadReviews = async () => {
     if (!product?.id) return;
-    setRevLoading(true);
+    setRevLoading(true); setRevErr('');
     try {
-      // cacusa_reviews es de lectura pública — no hace falta autenticarse para leerlas
-      const res = await fetch(`https://cacusa-pos-default-rtdb.firebaseio.com/cacusa_reviews/${product.id}.json`);
-      if (!res.ok) { setReviews([]); setRevLoading(false); return; }
-      const data = await res.json();
-      setReviews(data && typeof data === 'object' && !data.error ? Object.entries(data).map(([key, val]) => ({ key, ...val })) : []);
-    } catch(_) { setReviews([]); }
+      const r = await apiCall('reviews/list', { token, productId: String(product.id) });
+      setReviews(Array.isArray(r.reviews) ? r.reviews : []);
+    } catch (e) {
+      if (e && (e.status === 404 || e.status === 503)) {
+        try {
+          const res = await fetch(`https://cacusa-pos-default-rtdb.firebaseio.com/cacusa_reviews/${product.id}.json`);
+          const data = res.ok ? await res.json() : null;
+          setReviews(data && typeof data === 'object' && !data.error ? Object.entries(data).map(([key, val]) => ({ key, ...val })) : []);
+        } catch (_) { setReviews([]); setRevErr('No se pudieron cargar las reseñas.'); }
+      } else { setReviews([]); setRevErr('No se pudieron cargar las reseñas (' + ((e && e.message) || 'error') + ').'); }
+    }
     setRevLoading(false);
+  };
+  const moderateReview = async (key, action) => {
+    try { await apiCall('reviews/moderate', { token, productId: String(product.id), reviewId: key, action }); return true; }
+    catch (e) {
+      if (!(e && (e.status === 404 || e.status === 503))) throw e;
+      const base = `${LOVERS_WEBHOOK_URL}/admin/reviews/${encodeURIComponent(product.id)}/${encodeURIComponent(key)}`;
+      const r = await fetch(action === 'approve' ? base + '/approve' : base, { method: action === 'approve' ? 'POST' : 'DELETE', headers: { 'X-Admin-Key': token } });
+      if (!r.ok) throw new Error('Error ' + r.status);
+      return true;
+    }
   };
 
   // Aprobar una reseña la hace visible en la tienda y la suma al promedio de
   // estrellas que se publica en la ficha que lee Google. Hasta entonces, la reseña
   // existe en Firebase pero no se muestra en ningún lado.
   const approveReview = async key => {
-    try {
-      const r = await fetch(`${LOVERS_WEBHOOK_URL}/admin/reviews/${encodeURIComponent(product.id)}/${encodeURIComponent(key)}/approve`, {
-        method: 'POST',
-        headers: { 'X-Admin-Key': token },
-      });
-      if (!r.ok) { alert('Error al aprobar la reseña'); return; }
-      setReviews(rs => rs.map(x => x.key === key ? { ...x, approved: true } : x));
-    } catch(_) { alert('Error al aprobar la reseña'); }
+    try { await moderateReview(key, 'approve'); setReviews(rs => rs.map(x => x.key === key ? { ...x, approved: true } : x)); }
+    catch (_) { alert('Error al aprobar la reseña'); }
   };
 
   const deleteReview = async key => {
-    try {
-      // Borrar una reseña requiere el secret de Firebase — pasa por el worker, igual que Lovers
-      const r = await fetch(`${LOVERS_WEBHOOK_URL}/admin/reviews/${encodeURIComponent(product.id)}/${encodeURIComponent(key)}`, {
-        method: 'DELETE',
-        headers: { 'X-Admin-Key': token },
-      });
-      if (!r.ok) { alert('Error al eliminar la reseña'); return; }
-      setReviews(r2 => r2.filter(x => x.key !== key));
-    } catch(_) { alert('Error al eliminar la reseña'); }
+    if (!window.confirm('¿Eliminar esta reseña? No se puede deshacer.')) return;
+    try { await moderateReview(key, 'delete'); setReviews(r2 => r2.filter(x => x.key !== key)); }
+    catch (_) { alert('Error al eliminar la reseña'); }
   };
 
   const save = async () => {
@@ -2923,6 +2983,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
             <CountPhotoButton token={token} hint={form.name} testid="pmCount" onUse={n => setStockDraft(String(n))} />
             <span id="pmStockHint" style={{ fontSize: 11, color: '#7A6880', flex: 1, minWidth: 160 }}>{isNew ? 'El stock se guarda al publicar. ' : 'El stock se guarda al tocar Guardar. '}El costo es privado: no sale en la tienda.</span>
           </div>
+          {!isNew && <div style={{ gridColumn: 'span 2' }}><StockHistory token={token} productId={product.id} /></div>}
           <div style={{ gridColumn: 'span 2' }}>
             <label htmlFor="pmDescription" style={lbl}>Descripción<SugTag k="description" /></label>
             <textarea id="pmDescription" value={form.description || ''} onChange={e => set('description', e.target.value)} rows={3}
@@ -3054,6 +3115,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
             </summary>
             <div style={{ marginTop: 12 }}>
               {revLoading && <div style={{ fontSize: 13, color: '#9B5DE5', textAlign: 'center', padding: '12px 0' }}>Cargando reseñas…</div>}
+              {revErr && <div role="alert" style={{ fontSize: 12, color: '#DC2626', padding: '4px 0' }}>{revErr}</div>}
               {!revLoading && reviews !== null && reviews.length === 0 && (
                 <div style={{ fontSize: 13, color: '#767676', textAlign: 'center', padding: '8px 0' }}>No hay reseñas aún para este producto</div>
               )}
@@ -5897,13 +5959,13 @@ function AddPieceModal({ order, token, photo, products, categories, stock, onRet
         const last = queryRef.current;
         if ((last && last.keys.length) || shots.length > 1 || !onTeach) learnShots(pid, shots);
         else onTeach(pid, name, { dataUrl: photo.dataUrl });
-        onAdded(productos, name);
+        onAdded(productos, name, { order: res.order });
         return;
       }
       // Por QR, código o búsqueda: el pedido ya quedó actualizado; queda el paso opcional de
       // enseñar al identificador con una foto de la joya (la cámara del QR ve la etiqueta, no
       // la joya: esos cuadros nunca se usan para aprender).
-      onAdded(productos, name, { keepOpen: true });
+      onAdded(productos, name, { keepOpen: true, order: res.order });
       setTeachP((products || []).find(p => String(p.id) === String(pid)) || { id: pid, name });
       setConfirmP(null); setAdding(null); setManual(false); setQuery('');
     } catch (e) { setErrMsg(pieceErrMsg(e)); setAdding(null); }
@@ -6223,8 +6285,11 @@ function suggestLoversPieces(order, orders, products, stock, vecs, n) {
     }),
   };
 }
-function OrderCard({ order, token, uspsDefault, products, categories, stock, onStockRefresh, onStatusChange, onDelete, onTrackingChange, onCarrierChange, onClienteUpdate, onLabelGenerated, onProductsChange, onPrintSlip, orders = [] }) {
+function OrderCard({ order, token, uspsDefault, products, categories, stock, onStockRefresh, onStatusChange, onArchive, onRestore, onPagoChange, notice, onTrackingChange, onCarrierChange, onClienteUpdate, onLabelGenerated, onProductsChange, onPrintSlip, orders = [] }) {
   const [showLabelModal, setShowLabelModal] = React.useState(false);
+  const [menuOpen, setMenuOpen] = React.useState(false); // ⋯ (archivar / restaurar), wave 1
+  const archived = !!order.archivado;
+  const orderRef = order.numero ? ' #' + order.numero : '';
   // ── Agregar pieza con foto ──
   const canLoadPieces = orderAllowsPieceLoad(order);
   const pieceInputRef = React.useRef(null);
@@ -6246,7 +6311,7 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
     setLovAdding(String(p.id));
     try {
       const res = await apiCall('order/update', { token, id: order.id, patch: { addProductIds: [String(p.id)] } });
-      if (res.order && Array.isArray(res.order.productos)) onProductsChange && onProductsChange(order, res.order.productos);
+      if (res.order && Array.isArray(res.order.productos)) onProductsChange && onProductsChange(order, res.order.productos, res.order);
       setLovSug(s => (s ? { ...s, picks: (s.picks || []).filter(x => String(x.p.id) !== String(p.id)) } : s));
       onStockRefresh && onStockRefresh();
     } catch (e) { setLovSug(s => ({ ...(s || {}), error: pieceErrMsg(e) })); }
@@ -6281,7 +6346,7 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
     setRemoving(i); setPieceErr('');
     try {
       const res = await apiCall('order/update', { token, id: order.id, patch: { removeProductIndex: i } });
-      if (res.order && Array.isArray(res.order.productos)) onProductsChange && onProductsChange(order, res.order.productos);
+      if (res.order && Array.isArray(res.order.productos)) onProductsChange && onProductsChange(order, res.order.productos, res.order);
       setPieceMsg('Pieza quitada del pedido.');
       onStockRefresh && onStockRefresh();
     } catch (er) { setPieceErr(pieceErrMsg(er)); }
@@ -6552,10 +6617,27 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
         </div>
         <span style={{ background: STATE_COLORS[estado] || '#E8508A', color: 'white', fontSize: 11, fontWeight: 700, padding: '4px 10px', borderRadius: 99 }}>{estado}</span>
       </div>
+      {notice && <div role="alert" data-testid="orderNotice" style={{ fontSize: 12, fontWeight: 700, color: '#92400E', background: '#FEF3C7', borderRadius: 10, padding: '8px 10px' }}>{notice}</div>}
+      {archived && <div data-testid="archivedBadge" style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63', background: '#F3EFF5', borderRadius: 10, padding: '6px 10px' }}>Archivado{order.archivedBy ? ' por ' + String(order.archivedBy).split('.')[0] : ''}{order.archivedAt ? ' · ' + new Date(order.archivedAt).toLocaleDateString('es-EC', { day: '2-digit', month: 'short' }) : ''}</div>}
       <div style={{ fontSize: 12, color: '#7A6B85', display: 'flex', gap: 8, alignItems: 'center' }}>
         {order.numero && <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#7A5F8A', background: '#F3EFF5', padding: '2px 8px', borderRadius: 6 }}>#{order.numero}</span>}
         <span>{dateStr} · {order.pago || 'Sin método'}</span>
       </div>
+      {!isLoversBox(order) && (() => {
+        // Pago recibido / por cobrar (wave 1): Zelle y transferencias nacen "por cobrar".
+        const pe = pagoEstadoOf(order);
+        if (pe === 'reembolsado') return <div data-testid="pagoBadge" style={{ alignSelf: 'flex-start', fontSize: 12, fontWeight: 800, color: '#6D28D9', background: '#EDE9FE', borderRadius: 99, padding: '6px 12px' }}>Reembolsado</div>;
+        const on = pe === 'recibido';
+        const refund = Number(order.reembolsoCents) > 0 ? ' · reembolso ' + fmtUsd(order.reembolsoCents / 100) : '';
+        return (
+          <button type="button" data-testid="pagoToggle" aria-pressed={on} disabled={archived}
+            onClick={() => { if (on) { if (window.confirm('¿Marcar el pedido' + orderRef + ' como "por cobrar"?')) onPagoChange && onPagoChange(order, 'pendiente'); } else onPagoChange && onPagoChange(order, 'recibido'); }}
+            style={{ alignSelf: 'flex-start', minHeight: 36, padding: '0 14px', borderRadius: 99, fontSize: 12, fontWeight: 800, fontFamily: 'inherit', cursor: archived ? 'default' : 'pointer',
+              background: on ? '#DCFCE7' : '#FEF3C7', color: on ? '#15803D' : '#92400E', border: '1.5px solid ' + (on ? '#86EFAC' : '#FCD34D') }}>
+            {on ? '✓ Pago recibido' + refund : 'Por cobrar · marcar pago recibido'}
+          </button>
+        );
+      })()}
       <div style={{ background: '#FAF7FB', borderRadius: 10, padding: '10px 12px' }}>
         {(order.productos || []).map((p, i) => (
           <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, fontSize: 13, color: '#1A1118', padding: '2px 0' }}>
@@ -6600,7 +6682,7 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
           onRetake={() => pieceInputRef.current && pieceInputRef.current.click()}
           onClose={() => { setPieceOpen(false); setPiecePhoto(null); }}
           onAdded={(productos, name, opts) => {
-            if (Array.isArray(productos)) onProductsChange && onProductsChange(order, productos);
+            if (Array.isArray(productos)) onProductsChange && onProductsChange(order, productos, opts && opts.order);
             if (!(opts && opts.keepOpen)) { setPieceOpen(false); setPiecePhoto(null); }
             setPieceMsg('✓ Agregada: ' + (name || 'pieza'));
             onStockRefresh && onStockRefresh();
@@ -6743,7 +6825,13 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
         />
       )}
 
-      <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+      {archived ? (
+        <button type="button" data-testid="orderRestore" onClick={() => onRestore && onRestore(order)}
+          style={{ minHeight: 44, borderRadius: 99, background: 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', fontWeight: 800, fontSize: 13, border: 'none', cursor: 'pointer' }}>
+          Restaurar pedido
+        </button>
+      ) : (
+      <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
         {estado !== 'Entregado' && estado !== 'Cancelado' && (
           <button onClick={() => { if ((nextState === 'Enviado' || nextState === 'Entregado') && loversMissingPieces(order)) { window.alert(loversBlockMsg(order)); return; } onStatusChange(order, nextState); }}
             style={{ flex: 1, padding: '8px', background: STATE_COLORS[nextState] || '#E8508A', color: 'white', borderRadius: 99, fontSize: 12, fontWeight: 700, border: 'none', cursor: 'pointer' }}>
@@ -6784,16 +6872,30 @@ function OrderCard({ order, token, uspsDefault, products, categories, stock, onS
             if (w) w.location.href = url; else window.location.href = url;
           }}
           style={{ padding: '8px 12px', background: '#DCF8C6', color: '#128C7E', borderRadius: 99, fontSize: 12, fontWeight: 700, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 4 }}>💬 Notificar</a>}
-        <button onClick={() => { if (window.confirm('¿Eliminar el pedido' + (order.numero ? ' #' + order.numero : '') + '? No se puede deshacer.')) onDelete(order); }}
-          style={{ padding: '8px 12px', background: '#F9F5F7', color: '#7A6B85', borderRadius: 99, fontSize: 12, border: 'none', cursor: 'pointer' }} title="Eliminar">🗑</button>
+        <button type="button" onClick={() => setMenuOpen(true)} aria-haspopup="dialog" aria-expanded={menuOpen} data-testid="orderMenu"
+          aria-label={'Más acciones del pedido' + orderRef}
+          style={{ minWidth: 40, padding: '8px 12px', background: '#F9F5F7', color: '#5B4A63', borderRadius: 99, fontSize: 16, fontWeight: 800, border: 'none', cursor: 'pointer', lineHeight: 1 }}>⋯</button>
       </div>
+      )}
+      {menuOpen && (
+        <Modal onClose={() => setMenuOpen(false)} label={'Más acciones del pedido' + orderRef} boxStyle={{ maxWidth: 360 }}>
+          <div data-testid="orderMenuSheet" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ fontWeight: 800, fontSize: 15, color: '#1A1118' }}>Pedido{orderRef} · {orderFullName(order.cliente) || 'Cliente'}</div>
+            <button type="button" data-testid="orderArchive"
+              onClick={() => { if (window.confirm('¿Archivar el pedido' + orderRef + '? Se oculta de las listas y se devuelve su stock. Lo puedes restaurar desde "Archivados".')) { setMenuOpen(false); onArchive && onArchive(order); } }}
+              style={{ minHeight: 48, borderRadius: 12, background: '#FEF2F2', color: '#B91C1C', fontWeight: 800, fontSize: 14, border: '1.5px solid #FECACA', cursor: 'pointer' }}>Archivar pedido</button>
+            <button type="button" onClick={() => setMenuOpen(false)}
+              style={{ minHeight: 44, borderRadius: 12, background: 'white', color: '#5B3F8A', fontWeight: 700, fontSize: 13, border: '1.5px solid #E5DDEA', cursor: 'pointer' }}>Cerrar</button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
 
 // ── New Order Modal ────────────────────────────────────────────────────────
 function NewOrderModal({ open, onClose, onSave }) {
-  const [form, setForm] = useState({ nombre: '', telefono: '', ciudad: '', pago: 'Transferencia bancaria', notas: '', prodNombre: '', prodPersonal: '', prodPrecio: '' });
+  const [form, setForm] = useState({ nombre: '', telefono: '', ciudad: '', pago: 'Transferencia bancaria', notas: '', prodNombre: '', prodPersonal: '', prodPrecio: '', pagado: false });
   if (!open) return null;
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const inp = { border: '1.5px solid #e0e0e0', borderRadius: 10, padding: '9px 13px', fontSize: 13, width: '100%', outline: 'none', fontFamily: 'inherit', boxSizing: 'border-box' };
@@ -6807,10 +6909,11 @@ function NewOrderModal({ open, onClose, onSave }) {
       cliente: { nombre: form.nombre, telefono: form.telefono, ciudad: form.ciudad },
       productos: form.prodNombre ? [{ name: form.prodNombre, personalization: form.prodPersonal, price: Number(form.prodPrecio) || 0 }] : [],
       total: Number(form.prodPrecio) || 0,
-      pago: form.pago, estado: 'Nuevo', notas: form.notas
+      pago: form.pago, estado: 'Nuevo', notas: form.notas,
+      pagoEstado: form.pagado ? 'recibido' : 'pendiente'
     };
     onSave(order);
-    setForm({ nombre: '', telefono: '', ciudad: '', pago: 'Transferencia bancaria', notas: '', prodNombre: '', prodPersonal: '', prodPrecio: '' });
+    setForm({ nombre: '', telefono: '', ciudad: '', pago: 'Transferencia bancaria', notas: '', prodNombre: '', prodPersonal: '', prodPrecio: '', pagado: false });
     onClose();
   };
   return (
@@ -6840,6 +6943,10 @@ function NewOrderModal({ open, onClose, onSave }) {
               <option>Efectivo (entrega local)</option>
               <option>WhatsApp Pay</option>
             </select>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 44, fontSize: 13, color: '#1A1118', cursor: 'pointer' }}>
+              <input type="checkbox" data-testid="noPagado" checked={form.pagado} onChange={e => set('pagado', e.target.checked)} style={{ width: 20, height: 20, accentColor: '#9B5DE5' }} />
+              Ya recibí el pago
+            </label>
             <div style={{ fontWeight: 700, fontSize: 11, color: '#7A6B85', letterSpacing: 1, marginTop: 4 }}>PRODUCTO</div>
             <label htmlFor="noProdNombre" style={srOnly}>Nombre del producto</label>
             <input id="noProdNombre" placeholder="Nombre del producto" value={form.prodNombre} onChange={e => set('prodNombre', e.target.value)} style={inp} />
@@ -9807,7 +9914,28 @@ const SR_ONLY = { position: 'absolute', width: 1, height: 1, padding: 0, margin:
 // Venta = todo pedido que no esté Cancelado. Canal: Lovers (pago 'Lovers' o con lote), Manual
 // (lo creó una cuenta del panel: createdBy, igual que orderAllowsPieceLoad) y Tienda (el resto:
 // checkout web con Square/Zelle/WhatsApp).
-function orderIsSale(o) { return !!o && (o.estado || 'Nuevo') !== 'Cancelado'; }
+function orderIsSale(o) { return !!o && (o.estado || 'Nuevo') !== 'Cancelado' && !o.archivado && pagoEstadoOf(o) !== 'reembolsado'; }
+// Estado del pago (wave 1). Pedidos viejos sin el campo: Tarjeta (Square) y cajas de Lovers =
+// recibido; el resto (Zelle, transferencia, manual) = pendiente solo si sigue "Nuevo"; si ya avanzó,
+// se asume cobrado.
+const PAGO_LABEL = { pendiente: 'Por cobrar', recibido: 'Pago recibido', reembolsado: 'Reembolsado' };
+function pagoEstadoOf(o) {
+  if (!o) return 'pendiente';
+  if (o.pagoEstado === 'pendiente' || o.pagoEstado === 'recibido' || o.pagoEstado === 'reembolsado') return o.pagoEstado;
+  if (o.pago === 'Tarjeta' || isLoversBox(o)) return 'recibido';
+  return (o.estado || 'Nuevo') === 'Nuevo' ? 'pendiente' : 'recibido';
+}
+function num0(v) { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; }
+// Desglose solo si el pedido lo trae (pedidos de la tienda: subtotal/envio/impuesto).
+function orderHasBreakdown(o) { return !!o && typeof o.subtotal === 'number' && o.subtotal > 0; }
+function orderShip(o) { return orderHasBreakdown(o) ? num0(o.envio) : 0; }
+function orderTax(o) { return orderHasBreakdown(o) ? num0(o.impuesto) : 0; }
+function orderRefunded(o) { return (Number(o && o.reembolsoCents) || 0) / 100; }
+// Venta neta = subtotal − descuentos (sin envío ni impuesto) = total + tarjeta de regalo usada − envío − impuesto.
+function orderNet(o) {
+  const gc = num0(o && o.giftcard && o.giftcard.applied);
+  return Math.max(0, orderTotal(o) + (orderHasBreakdown(o) ? gc - orderShip(o) - orderTax(o) : 0) - orderRefunded(o));
+}
 function orderChannel(o) { if (isLoversBox(o)) return 'lovers'; if (PANEL_USERS.includes(o && o.createdBy)) return 'manual'; return 'tienda'; }
 const CHANNEL_LABEL = { tienda: 'Tienda web', manual: 'Manual (panel)', lovers: 'Cacusa Lovers' };
 function orderTime(o) { const t = Date.parse(o && o.fecha); return Number.isFinite(t) ? t : NaN; }
@@ -9822,15 +9950,20 @@ function localDayKey(t) { const d = new Date(t); return d.getFullYear() + '-' + 
 function fmtDay(t, opts) { return new Date(t).toLocaleDateString('es-EC', opts || { day: 'numeric', month: 'short' }); }
 
 function salesSummary(list) {
-  const revenue = list.reduce((s, o) => s + orderTotal(o), 0);
-  return { revenue, count: list.length, avg: list.length ? revenue / list.length : 0 };
+  const revenue = list.reduce((s, o) => s + orderNet(o), 0);
+  const ship = list.reduce((s, o) => s + orderShip(o), 0), tax = list.reduce((s, o) => s + orderTax(o), 0);
+  const gross = list.reduce((s, o) => s + Math.max(0, orderTotal(o) - orderRefunded(o)), 0);
+  return { revenue, ship, tax, gross, count: list.length, avg: list.length ? revenue / list.length : 0 };
 }
 // Las cajas de Lovers se guardan en $0 (la suscripción se cobra con factura de Square, fuera del
 // pedido): no entran en ingresos/ticket/top para no bajar el promedio; se cuentan aparte.
 function computeSales(orders, products, now = new Date(), rangeDays = 30) {
   const nowT = now.getTime();
   const sales = (orders || []).filter(o => orderIsSale(o) && Number.isFinite(orderTime(o)));
-  const paid = sales.filter(o => orderChannel(o) !== 'lovers');
+  // Ingresos = solo pagos recibidos (wave 1); lo pendiente va aparte en "Por cobrar".
+  const paid = sales.filter(o => orderChannel(o) !== 'lovers' && pagoEstadoOf(o) === 'recibido');
+  const pendingList = sales.filter(o => orderChannel(o) !== 'lovers' && pagoEstadoOf(o) === 'pendiente');
+  const porCobrar = { count: pendingList.length, amount: pendingList.reduce((s, o) => s + orderTotal(o), 0) };
   const between = (list, a, b) => list.filter(o => { const t = orderTime(o); return t >= a && t <= b; });
   const period = (start, prevStart) => {
     const s = start.getTime(), ps = prevStart.getTime();
@@ -9845,7 +9978,7 @@ function computeSales(orders, products, now = new Date(), rangeDays = 30) {
   const days = [];
   for (let i = 29; i >= 0; i--) { const d = new Date(today); d.setDate(d.getDate() - i); days.push({ key: localDayKey(d.getTime()), t: d.getTime(), revenue: 0, count: 0 }); }
   const dayIdx = new Map(days.map((d, i) => [d.key, i]));
-  for (const o of paid) { const i = dayIdx.get(localDayKey(orderTime(o))); if (i != null && orderTime(o) <= nowT) { days[i].revenue += orderTotal(o); days[i].count++; } }
+  for (const o of paid) { const i = dayIdx.get(localDayKey(orderTime(o))); if (i != null && orderTime(o) <= nowT) { days[i].revenue += orderNet(o); days[i].count++; } }
   // Rango para top productos / categorías / canales
   const rangeStart = rangeDays ? (() => { const d = new Date(today); d.setDate(d.getDate() - (rangeDays - 1)); return d.getTime(); })() : -Infinity;
   const inRange = between(sales, rangeStart, nowT);
@@ -9868,10 +10001,10 @@ function computeSales(orders, products, now = new Date(), rangeDays = 30) {
   const prods = [...prodMap.values()];
   const channels = ['tienda', 'manual', 'lovers'].map(ch => {
     const list = inRange.filter(o => orderChannel(o) === ch);
-    return { ch, label: CHANNEL_LABEL[ch], count: list.length, revenue: list.reduce((s, o) => s + orderTotal(o), 0) };
+    return { ch, label: CHANNEL_LABEL[ch], count: list.length, revenue: list.filter(o => pagoEstadoOf(o) === 'recibido').reduce((s, o) => s + orderNet(o), 0) };
   });
   return {
-    periods, days,
+    periods, days, porCobrar,
     topUnits: [...prods].sort((a, b) => b.units - a.units || b.revenue - a.revenue).slice(0, 10),
     topRevenue: [...prods].sort((a, b) => b.revenue - a.revenue || b.units - a.units).slice(0, 10),
     categories: [...catMap.values()].sort((a, b) => b.revenue - a.revenue),
@@ -9942,7 +10075,7 @@ function SalesTab({ orders, products }) {
   const kpi = (title, p) => (
     <div style={MGMT_CARD} data-testid={'salesKpi'}>
       <div style={{ fontSize: 12, fontWeight: 800, color: '#7A6880', letterSpacing: '.05em', marginBottom: 8 }}>{title}</div>
-      {[['Ingresos', p.cur.revenue, p.prev.revenue, true], ['Pedidos', p.cur.count, p.prev.count, false], ['Ticket promedio', p.cur.avg, p.prev.avg, true]].map(([l, c, pv, m]) => {
+      {[['Ventas netas', p.cur.revenue, p.prev.revenue, true], ['Pedidos cobrados', p.cur.count, p.prev.count, false], ['Ticket promedio', p.cur.avg, p.prev.avg, true]].map(([l, c, pv, m]) => {
         const d = deltaText(m ? Math.round(c * 100) / 100 : c, m ? Math.round(pv * 100) / 100 : pv, m);
         return (
           <div key={l} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8, padding: '3px 0', flexWrap: 'wrap' }}>
@@ -9954,6 +10087,11 @@ function SalesTab({ orders, products }) {
           </div>
         );
       })}
+      <div data-testid="salesBreakdown" style={{ borderTop: '1px solid #F1ECF3', marginTop: 6, paddingTop: 6, fontSize: 12, color: '#5B4A63', display: 'grid', gridTemplateColumns: '1fr auto', rowGap: 2 }}>
+        <span>Envío cobrado</span><span style={{ textAlign: 'right' }}>{fmtUsd(p.cur.ship)}</span>
+        <span>Impuesto cobrado</span><span style={{ textAlign: 'right' }}>{fmtUsd(p.cur.tax)}</span>
+        <span style={{ fontWeight: 700 }}>Total cobrado</span><span style={{ textAlign: 'right', fontWeight: 700 }}>{fmtUsd(p.cur.gross)}</span>
+      </div>
     </div>
   );
   const maxCat = Math.max(0, ...s.categories.map(c => c.revenue));
@@ -9981,10 +10119,14 @@ function SalesTab({ orders, products }) {
         <div style={{ fontWeight: 800, fontSize: 18, color: '#1A1118' }}>Ventas</div>
       </div>
       <p style={{ fontSize: 12, color: '#7A6880', marginBottom: 14, lineHeight: 1.5 }}>
-        Calculado con los pedidos del panel (todos menos los Cancelados), en dólares y con la hora de este dispositivo. Ingresos = total cobrado del pedido (incluye envío e impuesto).
+        Calculado con los pedidos del panel (sin Cancelados, archivados ni reembolsados), en dólares y con la hora de este dispositivo. Solo cuentan los pagos recibidos; lo que falta cobrar va aparte en "Por cobrar". Ventas netas = subtotal menos descuentos, sin envío ni impuesto (que se muestran aparte).
         Las cajas de Cacusa Lovers se guardan en $0 (la suscripción se cobra con factura de Square), así que no suman ingresos: se cuentan aparte en "Por canal".
         Cada período se compara con el mismo tramo del período anterior.
       </p>
+      <div data-testid="salesPorCobrar" role="status" style={{ ...MGMT_CARD, marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', borderLeft: '4px solid #D97706' }}>
+        <span style={{ fontSize: 13, fontWeight: 800, color: '#92400E' }}>Por cobrar</span>
+        <span style={{ fontSize: 13, color: '#1A1118' }}><strong style={{ fontSize: 16 }}>{fmtUsd(s.porCobrar.amount)}</strong> · {s.porCobrar.count} pedido{s.porCobrar.count === 1 ? '' : 's'} sin pago recibido</span>
+      </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(230px,1fr))', gap: 12, marginBottom: 14 }}>
         {kpi('HOY · vs. ayer', s.periods.today)}
         {kpi('ESTA SEMANA · vs. semana pasada', s.periods.week)}
@@ -10024,7 +10166,7 @@ function SalesTab({ orders, products }) {
         <div style={MGMT_CARD}>
           <div style={MGMT_H}>Por canal</div>
           <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
-            <thead><tr style={{ color: '#7A6880', fontSize: 11 }}><th scope="col" style={{ textAlign: 'left', paddingBottom: 4 }}>Canal</th><th scope="col" style={{ textAlign: 'right' }}>Pedidos</th><th scope="col" style={{ textAlign: 'right' }}>Ingresos</th></tr></thead>
+            <thead><tr style={{ color: '#7A6880', fontSize: 11 }}><th scope="col" style={{ textAlign: 'left', paddingBottom: 4 }}>Canal</th><th scope="col" style={{ textAlign: 'right' }}>Pedidos</th><th scope="col" style={{ textAlign: 'right' }}>Cobrado (neto)</th></tr></thead>
             <tbody>{s.channels.map(c => (
               <tr key={c.ch} data-testid={'channel-' + c.ch}><td style={{ padding: '4px 0' }}>{c.label}</td><td style={{ textAlign: 'right' }}>{c.count}</td><td style={{ textAlign: 'right' }}>{c.ch === 'lovers' ? <span title="Las cajas se guardan en $0">{fmtUsd(c.revenue)}*</span> : fmtUsd(c.revenue)}</td></tr>
             ))}</tbody>
@@ -10714,8 +10856,11 @@ function computeAttention(orders, products, stock, now = new Date()) {
   return { prep, prepTotal: prep.Nuevo + prep.Confirmado + prep['En proceso'], loversMissing, outIds, lowIds, stockReady: !!stock };
 }
 
-function HomeTab({ name, attention, sales, onGo, mobile, productsCount }) {
+function HomeTab({ name, attention, sales, onGo, mobile, productsCount, dataState = 'ok', onRetry }) {
   const a = attention, today = sales.periods.today;
+  // Wave 1: sin /load no se muestran ceros ("Todo al día", "$0.00") sino el error.
+  const noData = dataState === 'error' || dataState === 'loading';
+  const offTxt = dataState === 'loading' ? 'Cargando…' : 'Sin conexión con el servidor';
   const d = deltaText(Math.round(today.cur.revenue * 100) / 100, Math.round(today.prev.revenue * 100) / 100, true);
   const card = (key, { n, label, sub, accent, wide, testid }) => (
     <button key={key} type="button" onClick={() => onGo(key)} data-testid={testid}
@@ -10725,7 +10870,8 @@ function HomeTab({ name, attention, sales, onGo, mobile, productsCount }) {
       {sub && <span style={{ fontSize: 11.5, color: '#7A6880', lineHeight: 1.35 }}>{sub}</span>}
     </button>
   );
-  const prepSub = a.prepTotal ? PREP_STATES.filter(s => a.prep[s]).map(s => a.prep[s] + ' ' + s.toLowerCase()).join(' · ') : 'Todo al día';
+  const prepSub = noData ? offTxt : a.prepTotal ? PREP_STATES.filter(s => a.prep[s]).map(s => a.prep[s] + ' ' + s.toLowerCase()).join(' · ') : 'Todo al día';
+  const pc = sales.porCobrar || { count: 0, amount: 0 };
   const action = (key, label, icon, primary) => (
     <button key={key} type="button" onClick={() => onGo(key)}
       style={{ minHeight: 48, padding: '10px 14px', borderRadius: 14, fontWeight: 700, fontSize: 13.5, display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'inherit', textAlign: 'left',
@@ -10740,12 +10886,19 @@ function HomeTab({ name, attention, sales, onGo, mobile, productsCount }) {
         <h1 id="homeTitle" style={{ fontSize: mobile ? 20 : 24, fontWeight: 800, color: '#1A1118' }}>Hola, {name} <span aria-hidden="true" style={{ color: '#E8508A' }}>♡</span></h1>
         <div style={{ fontSize: 13, color: '#7A6880', marginTop: 2 }}>{dt.charAt(0).toUpperCase() + dt.slice(1)} · esto necesita tu atención</div>
       </div>
+      {dataState === 'error' && (
+        <div role="alert" data-testid="homeOffline" style={{ background: '#FEE2E2', color: '#991B1B', borderRadius: 14, padding: '10px 10px 10px 14px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, fontWeight: 700 }}>
+          <span style={{ flex: 1 }}>Sin conexión con el servidor. Los números de pedidos y ventas no están al día.</span>
+          <button type="button" onClick={onRetry} style={{ minHeight: 44, padding: '0 16px', borderRadius: 99, background: '#991B1B', color: 'white', fontWeight: 800, fontSize: 13, flexShrink: 0 }}>Reintentar</button>
+        </div>
+      )}
       <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr 1fr' : 'repeat(auto-fit,minmax(165px,1fr))', gap: mobile ? 10 : 14, marginBottom: 16 }}>
-        {card('prep', { n: a.prepTotal, label: 'Pedidos por preparar', sub: prepSub, accent: '#E8508A', testid: 'homePrep' })}
-        {card('lovers', { n: a.loversMissing, label: 'Cajas Lovers sin piezas', sub: a.loversMissing ? 'Carga sus 2 joyas' : 'Todas completas', accent: '#9B5DE5', testid: 'homeLovers' })}
+        {card('prep', { n: noData ? '—' : a.prepTotal, label: 'Pedidos por preparar', sub: prepSub, accent: '#E8508A', testid: 'homePrep' })}
+        {card('lovers', { n: noData ? '—' : a.loversMissing, label: 'Cajas Lovers sin piezas', sub: noData ? offTxt : a.loversMissing ? 'Carga sus 2 joyas' : 'Todas completas', accent: '#9B5DE5', testid: 'homeLovers' })}
+        {card('cobrar', { n: noData ? '—' : pc.count, label: 'Por cobrar', sub: noData ? offTxt : pc.count ? fmtUsd(pc.amount) + ' sin pago recibido' : 'Todo cobrado', accent: '#B45309', testid: 'homeCobrar' })}
         {card('out', { n: a.stockReady ? a.outIds.length : '—', label: 'Agotados', sub: 'Activos con stock 0', accent: '#DC2626', testid: 'homeOut' })}
         {card('low', { n: a.stockReady ? a.lowIds.length : '—', label: 'Se están acabando', sub: 'Queda 1 y se vendió en 30 días', accent: '#D97706', testid: 'homeLow' })}
-        {card('ventas', { n: fmtUsd(today.cur.revenue), label: 'Ventas de hoy', sub: today.cur.count + ' pedido' + (today.cur.count === 1 ? '' : 's') + ' · vs. ayer: ' + d.txt, accent: '#A8862F', wide: mobile, testid: 'homeSales' })}
+        {card('ventas', { n: noData ? '—' : fmtUsd(today.cur.revenue), label: 'Ventas de hoy', sub: noData ? offTxt : today.cur.count + ' pedido' + (today.cur.count === 1 ? '' : 's') + ' cobrado' + (today.cur.count === 1 ? '' : 's') + ' · vs. ayer: ' + d.txt, accent: '#A8862F', testid: 'homeSales' })}
       </div>
       <h2 style={{ fontSize: 12, fontWeight: 800, color: '#7A6880', letterSpacing: '.08em', textTransform: 'uppercase', margin: '0 2px 8px' }}>Accesos rápidos</h2>
       <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr 1fr' : 'repeat(4, minmax(0, 1fr))', gap: 10 }}>
@@ -10758,22 +10911,26 @@ function HomeTab({ name, attention, sales, onGo, mobile, productsCount }) {
   );
 }
 
-// Stock con − / + (lista de productos): guarda con /stock/set igual que el campo de la tarjeta,
-// un instante después del último toque (varios toques seguidos = un solo guardado).
+// Stock con − / + (lista de productos): guarda como movimiento (/stock/adjust, wave 1) un instante
+// después del último toque (varios toques seguidos = un solo movimiento).
 function StockStepper({ productId, name, sku, qty, onSave, hintId }) {
   const [val, setVal] = useState(qty);
   const [state, setState] = useState(''); // '' | 'saving' | 'ok' | error
-  const timer = useRef(null), dirtyV = useRef(false);
+  const timer = useRef(null), dirtyV = useRef(false), startQ = useRef(qty);
   useEffect(() => { if (!dirtyV.current) setVal(qty); }, [qty]);
   useEffect(() => () => clearTimeout(timer.current), []);
+  // Wave 1: se manda el MOVIMIENTO (n − valor al empezar a tocar), no el número en pantalla: si entra
+  // una venta mientras tanto, se suma en el servidor y el valor que vuelve ya la incluye.
+  const begin = () => { if (!dirtyV.current) startQ.current = qty; dirtyV.current = true; };
   const commit = async n => {
     dirtyV.current = false;
-    if (n === qty) { setState(''); return; }
+    const delta = n - startQ.current;
+    if (!delta) { setState(''); setVal(qty); return; }
     setState('saving');
-    try { await onSave(productId, n); setState('ok'); setTimeout(() => setState(s => s === 'ok' ? '' : s), 1500); }
+    try { await onSave(productId, n, { delta }); setState('ok'); setTimeout(() => setState(s => s === 'ok' ? '' : s), 1500); }
     catch (e) { setState((e && e.message) || 'No se guardó'); setVal(qty); }
   };
-  const schedule = n => { dirtyV.current = true; setVal(n); clearTimeout(timer.current); timer.current = setTimeout(() => commit(n), 600); };
+  const schedule = n => { begin(); setVal(n); clearTimeout(timer.current); timer.current = setTimeout(() => commit(n), 600); };
   const step = d => schedule(Math.max(0, Math.min(9999, (Number(val) || 0) + d)));
   const out = Number(val) <= 0, low = Number(val) > 0 && Number(val) <= 2;
   const b = { width: 32, height: 44, borderRadius: 10, background: '#F3EFF5', color: '#5B3F8A', fontSize: 20, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 };
@@ -10783,7 +10940,7 @@ function StockStepper({ productId, name, sku, qty, onSave, hintId }) {
       <button type="button" style={{ ...b, opacity: out ? .45 : 1 }} disabled={out} aria-label={'Restar 1 al stock de ' + name} onClick={() => step(-1)}>−</button>
       <label htmlFor={inputId} style={SR_ONLY}>Stock de {name}{sku ? ' · ' + sku : ''}</label>
       <input id={inputId} className="adm-nospin" type="number" inputMode="numeric" min={0} max={9999} value={val} aria-describedby={hintId}
-        onChange={e => { const t = e.target.value; dirtyV.current = true; setVal(t === '' ? '' : Number(t)); clearTimeout(timer.current); }}
+        onChange={e => { const t = e.target.value; begin(); setVal(t === '' ? '' : Number(t)); clearTimeout(timer.current); }}
         onBlur={() => { const n = Number(val); if (val === '' || !Number.isInteger(n) || n < 0 || n > 9999) { setVal(qty); dirtyV.current = false; setState('Entero de 0 a 9999'); return; } if (dirtyV.current) { clearTimeout(timer.current); commit(n); } }}
         onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur(); } }}
         style={{ width: 34, height: 34, textAlign: 'center', border: 'none', borderRadius: 8, fontSize: 15, padding: 0, fontWeight: 800, outline: 'none', MozAppearance: 'textfield', background: out ? '#FEE2E2' : low ? '#FEF3C7' : 'transparent', color: out ? '#B91C1C' : low ? '#92400E' : '#1A1118' }} />
@@ -10866,6 +11023,16 @@ function App() {
   const [orders, setOrders]           = useState([]);
   const [ordersSha, setOrdersSha]     = useState(null);
   const [stock, setStock]             = useState(null); // {id: n} — null = todavía sin cargar
+  // Wave 1: estado de /load ('loading' | 'ok' | 'error' = nunca cargó | 'stale' = falló un refresco),
+  // conflicto al publicar (409), avisos por pedido ("cambió en otro teléfono") y cola de cambios por pedido.
+  const [dataState, setDataState]     = useState('loading');
+  const [pubConflict, setPubConflict] = useState(null);
+  const [orderNotice, setOrderNotice] = useState({});
+  const [pagoPendOnly, setPagoPendOnly] = useState(false);
+  const orderQueueRef = React.useRef(new Map());  // id → última promesa de la cola de ese pedido
+  const orderVerRef   = React.useRef(new Map());  // 'id|updatedAt visto' → updatedAt que dejó NUESTRO cambio
+  const orderBusyRef  = React.useRef(new Set());  // pedidos con cambios en vuelo (el refresco no los pisa)
+  const rebaseRef     = React.useRef(null);       // "Recargar y volver a aplicar": base = catálogo nuevo
   const [loading, setLoading]         = useState(false);
   const [syncing, setSyncing]         = useState(false);
   const [syncMsg, setSyncMsg]         = useState('');
@@ -10947,7 +11114,15 @@ function App() {
       cfg: Object.fromEntries(Object.entries(cfgNow).map(([k, v]) => [k, JSON.stringify(v)]))
     };
   };
-  useEffect(() => { if (resnapRef.current) { resnapRef.current = false; takePubSnap(); } });
+  useEffect(() => {
+    if (rebaseRef.current) {
+      // Después de volver a aplicar mis cambios sobre el catálogo nuevo: la base pasa a ser ESE
+      // catálogo (así el contador muestra solo mis cambios), con mis bloques de config como pendientes.
+      const rb = rebaseRef.current; rebaseRef.current = null; takePubSnap();
+      pubBaseRef.current.prods = rb.prods; pubBaseRef.current.order = rb.order;
+      for (const k of rb.cfgChanged) pubBaseRef.current.cfg[k] = rb.oldCfg[k];
+    } else if (resnapRef.current) { resnapRef.current = false; takePubSnap(); }
+  });
   const prevDirtyRef = React.useRef(false);
   useEffect(() => { if (prevDirtyRef.current && !dirty) takePubSnap(); prevDirtyRef.current = dirty; }, [dirty]);
   const pendingCount = React.useMemo(() => {
@@ -11060,6 +11235,68 @@ function App() {
     setSyncMsg('⚠️ Tu sesión expiró por seguridad. Cierra sesión y vuelve a entrar.');
   };
 
+  // Aplica un catálogo (data/products.json) al panel. La usan la carga normal y "Recargar y volver
+  // a aplicar mis cambios" (conflicto al publicar, wave 1).
+  const applyCatalogData = data => {
+    const prods = Array.isArray(data) ? data : (data.products || []);
+    resnapRef.current = true; // base para contar los cambios sin publicar
+    setProducts(prods.map(p => ({ ...p, available: p.available !== false })));
+    if (Array.isArray(data.combos)) setCombos(data.combos);
+    const cfg = (data.config || {});
+    setSkuSeq((cfg.skuSeq && typeof cfg.skuSeq === 'object' && !Array.isArray(cfg.skuSeq)) ? cfg.skuSeq : {});
+    setWhatsappNum(data.whatsapp || cfg.whatsapp || '');
+    if (Array.isArray(cfg.categories) && cfg.categories.length) setCategories(cfg.categories);
+    if (Array.isArray(cfg.materials)  && cfg.materials.length)  setMaterials(cfg.materials);
+    if (cfg.shipping && typeof cfg.shipping === 'object') setShipping({ ...DEFAULT_SHIPPING, ...cfg.shipping });
+    const mergedTexts = (cfg.texts && typeof cfg.texts === 'object') ? { ...DEFAULT_TEXTS, ...cfg.texts } : DEFAULT_TEXTS;
+    setTexts(mergedTexts);
+    // Campaña: se mezcla con los defaults y se conservan campos desconocidos (contrato con la tienda)
+    setCampaign((cfg.campaign && typeof cfg.campaign === 'object' && !Array.isArray(cfg.campaign))
+      ? { ...DEFAULT_CAMPAIGN, ...cfg.campaign } : DEFAULT_CAMPAIGN);
+    const h = (cfg.home && typeof cfg.home === 'object') ? cfg.home : {};
+    const mergedHome = {
+      ...DEFAULT_HOME, ...h,
+      stats: Array.isArray(h.stats) ? h.stats : DEFAULT_HOME.stats,
+      person: (h.person && typeof h.person === 'object')
+        ? { ...DEFAULT_HOME.person, ...h.person, steps: Array.isArray(h.person.steps) ? h.person.steps : DEFAULT_HOME.person.steps }
+        : DEFAULT_HOME.person,
+      testimonials: Array.isArray(h.testimonials) ? h.testimonials : DEFAULT_HOME.testimonials,
+      footer: (h.footer && typeof h.footer === 'object') ? { ...DEFAULT_HOME.footer, ...h.footer } : DEFAULT_HOME.footer
+    };
+    setHome(mergedHome);
+    const l = (cfg.lovers && typeof cfg.lovers === 'object') ? cfg.lovers : {};
+    const mergedLovers = {
+      ...DEFAULT_LOVERS, ...l,
+      whatItems:   Array.isArray(l.whatItems)   ? l.whatItems   : DEFAULT_LOVERS.whatItems,
+      planFeatures:Array.isArray(l.planFeatures)? l.planFeatures: DEFAULT_LOVERS.planFeatures,
+      howSteps:    Array.isArray(l.howSteps)    ? l.howSteps    : DEFAULT_LOVERS.howSteps,
+      conditions:  Array.isArray(l.conditions)  ? l.conditions  : DEFAULT_LOVERS.conditions,
+      faq:         Array.isArray(l.faq)         ? l.faq         : DEFAULT_LOVERS.faq,
+      shippingNotice: (l.shippingNotice && typeof l.shippingNotice === 'object') ? { ...DEFAULT_LOVERS.shippingNotice, ...l.shippingNotice } : DEFAULT_LOVERS.shippingNotice
+    };
+    setLovers(mergedLovers);
+    const mergedPages = {
+      envios:       { ...DEFAULT_PAGES.envios,       ...((cfg.pages && cfg.pages.envios)       || {}) },
+      devoluciones: { ...DEFAULT_PAGES.devoluciones, ...((cfg.pages && cfg.pages.devoluciones) || {}) },
+      cuidados:     { ...DEFAULT_PAGES.cuidados,     ...((cfg.pages && cfg.pages.cuidados)     || {}) }
+    };
+    setPages(mergedPages);
+    // Preserva los bloques en inglés y guarda snapshot del español (para re-traducir solo lo editado)
+    enRef.current = {
+      translations: cfg.translations || null,
+      texts_en:     cfg.texts_en     || null,
+      home_en:      cfg.home_en      || null,
+      pages_en:     cfg.pages_en     || null,
+      lovers_en:    cfg.lovers_en    || null
+    };
+    snapRef.current = {
+      texts:  JSON.stringify(mergedTexts),
+      home:   JSON.stringify(mergedHome),
+      pages:  JSON.stringify(mergedPages),
+      lovers: JSON.stringify(mergedLovers)
+    };
+  };
+
   const loadData = async (silent = false) => {
     if (!silent) setLoading(true); setSyncMsg('');
     try {
@@ -11071,64 +11308,8 @@ function App() {
       if (silent && dirtyRef.current) {
         // se salta productos/config; abajo se siguen agregando los pedidos nuevos
       } else if (res.products) {
-        const data = JSON.parse(res.products);
-        const prods = Array.isArray(data) ? data : (data.products || []);
-        resnapRef.current = true; // base para contar los cambios sin publicar
-        setProducts(prods.map(p => ({ ...p, available: p.available !== false })));
-        if (Array.isArray(data.combos)) setCombos(data.combos);
-        const cfg = (data.config || {});
-        setSkuSeq((cfg.skuSeq && typeof cfg.skuSeq === 'object' && !Array.isArray(cfg.skuSeq)) ? cfg.skuSeq : {});
-        setWhatsappNum(data.whatsapp || cfg.whatsapp || '');
-        if (Array.isArray(cfg.categories) && cfg.categories.length) setCategories(cfg.categories);
-        if (Array.isArray(cfg.materials)  && cfg.materials.length)  setMaterials(cfg.materials);
-        if (cfg.shipping && typeof cfg.shipping === 'object') setShipping({ ...DEFAULT_SHIPPING, ...cfg.shipping });
-        const mergedTexts = (cfg.texts && typeof cfg.texts === 'object') ? { ...DEFAULT_TEXTS, ...cfg.texts } : DEFAULT_TEXTS;
-        setTexts(mergedTexts);
-        // Campaña: se mezcla con los defaults y se conservan campos desconocidos (contrato con la tienda)
-        setCampaign((cfg.campaign && typeof cfg.campaign === 'object' && !Array.isArray(cfg.campaign))
-          ? { ...DEFAULT_CAMPAIGN, ...cfg.campaign } : DEFAULT_CAMPAIGN);
-        const h = (cfg.home && typeof cfg.home === 'object') ? cfg.home : {};
-        const mergedHome = {
-          ...DEFAULT_HOME, ...h,
-          stats: Array.isArray(h.stats) ? h.stats : DEFAULT_HOME.stats,
-          person: (h.person && typeof h.person === 'object')
-            ? { ...DEFAULT_HOME.person, ...h.person, steps: Array.isArray(h.person.steps) ? h.person.steps : DEFAULT_HOME.person.steps }
-            : DEFAULT_HOME.person,
-          testimonials: Array.isArray(h.testimonials) ? h.testimonials : DEFAULT_HOME.testimonials,
-          footer: (h.footer && typeof h.footer === 'object') ? { ...DEFAULT_HOME.footer, ...h.footer } : DEFAULT_HOME.footer
-        };
-        setHome(mergedHome);
-        const l = (cfg.lovers && typeof cfg.lovers === 'object') ? cfg.lovers : {};
-        const mergedLovers = {
-          ...DEFAULT_LOVERS, ...l,
-          whatItems:   Array.isArray(l.whatItems)   ? l.whatItems   : DEFAULT_LOVERS.whatItems,
-          planFeatures:Array.isArray(l.planFeatures)? l.planFeatures: DEFAULT_LOVERS.planFeatures,
-          howSteps:    Array.isArray(l.howSteps)    ? l.howSteps    : DEFAULT_LOVERS.howSteps,
-          conditions:  Array.isArray(l.conditions)  ? l.conditions  : DEFAULT_LOVERS.conditions,
-          faq:         Array.isArray(l.faq)         ? l.faq         : DEFAULT_LOVERS.faq,
-          shippingNotice: (l.shippingNotice && typeof l.shippingNotice === 'object') ? { ...DEFAULT_LOVERS.shippingNotice, ...l.shippingNotice } : DEFAULT_LOVERS.shippingNotice
-        };
-        setLovers(mergedLovers);
-        const mergedPages = {
-          envios:       { ...DEFAULT_PAGES.envios,       ...((cfg.pages && cfg.pages.envios)       || {}) },
-          devoluciones: { ...DEFAULT_PAGES.devoluciones, ...((cfg.pages && cfg.pages.devoluciones) || {}) },
-          cuidados:     { ...DEFAULT_PAGES.cuidados,     ...((cfg.pages && cfg.pages.cuidados)     || {}) }
-        };
-        setPages(mergedPages);
-        // Preserva los bloques en inglés y guarda snapshot del español (para re-traducir solo lo editado)
-        enRef.current = {
-          translations: cfg.translations || null,
-          texts_en:     cfg.texts_en     || null,
-          home_en:      cfg.home_en      || null,
-          pages_en:     cfg.pages_en     || null,
-          lovers_en:    cfg.lovers_en    || null
-        };
-        snapRef.current = {
-          texts:  JSON.stringify(mergedTexts),
-          home:   JSON.stringify(mergedHome),
-          pages:  JSON.stringify(mergedPages),
-          lovers: JSON.stringify(mergedLovers)
-        };
+        applyCatalogData(JSON.parse(res.products));
+        setProductsSha(res.productsSha || null); // wave 1: base para detectar si otra persona publicó
       } else if (!silent) {
         setProducts([]);
         setSyncMsg('📦 No hay productos aún. Agrega tu primer producto y haz clic en "Publicar".');
@@ -11137,17 +11318,30 @@ function App() {
       if (res.orders) {
         try {
           const freshOrders = JSON.parse(res.orders).orders || [];
+          // Wave 1: el refresco (30 s / al volver) agrega los nuevos Y reemplaza los que cambiaron en
+          // otro teléfono (updatedAt más nuevo). Nunca pisa un pedido con un cambio propio en vuelo, ni
+          // vuelve atrás uno que acabamos de guardar (orders_cache puede llegar unos segundos atrasada).
           setOrders(prev => {
             if (!silent || prev.length === 0) return freshOrders;
+            const byId = new Map(freshOrders.map(o => [o.id, o]));
             const existingIds = new Set(prev.map(o => o.id));
             const newOnes = freshOrders.filter(o => !existingIds.has(o.id));
-            return newOnes.length > 0 ? [...newOnes, ...prev] : prev;
+            let changed = newOnes.length > 0;
+            const merged = prev.map(o => {
+              const f = byId.get(o.id);
+              if (!f || orderBusyRef.current.has(o.id)) return o;
+              if (f.updatedAt && (!o.updatedAt || f.updatedAt > o.updatedAt)) { changed = true; return o.labelBase64 && !f.labelBase64 ? { ...f, labelBase64: o.labelBase64 } : f; }
+              return o;
+            });
+            return changed ? [...newOnes, ...merged] : prev;
           });
         } catch (_) { if (!silent) setOrders([]); }
       } else { if (!silent) setOrders([]); }
+      setDataState('ok');
     } catch (err) {
+      setDataState(s => (s === 'ok' || s === 'stale') ? 'stale' : 'error');
       if (err.status === 401) sessionExpired();
-      else setSyncMsg('❌ Error cargando datos: ' + err.message);
+      else setSyncMsg(silent ? '❌ Sin conexión con el servidor: los datos pueden no estar al día.' : '❌ Error cargando datos: ' + err.message);
     }
     setLoading(false);
   };
@@ -11246,7 +11440,9 @@ function App() {
       // Refresca el snapshot para no re-traducir lo mismo en la próxima publicación de esta sesión
       enRef.current = { translations: enRef.current.translations, texts_en, home_en, pages_en, lovers_en };
       snapRef.current = { texts: JSON.stringify(texts), home: JSON.stringify(home), pages: JSON.stringify(pages), lovers: JSON.stringify(lovers) };
-      await apiSave(session.token, PRODUCTS_PATH, json, `[Admin] Productos - ${session.username}`);
+      // Wave 1: se manda el sha sobre el que se editó; si otra persona publicó entretanto → 409.
+      const sv = await apiCall('save', { token: session.token, path: PRODUCTS_PATH, content: json, message: `[Admin] Productos - ${session.username}`, ...(productsSha ? { baseSha: productsSha } : {}) });
+      if (sv && sv.sha) setProductsSha(sv.sha);
       // Pedidos: ya no se resave acá — cada pedido se persiste al instante en su propia
       // llave (ver updateOrderRemote/deleteOrderRemote/apiOrderManual más arriba).
       setDirty(false);
@@ -11254,9 +11450,53 @@ function App() {
       setSyncMsg('✅ ¡Publicado en cacusabytaitus.com! La tienda se actualiza en 1–2 min.');
       setTimeout(() => setSyncMsg(''), 8000);
     } catch (e) {
-      setSyncMsg(e.status === 401 ? '⚠️ Tu sesión expiró. Cierra sesión y vuelve a entrar (tus cambios siguen aquí).' : '❌ Error: ' + e.message);
+      if (e.status === 409 && e.data && e.data.conflict && e.data.products) { setSyncMsg(''); setPubConflict({ sha: e.data.sha, products: e.data.products }); }
+      else setSyncMsg(e.status === 401 ? '⚠️ Tu sesión expiró. Cierra sesión y vuelve a entrar (tus cambios siguen aquí).' : '❌ Error: ' + e.message);
     }
     setSyncing(false);
+  };
+  // Conflicto al publicar (wave 1): toma el catálogo que publicó la otra persona y le vuelve a
+  // aplicar encima MIS cambios por producto (nuevos, editados, borrados), el orden si lo cambié y
+  // los bloques de configuración que toqué. Nada se publica solo: queda para revisar y publicar.
+  const reapplyMyChanges = () => {
+    const conf = pubConflict; if (!conf) return;
+    let data; try { data = JSON.parse(conf.products); } catch (_) { setSyncMsg('❌ El catálogo nuevo no se pudo leer. Recarga los datos.'); setPubConflict(null); return; }
+    const base = pubBaseRef.current;
+    const freshProds = (Array.isArray(data) ? data : (data.products || [])).map(p => ({ ...p, available: p.available !== false }));
+    const freshMap = new Map(freshProds.map(p => [String(p.id), p]));
+    const localMap = new Map(products.map(p => [String(p.id), p]));
+    const changed = new Set(), deleted = new Set(), both = [];
+    for (const p of products) { const id = String(p.id), b = base && base.prods.get(id); if (b == null || b !== JSON.stringify(p)) changed.add(id); }
+    if (base) for (const id of base.prods.keys()) if (!localMap.has(id)) deleted.add(id);
+    for (const id of changed) { const f = freshMap.get(id), b = base && base.prods.get(id); if (b != null && (!f || JSON.stringify(f) !== b)) both.push(localMap.get(id).name || id); }
+    let result = freshProds.filter(p => !deleted.has(String(p.id))).map(p => changed.has(String(p.id)) ? localMap.get(String(p.id)) : p);
+    for (const p of products) if (changed.has(String(p.id)) && !freshMap.has(String(p.id))) result.push(p);
+    const localOrder = products.map(p => String(p.id));
+    const orderChanged = base && localOrder.filter(id => base.prods.has(id)).join(',') !== base.order.filter(id => localMap.has(id)).join(',');
+    if (orderChanged) {
+      const pos = new Map(localOrder.map((id, i) => [id, i]));
+      result = result.map((p, i) => ({ p, i })).sort((x, y) => (pos.has(String(x.p.id)) ? pos.get(String(x.p.id)) : 1e6 + x.i) - (pos.has(String(y.p.id)) ? pos.get(String(y.p.id)) : 1e6 + y.i)).map(x => x.p);
+    }
+    const cfgChanged = base ? Object.keys(cfgNow).filter(k => base.cfg[k] !== JSON.stringify(cfgNow[k])) : [];
+    const has = k => cfgChanged.includes(k);
+    const cfg = { ...(data.config || {}) };
+    for (const k of ['categories', 'materials', 'shipping', 'texts', 'campaign', 'home', 'lovers', 'pages']) if (has(k)) cfg[k] = cfgNow[k];
+    if (has('whatsapp')) cfg.whatsapp = whatsappNum;
+    const seq = { ...((cfg.skuSeq && typeof cfg.skuSeq === 'object') ? cfg.skuSeq : {}) };
+    for (const [k, v] of Object.entries(skuSeq || {})) if (!(seq[k] >= v)) seq[k] = v;
+    cfg.skuSeq = seq;
+    const merged = { ...data, products: result, combos: has('combos') ? combos : (Array.isArray(data.combos) ? data.combos : combos), whatsapp: has('whatsapp') ? whatsappNum : data.whatsapp, config: cfg };
+    const oldSnap = snapRef.current, oldCfg = base ? { ...base.cfg } : {};
+    applyCatalogData(merged);
+    resnapRef.current = false;
+    snapRef.current = oldSnap; // los bloques en español que cambié se vuelven a traducir al publicar
+    rebaseRef.current = { prods: new Map(freshProds.map(p => [String(p.id), JSON.stringify(p)])), order: freshProds.map(p => String(p.id)), cfgChanged, oldCfg };
+    setProductsSha(conf.sha || null);
+    setDirty(true);
+    setPubConflict(null);
+    const n = changed.size + deleted.size + (orderChanged ? 1 : 0) + cfgChanged.length;
+    setSyncMsg('✓ Volví a aplicar tus ' + n + ' cambio' + (n === 1 ? '' : 's') + ' sobre la versión más nueva. Revisa y vuelve a publicar.'
+      + (both.length ? ' Ojo: la otra persona también cambió ' + both.slice(0, 5).join(', ') + (both.length > 5 ? '…' : '') + ' y quedó tu versión.' : ''));
   };
 
   // Producto aprobado en "Ingreso por lote": mismo resultado que "Nuevo producto" (código siguiente de su
@@ -11350,27 +11590,74 @@ function App() {
     flushingRef.current = false;
     if (done.length) setPendingStock(prev => { const n = { ...prev }; done.forEach(id => delete n[id]); pendingStockWrite(n); return n; });
   };
-  const saveStock = async (id, qty) => {
+  // Wave 1: el stock se guarda como MOVIMIENTO (+2, −1) con /stock/adjust, no como el número que
+  // había en pantalla: una venta que entra al mismo tiempo ya no se pierde. opts.delta = cuánto cambió
+  // desde el valor que vio la persona; si no viene, contra el stock que el panel conoce. Con un Worker
+  // viejo (sin /stock/adjust) cae a /stock/set como antes.
+  const saveStock = async (id, qty, opts = {}) => {
+    const sid = String(id);
+    const delta = Number.isInteger(opts.delta) ? opts.delta : qty - stockOf(stock, sid);
+    if (!delta) return qty;
+    const body = { token: session.token, items: [{ id: sid, delta, reason: opts.reason || (delta > 0 ? 'Ajuste en el panel (+)' : 'Ajuste en el panel (−)') }], opId: newOpId() };
     try {
-      await apiCall('stock/set', { token: session.token, id: String(id), qty });
-      setStock(prev => ({ ...(prev || {}), [String(id)]: qty }));
+      let r;
+      try {
+        try { r = await apiCall('stock/adjust', body); }
+        catch (e) { if (e && e.status) throw e; r = await apiCall('stock/adjust', body); } // corte de red: 1 reintento, mismo opId
+      } catch (e) {
+        if (!(e && e.status === 404)) throw e;
+        await apiCall('stock/set', { token: session.token, id: sid, qty });
+        r = { stock: { [sid]: qty } };
+      }
+      const after = r.stock && Number.isInteger(r.stock[sid]) ? r.stock[sid] : qty;
+      setStock(prev => ({ ...(prev || {}), [sid]: after }));
+      return after;
     } catch (e) { if (e && e.status === 401) sessionExpired(); throw e; }
   };
-  const updateOrderRemote = (id, patch) => {
-    apiOrderUpdate(session.token, id, patch).catch(e => {
-      console.warn('order update:', e);
-      if (e && e.status === 401) sessionExpired();
-      else setSyncMsg('❌ No se guardó el último cambio de un pedido (' + (e && e.message || 'error de red') + '). Recarga los datos y vuelve a intentarlo.');
-    });
+  // Wave 1 — cada cambio de pedido manda el updatedAt que la persona tenía en pantalla
+  // (baseUpdatedAt). Si otra persona lo cambió mientras tanto, el Worker responde 409 con el pedido
+  // actual: se reemplaza la tarjeta y se avisa "Este pedido cambió en otro teléfono". Los cambios de
+  // UN mismo pedido van en cola (uno tras otro): si el anterior era nuestro, el siguiente usa la
+  // versión que dejó ese cambio (no da un 409 falso por tocar dos cosas seguidas).
+  const replaceOrder = o => setOrders(prev => prev.map(x => x.id === o.id ? (x.labelBase64 && !o.labelBase64 ? { ...o, labelBase64: x.labelBase64 } : o) : x));
+  const noteOrder = (id, text) => {
+    setOrderNotice(n => ({ ...n, [id]: text }));
+    setTimeout(() => setOrderNotice(n => { if (n[id] !== text) return n; const c = { ...n }; delete c[id]; return c; }), 12000);
   };
-  const deleteOrderRemote = (id) => {
-    apiOrderDelete(session.token, id).catch(e => {
-      console.warn('order delete:', e);
-      if (e && e.status === 401) sessionExpired();
-      else setSyncMsg('❌ No se pudo eliminar el pedido (' + (e && e.message || 'error de red') + '). Recarga los datos.');
-    });
+  const sendOrderOp = (ord, body, optimistic) => {
+    const id = ord.id, seen = ord.updatedAt || null;
+    if (optimistic) setOrders(prev => prev.map(x => x.id === id ? optimistic(x) : x));
+    orderBusyRef.current.add(id);
+    const run = async () => {
+      const vm = orderVerRef.current;
+      let base = seen;
+      for (let i = 0; i < 50 && vm.has(id + '|' + base); i++) base = vm.get(id + '|' + base);
+      try {
+        const res = await apiCall('order/update', { token: session.token, id, baseUpdatedAt: base, ...body });
+        if (res && res.order) { vm.set(id + '|' + base, res.order.updatedAt || null); replaceOrder(res.order); }
+        return res;
+      } catch (e) {
+        if (e && e.status === 409 && e.data && e.data.order) {
+          replaceOrder(e.data.order);
+          noteOrder(id, 'Este pedido cambió en otro teléfono. Ya ves cómo quedó; si hace falta, vuelve a hacer tu cambio.');
+        } else if (e && e.status === 401) sessionExpired();
+        else setSyncMsg('❌ No se guardó el último cambio de un pedido (' + (e && e.message || 'error de red') + '). Recarga los datos y vuelve a intentarlo.');
+        throw e;
+      }
+    };
+    const q = orderQueueRef.current;
+    const p = (q.get(id) || Promise.resolve()).then(run, run);
+    const tail = p.catch(() => {}).then(() => { if (q.get(id) === tail) { q.delete(id); orderBusyRef.current.delete(id); } });
+    q.set(id, tail);
+    return p;
   };
-  const changeOrderState = (ord, newState) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, estado: newState } : x)); updateOrderRemote(ord.id, { estado: newState }); if (newState === 'Cancelado') setTimeout(loadStock, 1500); };
+  const updateOrderRemote = (ord, patch) => sendOrderOp(ord, { patch }, x => ({ ...x, ...patch, ...(patch.cliente ? { cliente: { ...(x.cliente || {}), ...patch.cliente } } : {}) })).catch(() => {});
+  const changeOrderState = (ord, newState) => { updateOrderRemote(ord, { estado: newState }); if (newState === 'Cancelado') setTimeout(loadStock, 1500); };
+  const archiveOrder = ord => sendOrderOp(ord, { archive: true }, x => ({ ...x, archivado: true, archivedAt: new Date().toISOString() }))
+    .then(() => { setTimeout(loadStock, 1500); setSyncMsg('✓ Pedido' + (ord.numero ? ' #' + ord.numero : '') + ' archivado. Lo encuentras en "Archivados" para restaurarlo.'); }).catch(() => {});
+  const restoreOrder = ord => sendOrderOp(ord, { restore: true }, x => { const c = { ...x }; delete c.archivado; delete c.archivedAt; return c; })
+    .then(() => setTimeout(loadStock, 1500)).catch(() => {});
+  const setPagoEstado = (ord, v) => updateOrderRemote(ord, { pagoEstado: v });
   const applyBulk = (changes, action) => {
     const m = new Map(changes.map(c => [String(c.id), c.patch]));
     setProducts(prev => prev.map(x => m.has(String(x.id)) ? { ...x, ...m.get(String(x.id)) } : x));
@@ -11394,7 +11681,8 @@ function App() {
 
   if (!session) return <LoginScreen onLogin={s => setSession(s)} />;
 
-  const attention = computeAttention(orders, products, stock);
+  const liveOrders = orders.filter(o => !o.archivado); // wave 1: archivados fuera de todo, salvo su vista
+  const attention = computeAttention(liveOrders, products, stock);
   const outSet = new Set(attention.outIds), lowSet = new Set(attention.lowIds);
   const filtered = products.filter(p => {
     if (filter !== 'all' && p.category !== filter) return false;
@@ -11403,7 +11691,7 @@ function App() {
     if (stockFilter === 'low' && !lowSet.has(String(p.id))) return false;
     return true;
   });
-  const pendingOrders = orders.filter(o => ['Nuevo', 'Confirmado', 'En proceso'].includes(o.estado || 'Nuevo')).length;
+  const pendingOrders = liveOrders.filter(o => ['Nuevo', 'Confirmado', 'En proceso'].includes(o.estado || 'Nuevo')).length;
   const promoCount = products.filter(p => p.promo && p.promo.price && (!p.promo.endsAt || new Date(p.promo.endsAt) >= new Date())).length + combos.length;
   const navBadge = { orders: pendingOrders, descuentos: promoCount, lovers: loversCount };
   const go = tab => {
@@ -11414,7 +11702,8 @@ function App() {
   const openNewProduct = () => { setEditProd(null); setShowModal(true); };
   const openEnroll = () => { setEnrollOnly(null); setShowEnroll(true); };
   const homeGo = key => {
-    if (key === 'prep') { setOrdersView('active'); setLoteOnly(false); setLoversMissingOnly(false); setHistSearch(''); go('orders'); }
+    if (key === 'prep') { setOrdersView('active'); setLoteOnly(false); setLoversMissingOnly(false); setPagoPendOnly(false); setHistSearch(''); go('orders'); }
+    else if (key === 'cobrar') { setOrdersView('active'); setLoteOnly(false); setLoversMissingOnly(false); setPagoPendOnly(true); setHistSearch(''); go('orders'); }
     else if (key === 'lovers') { setOrdersView('active'); setLoteOnly(false); setLoversMissingOnly(true); setHistSearch(''); go('orders'); }
     else if (key === 'out' || key === 'low') { setStockFilter(key); setFilter('all'); setSearch(''); go('products'); }
     else if (key === 'ventas') go('ventas');
@@ -11572,7 +11861,8 @@ function App() {
 
         {/* ── Inicio ── */}
         {activeTab === 'home' && (
-          <HomeTab name={String(session.name || USERS[session.username].name || '').split(' ')[0]} attention={attention} sales={computeSales(orders, products)} onGo={homeGo} mobile={isMobile} productsCount={products.length} />
+          <HomeTab name={String(session.name || USERS[session.username].name || '').split(' ')[0]} attention={attention} sales={computeSales(liveOrders, products)} onGo={homeGo} mobile={isMobile} productsCount={products.length}
+            dataState={dataState} onRetry={() => { setDataState('loading'); loadData(); }} />
         )}
 
         {/* ── Products tab ── */}
@@ -11722,17 +12012,31 @@ function App() {
         {activeTab === 'orders' && (() => {
           const ACTIVE_STATES  = ['Nuevo', 'Confirmado', 'En proceso', 'Enviado'];
           const DONE_STATES    = ['Entregado', 'Cancelado'];
-          const loteCount      = orders.filter(o => o.lote && ACTIVE_STATES.includes(o.estado || 'Nuevo')).length;
-          const loversMissCount = orders.filter(o => PREP_STATES.includes(o.estado || 'Nuevo') && loversMissingPieces(o) > 0).length;
-          const activeOrders   = orders.filter(o => ACTIVE_STATES.includes(o.estado || 'Nuevo') && (!loteOnly || o.lote) && (!loversMissingOnly || (PREP_STATES.includes(o.estado || 'Nuevo') && loversMissingPieces(o) > 0)) && orderMatchesSearch(o, histSearch));
-          const histOrders     = orders.filter(o => DONE_STATES.includes(o.estado || 'Nuevo') && orderMatchesSearch(o, histSearch));
+          const loteCount      = liveOrders.filter(o => o.lote && ACTIVE_STATES.includes(o.estado || 'Nuevo')).length;
+          const loversMissCount = liveOrders.filter(o => PREP_STATES.includes(o.estado || 'Nuevo') && loversMissingPieces(o) > 0).length;
+          const isPorCobrar    = o => (o.estado || 'Nuevo') !== 'Cancelado' && !isLoversBox(o) && pagoEstadoOf(o) === 'pendiente';
+          const porCobrarCount = liveOrders.filter(isPorCobrar).length;
+          const activeOrders   = liveOrders.filter(o => (pagoPendOnly ? isPorCobrar(o) : ACTIVE_STATES.includes(o.estado || 'Nuevo')) && (!loteOnly || o.lote) && (!loversMissingOnly || (PREP_STATES.includes(o.estado || 'Nuevo') && loversMissingPieces(o) > 0)) && orderMatchesSearch(o, histSearch));
+          const histOrders     = liveOrders.filter(o => DONE_STATES.includes(o.estado || 'Nuevo') && orderMatchesSearch(o, histSearch));
+          const archivedOrders = orders.filter(o => o.archivado && orderMatchesSearch(o, histSearch));
+          const cardProps = o => ({
+            order: o, orders: liveOrders, token: session.token, uspsDefault: shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage,
+            products, categories, stock, onStockRefresh: loadStock, notice: orderNotice[o.id],
+            onProductsChange: (ord, productos, full) => { if (full) replaceOrder(full); else setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, productos } : x)); },
+            onStatusChange: changeOrderState, onPrintSlip: ord => setSlipOrders([ord]),
+            onArchive: archiveOrder, onRestore: restoreOrder, onPagoChange: setPagoEstado,
+            onTrackingChange: (ord, tracking) => updateOrderRemote(ord, { tracking }),
+            onCarrierChange: (ord, carrier) => updateOrderRemote(ord, { carrier }),
+            onClienteUpdate: (ord, updates) => updateOrderRemote(ord, { cliente: updates }),
+            onLabelGenerated: (ord, data) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, tracking: data.tracking, carrier: 'USPS', labelBase64: data.labelBase64, labelStored: true } : x)); },
+          });
           const histFiltered   = histOrders.filter(o => {
             const oDate = o.fecha ? o.fecha.substring(0, 10) : '';
             const matchFrom = !histFrom || oDate >= histFrom;
             const matchTo   = !histTo   || oDate <= histTo;
             return matchFrom && matchTo;
           });
-          const histTotal = histFiltered.reduce((s, o) => s + (parseFloat(o.total) || 0), 0);
+          const histTotal = histFiltered.filter(o => (o.estado || 'Nuevo') !== 'Cancelado' && pagoEstadoOf(o) !== 'reembolsado').reduce((s, o) => s + (parseFloat(o.total) || 0), 0);
 
           return (
             <div>
@@ -11741,13 +12045,12 @@ function App() {
                 <div style={{ fontWeight: 800, fontSize: 18, color: '#1A1118' }}>Pedidos</div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                   <PickupTodayButton token={session.token} />
-                  <ClickNShipTools token={session.token} orders={orders} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
+                  <ClickNShipTools token={session.token} orders={liveOrders} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
                     onImported={(ord, tracking, markSent) => {
                       const missing = loversMissingPieces(ord);
                       const patch = { tracking, carrier: 'USPS', ...(markSent && !missing && ord.estado !== 'Entregado' ? { estado: 'Enviado' } : {}) };
                       if (missing) setSyncMsg('⚠️ ' + loversBlockMsg(ord) + ' Se pegó el tracking pero quedó sin marcar Enviado.');
-                      setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, ...patch } : x));
-                      updateOrderRemote(ord.id, patch);
+                      updateOrderRemote(ord, patch);
                     }} />
                   <button onClick={() => setShowOrderModal(true)}
                     style={{ padding: '10px 20px', background: 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', borderRadius: 99, fontWeight: 700, fontSize: 13, border: 'none', cursor: 'pointer', boxShadow: '0 4px 12px rgba(232,80,138,.3)' }}>
@@ -11775,7 +12078,7 @@ function App() {
 
               {/* Sub-nav Activos / Historial */}
               <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: '#F3EFF5', borderRadius: 12, padding: 4, width: 'fit-content', maxWidth: '100%', flexWrap: 'wrap' }}>
-                {[['active', '📦 Activos', activeOrders.length], ['board', '▦ Preparar (tablero)', 0], ['history', '📋 Historial', histOrders.length]].map(([v, label, count]) => (
+                {[['active', '📦 Activos', activeOrders.length], ['board', '▦ Preparar (tablero)', 0], ['history', '📋 Historial', histOrders.length], ['archived', 'Archivados', archivedOrders.length]].map(([v, label, count]) => (
                   <button key={v} onClick={() => setOrdersView(v)} aria-pressed={ordersView === v}
                     style={{ padding: '8px 18px', borderRadius: 9, border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: 13, fontFamily: 'inherit',
                       background: ordersView === v ? 'white' : 'transparent',
@@ -11792,6 +12095,13 @@ function App() {
                   <span style={{ flex: 1 }}>◇ {ordersHint}</span>
                   <button type="button" onClick={() => setOrdersHint('')} aria-label="Cerrar aviso" style={{ width: 40, height: 40, borderRadius: '50%', color: '#5B3F8A', fontWeight: 800 }}>✕</button>
                 </div>
+              )}
+              {ordersView === 'active' && (pagoPendOnly || porCobrarCount > 0) && (
+                <button type="button" onClick={() => setPagoPendOnly(v => !v)} aria-pressed={pagoPendOnly} data-testid="porCobrarFilter"
+                  style={{ marginBottom: 16, marginRight: 8, minHeight: 36, padding: '0 16px', borderRadius: 99, fontSize: 12, fontWeight: 700, fontFamily: 'inherit', cursor: 'pointer',
+                    background: pagoPendOnly ? '#B45309' : 'white', color: pagoPendOnly ? 'white' : '#B45309', border: '1.5px solid #B45309' }}>
+                  Por cobrar ({porCobrarCount}){pagoPendOnly ? ' · ver todos' : ''}
+                </button>
               )}
               {ordersView === 'active' && (loversMissingOnly || loversMissCount > 0) && (
                 <button type="button" onClick={() => setLoversMissingOnly(v => !v)} aria-pressed={loversMissingOnly} data-testid="loversMissingFilter"
@@ -11813,14 +12123,14 @@ function App() {
                 activeOrders.length === 0 ? (
                   <div style={{ textAlign: 'center', padding: '80px 0', color: '#767676' }}>
                     <div style={{ fontSize: 52, marginBottom: 12 }}>📦</div>
-                    <div style={{ fontSize: 16, marginBottom: 8 }}>{loversMissingOnly ? 'No hay cajas de Lovers sin piezas' : 'No hay pedidos activos'}</div>
+                    <div style={{ fontSize: 16, marginBottom: 8 }}>{pagoPendOnly ? 'No hay pedidos por cobrar' : loversMissingOnly ? 'No hay cajas de Lovers sin piezas' : 'No hay pedidos activos'}</div>
                     <div style={{ fontSize: 13, color: '#ccc', maxWidth: 300, margin: '0 auto' }}>
                       Los pedidos de Square y WhatsApp aparecen aquí automáticamente.
                     </div>
                   </div>
                 ) : (
                   <div>
-                    {ACTIVE_STATES.map(estado => {
+                    {(pagoPendOnly ? [...ACTIVE_STATES, 'Entregado'] : ACTIVE_STATES).map(estado => {
                       const grupo = activeOrders.filter(o => (o.estado || 'Nuevo') === estado);
                       if (grupo.length === 0) return null;
                       return (
@@ -11831,16 +12141,7 @@ function App() {
                           </div>
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 14 }}>
                             {grupo.map(o => (
-                              <OrderCard key={o.id} order={o} orders={orders} token={session.token} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
-                                products={products} categories={categories} stock={stock} onStockRefresh={loadStock}
-                                onProductsChange={(ord, productos) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, productos } : x)); }}
-                                onStatusChange={changeOrderState} onPrintSlip={ord => setSlipOrders([ord])}
-                                onDelete={ord => { setOrders(prev => prev.filter(x => x.id !== ord.id)); deleteOrderRemote(ord.id); }}
-                                onTrackingChange={(ord, tracking) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, tracking } : x)); updateOrderRemote(ord.id, { tracking }); }}
-                                onCarrierChange={(ord, carrier) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, carrier } : x)); updateOrderRemote(ord.id, { carrier }); }}
-                                onClienteUpdate={(ord, updates) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, cliente: { ...x.cliente, ...updates } } : x)); updateOrderRemote(ord.id, { cliente: updates }); }}
-                                onLabelGenerated={(ord, data) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, tracking: data.tracking, carrier: 'USPS', labelBase64: data.labelBase64, labelStored: true } : x)); }}
-                              />
+                              <OrderCard key={o.id} {...cardProps(o)} />
                             ))}
                           </div>
                         </div>
@@ -11853,7 +12154,21 @@ function App() {
               {/* Vista: Tablero de preparación (26 nov) */}
               {ordersView === 'board' && (
                 <FulfillmentBoard products={products} onMove={changeOrderState} onPrint={list => setSlipOrders(list)}
-                  orders={orders.filter(o => (!loteOnly || o.lote) && orderMatchesSearch(o, histSearch))} />
+                  orders={liveOrders.filter(o => (!loteOnly || o.lote) && orderMatchesSearch(o, histSearch))} />
+              )}
+
+              {/* Vista: Archivados (wave 1) — ocultos de todo lo demás, se pueden restaurar */}
+              {ordersView === 'archived' && (
+                <div data-testid="archivedView">
+                  <p style={{ fontSize: 12, color: '#7A6880', marginBottom: 12, lineHeight: 1.5 }}>Los pedidos archivados no cuentan en ventas, clientas ni pendientes. Al archivar se devolvió su stock; al restaurar se vuelve a descontar.</p>
+                  {archivedOrders.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '60px 0', color: '#767676', fontSize: 14 }}>No hay pedidos archivados.</div>
+                  ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 14 }}>
+                      {archivedOrders.map(o => <OrderCard key={o.id} {...cardProps(o)} />)}
+                    </div>
+                  )}
+                </div>
               )}
 
               {/* Vista: Historial */}
@@ -11882,7 +12197,7 @@ function App() {
                         <span style={{ color: '#6B7280' }}>Pedidos: </span><strong style={{ color: '#065F46' }}>{histFiltered.length}</strong>
                       </div>
                       <div style={{ background: '#FDF2F8', border: '1px solid #FBCFE8', borderRadius: 10, padding: '8px 16px', fontSize: 13 }}>
-                        <span style={{ color: '#6B7280' }}>Total cobrado: </span><strong style={{ color: '#9D174D' }}>${histTotal.toFixed(2)}</strong>
+                        <span style={{ color: '#6B7280' }}>Total cobrado (sin cancelados): </span><strong data-testid="histTotal" style={{ color: '#9D174D' }}>${histTotal.toFixed(2)}</strong>
                       </div>
                     </div>
                   )}
@@ -11909,16 +12224,7 @@ function App() {
                             </div>
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 14 }}>
                               {grupo.map(o => (
-                                <OrderCard key={o.id} order={o} orders={orders} token={session.token} uspsDefault={shipping.uspsDefaultPackage || DEFAULT_SHIPPING.uspsDefaultPackage}
-                                  products={products} categories={categories} stock={stock} onStockRefresh={loadStock}
-                                  onProductsChange={(ord, productos) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, productos } : x)); }}
-                                  onStatusChange={changeOrderState} onPrintSlip={ord => setSlipOrders([ord])}
-                                  onDelete={ord => { setOrders(prev => prev.filter(x => x.id !== ord.id)); deleteOrderRemote(ord.id); }}
-                                  onTrackingChange={(ord, tracking) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, tracking } : x)); updateOrderRemote(ord.id, { tracking }); }}
-                                  onCarrierChange={(ord, carrier) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, carrier } : x)); updateOrderRemote(ord.id, { carrier }); }}
-                                  onClienteUpdate={(ord, updates) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, cliente: { ...x.cliente, ...updates } } : x)); updateOrderRemote(ord.id, { cliente: updates }); }}
-                                  onLabelGenerated={(ord, data) => { setOrders(prev => prev.map(x => x.id === ord.id ? { ...x, tracking: data.tracking, carrier: 'USPS', labelBase64: data.labelBase64, labelStored: true } : x)); }}
-                                />
+                                <OrderCard key={o.id} {...cardProps(o)} />
                               ))}
                             </div>
                           </div>
@@ -11933,8 +12239,8 @@ function App() {
         })()}
 
         {/* ── Ventas / Clientas (26 nov) ── */}
-        {activeTab === 'ventas' && <SalesTab orders={orders} products={products} />}
-        {activeTab === 'clientas' && <CustomersTab orders={orders} />}
+        {activeTab === 'ventas' && <SalesTab orders={liveOrders} products={products} />}
+        {activeTab === 'clientas' && <CustomersTab orders={liveOrders} />}
         {slipOrders && <PackingSlipView orders={slipOrders} products={products} onClose={() => setSlipOrders(null)} />}
 
         {/* ── Landing tab ── */}
@@ -11999,6 +12305,22 @@ function App() {
         {activeTab === 'settings' && <MarginSetting token={session.token} margin={margin} onSaved={setMargin} />}
 
         {/* ── Modals ── */}
+        {pubConflict && (
+          <Modal onClose={() => setPubConflict(null)} labelledBy="pubConflictTitle" boxStyle={{ maxWidth: 440 }}>
+            <div data-testid="pubConflict">
+              <div id="pubConflictTitle" style={{ fontWeight: 800, fontSize: 17, color: '#1A1118', marginBottom: 8 }}>Otra persona publicó cambios mientras editabas</div>
+              <p style={{ fontSize: 13, color: '#5B4A63', lineHeight: 1.5, marginBottom: 16 }}>
+                No se publicó nada, para no borrar lo que publicó la otra persona. Puedo traer su versión y volver a aplicar encima tus cambios (productos nuevos, editados o borrados y los ajustes que tocaste). Después revisas y publicas.
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <button type="button" onClick={reapplyMyChanges} data-testid="pubReapply"
+                  style={{ minHeight: 48, borderRadius: 99, background: 'linear-gradient(135deg,#C0336E,#9B5DE5)', color: 'white', fontWeight: 800, fontSize: 14 }}>Recargar y volver a aplicar mis cambios</button>
+                <button type="button" onClick={() => setPubConflict(null)}
+                  style={{ minHeight: 44, borderRadius: 99, background: 'white', color: '#5B3F8A', border: '1.5px solid #D9C9EE', fontWeight: 700, fontSize: 13 }}>Ahora no (mis cambios siguen aquí)</button>
+              </div>
+            </div>
+          </Modal>
+        )}
         {showNtfyModal && <NtfyModal token={session.token} onClose={() => setShowNtfyModal(false)} />}
         {showOrderModal && <NewOrderModal open={showOrderModal} onClose={() => setShowOrderModal(false)} onSave={o => {
           apiOrderManual(session.token, o)
