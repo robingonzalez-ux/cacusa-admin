@@ -1369,7 +1369,988 @@ async function dupCandidates(q, items) {
   r.sort((a, b) => b.score - a.score);
   return r.slice(0, 3);
 }
-function ProductModal({ product, onSave, onClose, token, categories, materials, fbSurcharges = {}, fbMarkets = {}, allProducts = [], skuSeq = {}, onEnroll, onDupStock }) {
+// ── Ingreso de inventario (27 nov): calidad de foto, lote, precio desde el costo, dictado ──
+// Todo lo de esta sección corre en el teléfono y es gratis, salvo /product/describe (lote, con
+// el mismo tope diario de 40), /product/invoice y /product/count, que se llaman solo con un toque.
+
+// Foto (File) → canvas con el lado mayor ≤ maxPx (para huellas y calidad; la subida usa compressImage).
+function fileToCanvas(file, maxPx = 1024) {
+  return new Promise((resolve, reject) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    const t = setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} reject(new Error('La foto tardó demasiado o no se pudo leer (si es HEIC, cámbiala a JPG).')); }, 20000);
+    img.onerror = () => { clearTimeout(t); try { URL.revokeObjectURL(url); } catch (_) {} reject(new Error('No se pudo leer la foto (si es HEIC, cámbiala a JPG).')); };
+    img.onload = () => {
+      clearTimeout(t);
+      const w = img.naturalWidth, h = img.naturalHeight, k = Math.min(1, maxPx / Math.max(w, h));
+      const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(w * k)); cv.height = Math.max(1, Math.round(h * k));
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      try { URL.revokeObjectURL(url); } catch (_) {}
+      resolve(cv);
+    };
+    img.src = url;
+  });
+}
+// Imagen o canvas → JPEG base64 (sin prefijo) de lado mayor ≤ maxPx y ≤ maxBytes.
+function canvasJpegB64(src, maxPx, maxBytes) {
+  const w = src.naturalWidth || src.width, h = src.naturalHeight || src.height;
+  let side = Math.min(maxPx, Math.max(w, h));
+  for (let tries = 0; tries < 6; tries++) {
+    const k = side / Math.max(w, h), cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(w * k)); cv.height = Math.max(1, Math.round(h * k));
+    cv.getContext('2d').drawImage(src, 0, 0, cv.width, cv.height);
+    for (let q = 0.82; q >= 0.45; q -= 0.12) {
+      const b64 = cv.toDataURL('image/jpeg', q).split(',')[1];
+      if (b64.length * 0.75 <= maxBytes) return b64;
+    }
+    side = Math.round(side * 0.75);
+  }
+  throw new Error('No se pudo achicar la foto.');
+}
+
+// ── Aviso de calidad de foto (gratis, en el teléfono) ──
+// Medido en la zona de la pieza (u2netp en el lote; pieceBox en el formulario): nitidez = varianza
+// del laplaciano (photoQuality), oscura (luminancia media), quemada (píxeles de la pieza sin
+// detalle: los 3 canales ≥ 250) y pieza chica (área de la zona / área de la foto). Umbrales
+// calibrados con las fotos del catálogo (ver README "Aviso de calidad de foto").
+const PHOTO_Q = { blurLap: 40, darkLum: 62, burnFrac: 0.5, burnMinPx: 300, smallFrac: 0.005 }; // catálogo: nitidez mín. 50, quemado máx. 0,40, pieza mín. 0,0065
+function photoQualityCheck(img, box) {
+  const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+  const b = box === undefined ? pieceBox(img) : box;
+  const base = photoQuality(img, b ? b.map(v => Math.round(v)) : null);
+  // Quemada: entre los píxeles de la pieza (distintos del color del borde), cuántos no tienen detalle.
+  const S = 200 / Math.max(w, h), W = Math.max(8, Math.round(w * S)), H = Math.max(8, Math.round(h * S));
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d'); ctx.drawImage(img, 0, 0, W, H);
+  const d = ctx.getImageData(0, 0, W, H).data;
+  const br = [0, 0, 0]; let bn = 0;
+  for (let x = 0; x < W; x++) for (const y of [0, H - 1]) { const i = (y * W + x) * 4; br[0] += d[i]; br[1] += d[i + 1]; br[2] += d[i + 2]; bn++; }
+  for (let y = 0; y < H; y++) for (const x of [0, W - 1]) { const i = (y * W + x) * 4; br[0] += d[i]; br[1] += d[i + 1]; br[2] += d[i + 2]; bn++; }
+  br[0] /= bn; br[1] /= bn; br[2] /= bn;
+  const x0 = Math.max(0, Math.floor((b ? b[0] : 0) * S)), y0 = Math.max(0, Math.floor((b ? b[1] : 0) * S));
+  const x1 = Math.min(W, Math.ceil((b ? b[2] : w) * S)), y1 = Math.min(H, Math.ceil((b ? b[3] : h) * S));
+  let np = 0, nb = 0;
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+    const i = (y * W + x) * 4, dr = d[i] - br[0], dg = d[i + 1] - br[1], db = d[i + 2] - br[2];
+    if (Math.sqrt(dr * dr + dg * dg + db * db) < 40) continue; // fondo
+    np++; if (d[i] >= 250 && d[i + 1] >= 250 && d[i + 2] >= 250) nb++;
+  }
+  const burnt = np >= PHOTO_Q.burnMinPx * (W * H) / 40000 && nb / np >= PHOTO_Q.burnFrac;
+  const frac = b ? ((b[2] - b[0]) * (b[3] - b[1])) / (w * h) : 1;
+  const small = !!b && frac < PHOTO_Q.smallFrac;
+  // Nitidez en el recorte de la pieza llevado a 256 px (no depende de cuán grande salió la pieza).
+  let lapC = base.lap;
+  if (b) {
+    const mx = (b[2] - b[0]) * 0.1, my = (b[3] - b[1]) * 0.1, cx0 = Math.max(0, b[0] - mx), cy0 = Math.max(0, b[1] - my), cw = Math.min(w, b[2] + mx) - cx0, ch = Math.min(h, b[3] + my) - cy0;
+    if (cw > 8 && ch > 8) {
+      const k = 256 / Math.max(cw, ch), CW = Math.max(8, Math.round(cw * k)), CH = Math.max(8, Math.round(ch * k));
+      const c2 = document.createElement('canvas'); c2.width = CW; c2.height = CH; const x2 = c2.getContext('2d'); x2.drawImage(img, cx0, cy0, cw, ch, 0, 0, CW, CH);
+      const dd = x2.getImageData(0, 0, CW, CH).data, gg = new Float32Array(CW * CH);
+      for (let p = 0, i = 0; p < CW * CH; p++, i += 4) gg[p] = 0.299 * dd[i] + 0.587 * dd[i + 1] + 0.114 * dd[i + 2];
+      let nn = 0, m1 = 0, m2 = 0;
+      for (let y = 1; y < CH - 1; y++) for (let x = 1; x < CW - 1; x++) { const p = y * CW + x, l = gg[p - 1] + gg[p + 1] + gg[p - CW] + gg[p + CW] - 4 * gg[p]; nn++; m1 += l; m2 += l * l; }
+      if (nn) lapC = m2 / nn - (m1 / nn) * (m1 / nn);
+    }
+  }
+  const blurry = !base.dark && lapC < PHOTO_Q.blurLap;
+  const issues = [];
+  if (base.dark) issues.push({ k: 'dark', msg: 'Salió oscura' });
+  if (burnt) issues.push({ k: 'burnt', msg: 'La pieza salió quemada (muy brillante, sin detalle)' });
+  if (blurry) issues.push({ k: 'blur', msg: 'Salió movida o desenfocada' });
+  if (small) issues.push({ k: 'small', msg: 'La pieza se ve muy chica: acércate' });
+  return { lum: base.lum, lap: lapC, lap160: base.lap, burn: np ? nb / np : 0, frac, dark: base.dark, burnt, blurry, small, issues };
+}
+function qualityText(issues) { return issues.map(x => x.msg).join(' · '); }
+
+// ── Agrupar fotos de la misma pieza (lote) ──
+// Similitud entre 2 fotos = BATCH_PIECE_W × coseno de la huella solo de la pieza (u2netp + v3, la de
+// "¿ya existe?") + el resto × coseno de la foto entera (si alguna no tiene pieza aislada, solo la foto
+// entera). Si las fotos traen la hora de la toma (EXIF) y 2 fotos son seguidas y con ≤ BATCH_TIME_GAP
+// segundos de diferencia, + BATCH_TIME_BONUS (Robin toma las fotos de una pieza una tras otra).
+// Grupos por enlace completo (el par MENOS parecido de 2 grupos tiene que pasar BATCH_LINK: evita
+// cadenas de piezas distintas sobre el mismo mantel). Calibrado con las 30 fotos reales del taller
+// (15 piezas × 2, frente y otro ángulo; NO están en el repo): ver README "Ingreso por lote".
+const BATCH_LINK = 0.38, BATCH_PIECE_W = 0.3, BATCH_TIME_BONUS = 0.3, BATCH_TIME_GAP = 90;
+function batchPairSim(a, b) {
+  const full = dot(a.emb, b.emb);
+  if (a.piece && b.piece && a.pieceOk !== false && b.pieceOk !== false) return BATCH_PIECE_W * dot(a.piece, b.piece) + (1 - BATCH_PIECE_W) * full;
+  return full;
+}
+// qs: [{ emb, piece, pieceOk, t? (ms de la toma) }] → grupos: [[índices]] en el orden de las fotos.
+function clusterPhotos(qs, link = BATCH_LINK) {
+  const n = qs.length, S = [];
+  for (let i = 0; i < n; i++) { S.push(new Float32Array(n)); for (let j = 0; j < i; j++) { const s = batchPairSim(qs[i], qs[j]); S[i][j] = s; S[j][i] = s; } }
+  if (n > 1 && qs.every(q => Number.isFinite(q.t))) {
+    const ord = qs.map((q, i) => i).sort((x, y) => qs[x].t - qs[y].t);
+    for (let k = 1; k < n; k++) { const i = ord[k - 1], j = ord[k]; if (Math.abs(qs[j].t - qs[i].t) <= BATCH_TIME_GAP * 1000) { S[i][j] += BATCH_TIME_BONUS; S[j][i] += BATCH_TIME_BONUS; } }
+  }
+  let groups = qs.map((_, i) => [i]);
+  for (;;) {
+    let best = -Infinity, bi = -1, bj = -1;
+    for (let a = 0; a < groups.length; a++) for (let b = a + 1; b < groups.length; b++) {
+      let s = Infinity; for (const i of groups[a]) for (const j of groups[b]) if (S[i][j] < s) s = S[i][j];
+      if (s > best) { best = s; bi = a; bj = b; }
+    }
+    if (bi < 0 || best < link) break;
+    groups[bi] = groups[bi].concat(groups[bj]).sort((x, y) => x - y);
+    groups.splice(bj, 1);
+  }
+  return groups.sort((x, y) => x[0] - y[0]);
+}
+// Hora de la toma (EXIF DateTimeOriginal) de un JPEG, en ms locales; null si no hay (el resto sigue igual).
+async function exifCaptureTime(file) {
+  try {
+    if (!/jpe?g/i.test(file.type || '') && !/\.jpe?g$/i.test(file.name || '')) return null;
+    const v = new DataView(await file.slice(0, 131072).arrayBuffer());
+    if (v.getUint16(0) !== 0xFFD8) return null;
+    let o = 2;
+    while (o + 4 < v.byteLength) {
+      const mk = v.getUint16(o), len = v.getUint16(o + 2);
+      if (mk === 0xFFE1 && v.getUint32(o + 4) === 0x45786966) {
+        const t0 = o + 10, le = v.getUint16(t0) === 0x4949, u16 = x => v.getUint16(x, le), u32 = x => v.getUint32(x, le);
+        const findTag = (ifd, tag) => { const nE = u16(t0 + ifd); for (let k = 0; k < nE; k++) { const e = t0 + ifd + 2 + k * 12; if (u16(e) === tag) return e; } return -1; };
+        let e = findTag(u32(t0 + 4), 0x8769); if (e < 0) return null;
+        e = findTag(u32(e + 8), 0x9003); if (e < 0) return null;
+        const off = t0 + u32(e + 8); let str = ''; for (let k = 0; k < 19; k++) str += String.fromCharCode(v.getUint8(off + k));
+        const m = /^(\d{4}):(\d\d):(\d\d) (\d\d):(\d\d):(\d\d)/.exec(str);
+        return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime() : null;
+      }
+      if ((mk & 0xFF00) !== 0xFF00) return null;
+      o += 2 + len;
+    }
+  } catch (_) {}
+  return null;
+}
+
+// ── Precio sugerido desde el costo ──
+const MARGIN_DEFAULT = 3;
+// Estilo del catálogo: si la mayoría de los precios termina en .99 → x.99; si no, dólares enteros.
+// Además se prefiere un final que el catálogo ya usa (p. ej. 0, 2, 5, 8) a ±3 del valor.
+function catalogPriceStyle(products) {
+  const ps = (products || []).map(p => Number(p.price)).filter(x => x > 0);
+  const c99 = ps.filter(x => Math.abs(x - Math.floor(x) - 0.99) < 0.005).length;
+  const ends = new Map(); for (const x of ps) { const d = Math.floor(x + 0.01) % 10; ends.set(d, (ends.get(d) || 0) + 1); }
+  const common = [...ends].filter(([, k]) => ps.length && k / ps.length >= 0.05).map(([d]) => d);
+  return { cents99: ps.length > 0 && c99 / ps.length > 0.5, ends: common };
+}
+function roundCatalogPrice(x, style) {
+  if (!(x > 0)) return null;
+  const st = style || { cents99: false, ends: [] };
+  let best = Math.max(1, Math.round(x));
+  if (st.ends && st.ends.length) {
+    let bd = Infinity;
+    for (let c = Math.max(1, Math.floor(x) - 3); c <= Math.ceil(x) + 3; c++) {
+      if (!st.ends.includes(c % 10)) continue;
+      const dd = Math.abs(c - x) - (c >= x ? 0.001 : 0); // empate: hacia arriba
+      if (dd < bd) { bd = dd; best = c; }
+    }
+  }
+  return st.cents99 ? Math.round((best - 0.01) * 100) / 100 : best;
+}
+function priceFromCost(cost, margin, products) {
+  const c = Number(cost), m = Number(margin) || MARGIN_DEFAULT;
+  if (!(c > 0)) return null;
+  return roundCatalogPrice(c * m, catalogPriceStyle(products));
+}
+
+// ── Sugerencia de ficha desde la foto (la usan "✦ Sugerir datos" y el lote) ──
+// Vecinas por la huella de la pieza → categoría/material/color/precio; nombre y descripción con
+// /product/describe (Haiku) si useAi, o plantillas. → { sug, close, hasClose, ai, note, aiStatus,
+// category, material, catAi, matAi }. aiStatus: 'ok' | 'cap' (429) | 'off' (503) | 'err' | 'skip'.
+function describeImageB64(img) {
+  const k = Math.min(1, 768 / Math.max(img.naturalWidth || img.width, img.naturalHeight || img.height));
+  const cv = document.createElement('canvas'); cv.width = Math.round((img.naturalWidth || img.width) * k); cv.height = Math.round((img.naturalHeight || img.height) * k);
+  cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+  let qual = 0.8, b64 = cv.toDataURL('image/jpeg', qual).split(',')[1];
+  while (b64.length * 0.75 > 600 * 1024 && qual > 0.4) { qual -= 0.1; b64 = cv.toDataURL('image/jpeg', qual).split(',')[1]; }
+  return b64;
+}
+async function suggestCore({ img, q, items, cats, mats, token, useAi = true, onPhase }) {
+  const sug = localProductSuggestion(q, items, { tone: photoTone(img) });
+  if (!sug) throw new Error('No hay piezas del catálogo para comparar.');
+  const top3 = sug.neighbors.slice(0, 3);
+  const topScore = sug.neighbors.length ? sug.neighbors[0].score : -2;
+  const close = sug.neighbors.filter(x => x.score >= SUGGEST_MIN && x.score >= topScore - SUGGEST_GAP);
+  const hasClose = close.length > 0;
+  let ai = null, note = '', aiStatus = 'skip';
+  if (useAi) {
+    try {
+      const b64 = describeImageB64(img);
+      if (onPhase) onPhase('Escribiendo nombre y descripción…');
+      const r = await apiCall('product/describe', { token, image: b64, mediaType: 'image/jpeg', neighborIds: top3.map(x => String(x.p.id)), hints: hasClose ? { category: sug.category, material: sug.material } : {} });
+      ai = r && r.suggestion && typeof r.suggestion.name === 'string' && r.suggestion.name.trim() ? r.suggestion : null;
+      aiStatus = ai ? 'ok' : 'err';
+      if (!ai) note = 'IA no disponible, sugerencia básica';
+    } catch (e) {
+      aiStatus = e && e.status === 503 ? 'off' : e && e.status === 429 ? 'cap' : 'err';
+      note = aiStatus === 'off' ? 'Sugerencia básica (IA no activada)' : aiStatus === 'cap' ? 'Sugerencia básica (límite de hoy)' : 'IA no disponible, sugerencia básica';
+    }
+  }
+  // Categoría y material: el voto local manda si es claro; si no, lo de la IA (si es válido).
+  const catAi = !!ai && (!hasClose || sug.catShare < SUGGEST_STRONG) && cats.includes(ai.category);
+  const matAi = !!ai && (!hasClose || sug.matShare < SUGGEST_STRONG) && mats.includes(ai.material);
+  return { sug, close, hasClose, ai, note, aiStatus, category: catAi ? ai.category : sug.category, material: matAi ? ai.material : sug.material, catAi, matAi };
+}
+
+// ── Dictado por voz (Web Speech API, gratis, sin llamadas) ──
+// Convierte números dichos en palabras ("doce noventa y nueve", "dos con cincuenta") y saca
+// nombre, cantidad, costo, precio, color y talla con expresiones regulares locales.
+function speechSupported() { return typeof window !== 'undefined' && !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
+function speechLang() { const l = (navigator.language || '').toLowerCase(); return l === 'es-us' ? 'es-US' : 'es-EC'; }
+const ES_UNITS = { cero: 0, uno: 1, una: 1, un: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5, seis: 6, siete: 7, ocho: 8, nueve: 9, diez: 10, once: 11, doce: 12, trece: 13, catorce: 14, quince: 15,
+  dieciseis: 16, diecisiete: 17, dieciocho: 18, diecinueve: 19, veinte: 20, veintiuno: 21, veintiun: 21, veintiuna: 21, veintidos: 22, veintitres: 23, veinticuatro: 24, veinticinco: 25,
+  veintiseis: 26, veintisiete: 27, veintiocho: 28, veintinueve: 29 };
+const ES_TENS = { treinta: 30, cuarenta: 40, cincuenta: 50, sesenta: 60, setenta: 70, ochenta: 80, noventa: 90 };
+const ES_HUNDREDS = { cien: 100, ciento: 100, doscientos: 200, doscientas: 200, trescientos: 300, trescientas: 300, cuatrocientos: 400, quinientos: 500, seiscientos: 600, setecientos: 700, ochocientos: 800, novecientos: 900 };
+const ES_COLORS = [['oro rosa', 'oro rosa'], ['dorado', 'dorado'], ['dorada', 'dorado'], ['plateado', 'plateado'], ['plateada', 'plateado'], ['plata', 'plateado'], ['rosado', 'rosado'], ['rosada', 'rosado'], ['rosa', 'rosado'],
+  ['negro', 'negro'], ['negra', 'negro'], ['blanco', 'blanco'], ['blanca', 'blanco'], ['rojo', 'rojo'], ['roja', 'rojo'], ['azul', 'azul'], ['celeste', 'celeste'], ['verde', 'verde'], ['morado', 'morado'], ['morada', 'morado'], ['lila', 'lila'], ['violeta', 'violeta'], ['turquesa', 'turquesa']];
+const COLOR_TO_FALLBACK = { dorado: 'gold', 'oro rosa': 'rose', rosado: 'rose', morado: 'violet', violeta: 'violet', lila: 'violet', azul: 'sky', celeste: 'sky', turquesa: 'sky' };
+function deaccent(s) { return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase(); }
+// "doce noventa y nueve" → "12 99"; "un anillo" no se toca (un/una/uno solo antes de unidad/dólar).
+function spokenNumbersToDigits(text) {
+  const toks = deaccent(text).replace(/(\d),(\d)/g, '$1.$2').replace(/\$\s*/g, ' dolares_pre ').replace(/[^a-z0-9.\s_]/g, ' ').split(/\s+/).filter(Boolean);
+  const out = [];
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    const isNumWord = w => w in ES_UNITS || w in ES_TENS || w in ES_HUNDREDS || w === 'mil';
+    if (!isNumWord(t)) { out.push(t); continue; }
+    if ((t === 'un' || t === 'una' || t === 'uno') && !/^(unidad|pieza|par|dolar|dolares|centavo)/.test(toks[i + 1] || '') && !(i > 0 && /^(con|y|cantidad|stock|costo|precio)$/.test(toks[i - 1]))) { out.push(t); continue; }
+    let total = 0, cur = 0, j = i;
+    while (j < toks.length) {
+      const w = toks[j];
+      if (w in ES_HUNDREDS) cur += ES_HUNDREDS[w];
+      else if (w in ES_TENS) { cur += ES_TENS[w]; if (toks[j + 1] === 'y' && toks[j + 2] in ES_UNITS && ES_UNITS[toks[j + 2]] < 10) { cur += ES_UNITS[toks[j + 2]]; j += 2; } }
+      else if (w in ES_UNITS) cur += ES_UNITS[w];
+      else if (w === 'mil') { total += (cur || 1) * 1000; cur = 0; }
+      else break;
+      j++;
+      // "doce noventa": dos números seguidos sin "y" → números distintos (dólares y centavos)
+      const nx = toks[j];
+      if (nx && (nx in ES_UNITS || nx in ES_TENS) && !(toks[j - 1] in ES_HUNDREDS) && !(toks[j - 1] === 'mil')) break;
+    }
+    out.push(String(total + cur));
+    i = j - 1;
+  }
+  return out.join(' ').replace(/dolares_pre\s+(\d+(?:\.\d+)?)/g, '$1 dolares');
+}
+// Monto después de una palabra clave: "12.99", "12 99", "12 con 99", "12 dolares con 50 centavos", "12 y 50".
+function amountAfter(s, keys) {
+  const re = new RegExp('(?:' + keys + ')\\s+(?:(?:de|a|en|es|son|por|unitario|cada uno|cada una|me costo|venta)\\s+)*(\\d+(?:\\.\\d{1,2})?)(?:\\s*dolar(?:es)?)?(?:\\s+(?:con\\s+|y\\s+)?(\\d{1,2})(?:\\s*centavos?)?(?=\\s|$))?');
+  const m = re.exec(s);
+  if (!m) return null;
+  let v = parseFloat(m[1]);
+  if (m[2] && !m[1].includes('.')) v += parseInt(m[2], 10) / (m[2].length === 1 ? 10 : 100);
+  return Math.round(v * 100) / 100;
+}
+const DICT_KEYS = /^(cantidad|stock|unidad|unidades|piezas?|par|pares|dolar|dolares|costo|costo unitario|me costo|costo de|cuesta|precio|precio de venta|venderlo|vender|venta|talla|medida|tamano|color)\b/;
+function parseDictation(text) {
+  const raw = String(text || '').trim();
+  const s = spokenNumbersToDigits(raw);
+  const out = {};
+  let m = /(?:cantidad|stock)\s+(?:de\s+)?(\d+)/.exec(s) || /(\d+)\s+(?:unidad(?:es)?|piezas?|par(?:es)?)\b/.exec(s);
+  if (m) out.qty = Math.min(9999, parseInt(m[1], 10));
+  const cost = amountAfter(s, 'costo unitario|costo|me costo|costaron|costo de compra|cuesta|compre a|comprado a');
+  if (cost != null) out.cost = cost;
+  const price = amountAfter(s, 'precio de venta|precio|vender a|venderlo a|venderla a|venta a|venta');
+  if (price != null) out.price = price;
+  m = /(?:talla|medida|tamano)\s+(?:de\s+)?(\d+(?:\.\d+)?(?:\s*(?:cm|centimetros|mm|milimetros|pulgadas))?|pequen[ao]|median[ao]|grande|unica|ajustable|[a-z]{1,2}\b(?!\s*\d))/.exec(s);
+  if (m) out.size = m[1].replace(/^pequen([ao])$/, 'pequeñ$1').replace(/^unica$/, 'única').replace(/centimetros/, 'cm').replace(/milimetros/, 'mm').trim().replace(/^(s|m|l|xs|xl)$/i, x => x.toUpperCase());
+  const ds = deaccent(raw);
+  m = /\bcolor\s+([a-z]+(?:\s+rosa)?)/.exec(ds);
+  const colorWord = m ? m[1] : (ES_COLORS.find(([w]) => new RegExp('\\b' + w + '\\b').test(ds)) || [])[0];
+  if (colorWord) { const c = ES_COLORS.find(([w]) => w === colorWord || colorWord.startsWith(w)); out.color = c ? c[1] : colorWord; }
+  // Nombre: lo que se dijo antes de la primera palabra clave (o después de "nombre"/"se llama").
+  let nameSrc = raw;
+  const nm = /\b(?:nombre|se llama)\s*:?\s*(.+)/i.exec(raw);
+  if (nm) nameSrc = nm[1];
+  const words = nameSrc.split(/\s+/), keep = [];
+  const numWord = dw => /^\d/.test(dw) || dw in ES_TENS || dw in ES_HUNDREDS || (dw in ES_UNITS && !/^(un|una|uno)$/.test(dw)) || dw === 'mil';
+  for (const w of words) {
+    const dw = deaccent(w).replace(/[^a-z0-9]/g, '');
+    if (DICT_KEYS.test(dw) || (numWord(dw) && keep.length)) break;
+    keep.push(w);
+  }
+  let name = keep.join(' ').replace(/[.,;:]+$/, '').replace(/^(un|una|el|la)\s+/i, '');
+  for (let k = 0; k < 3; k++) name = name.replace(/[\s,]+(de|a|en|con|y|un|una)$/i, '').replace(/[.,;:]+$/, '').trim();
+  if (name && !/^\d+$/.test(name)) out.name = name.charAt(0).toUpperCase() + name.slice(1);
+  return out;
+}
+
+// ── Revisión antes de publicar (gratis) ──
+const COLOR_EMOJI_RE = /[\p{Extended_Pictographic}\u{FE0F}]/u;
+function hasColorEmoji(s) { return [...String(s || '')].some(ch => COLOR_EMOJI_RE.test(ch) && !/[©®™]/.test(ch)); }
+function median(xs) { const a = xs.filter(x => Number.isFinite(x)).sort((x, y) => x - y); if (!a.length) return null; const h = a.length >> 1; return a.length % 2 ? a[h] : (a[h - 1] + a[h]) / 2; }
+// Precio de referencia: mediana de las piezas parecidas (huella de pieza, si el identificador ya preparó
+// el catálogo en esta sesión: nunca fuerza la descarga); si no, de las de la misma categoría y material.
+function referencePrice(p, products, pieceItems) {
+  const id = String(p.id);
+  if (pieceItems) {
+    const me = pieceItems.find(it => String(it.p.id) === id);
+    const v = me && me.piece && me.piece.anchor;
+    if (v) {
+      const close = rankPiece(v, pieceItems.filter(it => String(it.p.id) !== id), 7).filter(x => x.score >= SUGGEST_MIN);
+      const pr = close.map(x => Number(x.p.price)).filter(x => x > 0);
+      if (pr.length >= 2) return { median: median(pr), n: pr.length, by: 'parecidas' };
+    }
+  }
+  const same = (products || []).filter(x => String(x.id) !== id && x.available !== false && x.category === p.category && (x.material || '') === (p.material || '') && Number(x.price) > 0);
+  if (same.length >= 3) return { median: median(same.map(x => Number(x.price))), n: same.length, by: 'misma categoría y material' };
+  return null;
+}
+// → [{ p, isNew, warnings: [texto] }] solo de los productos nuevos o cambiados que tienen algo.
+function prePublishWarnings({ products, baseProds, stock, pendingStock, pieceItems }) {
+  const out = [];
+  for (const p of products || []) {
+    const id = String(p.id), before = baseProds ? baseProds.get(id) : undefined;
+    if (before != null && before === JSON.stringify(p)) continue;
+    // Solo cambió "similar" (Actualizar recomendaciones / al publicar): no es una edición de la ficha.
+    if (before != null) { try { const b = JSON.parse(before); delete b.similar; const { similar, ...rest } = p; if (JSON.stringify(b) === JSON.stringify(rest)) continue; } catch (_) {} }
+    const isNew = before == null, w = [];
+    if (!String(p.name_en || '').trim() || !String(p.description_en || '').trim()) w.push('Falta el texto en inglés' + (!String(p.name_en || '').trim() ? ' (nombre)' : ' (descripción)') + ': se traducirá solo al publicar; revísalo.');
+    if (hasColorEmoji(p.name) || hasColorEmoji(p.description) || hasColorEmoji(p.name_en) || hasColorEmoji(p.description_en)) w.push('Tiene emojis de color en el nombre o la descripción (usa solo ♡ ✦ ◇ ✧ ✓ ✕).');
+    if (!String(p.imageUrl || '').trim()) w.push('No tiene foto principal.');
+    const price = Number(p.price), ref = price > 0 ? referencePrice(p, products, pieceItems) : null;
+    if (ref && ref.median > 0 && (price > 2 * ref.median || price < 0.5 * ref.median)) w.push(`Precio $${price} lejos de las piezas ${ref.by} (mediana $${Math.round(ref.median)} de ${ref.n}).`);
+    const qty = pendingStock && pendingStock[id] != null ? pendingStock[id] : (stock && Number.isInteger(stock[id]) ? stock[id] : null);
+    if (isNew && qty === 0) w.push('Producto nuevo con stock 0 (saldrá agotado).');
+    if (w.length) out.push({ p, isNew, warnings: w });
+  }
+  return out;
+}
+
+// ── Stock de productos nuevos (todavía sin publicar) ──
+// /stock/set solo acepta productos que ya están en el catálogo publicado (la tienda tarda 1–2 min),
+// así que la cantidad de una pieza nueva queda pendiente en este teléfono y se manda después de
+// publicar (se reintenta al cargar el stock hasta que entre).
+const PENDING_STOCK_KEY = 'cacusa-admin-pending-stock';
+function pendingStockRead() { try { const o = JSON.parse(localStorage.getItem(PENDING_STOCK_KEY) || '{}'); return o && typeof o === 'object' ? o : {}; } catch (_) { return {}; } }
+function pendingStockWrite(o) { try { if (Object.keys(o).length) localStorage.setItem(PENDING_STOCK_KEY, JSON.stringify(o)); else localStorage.removeItem(PENDING_STOCK_KEY); } catch (_) {} }
+
+// Factura → piezas del lote: palabras en común (raíz de 4 letras, sin tildes) entre la línea y el nombre.
+const INV_SYN = { earring: 'aret', ring: 'anil', necklace: 'cade', chain: 'cade', bracelet: 'puls', collar: 'cade', argolla: 'aret', topo: 'aret', topos: 'aret', dije: 'dije', pendant: 'dije' };
+function invTokens(s) {
+  return new Set(deaccent(s).split(/[^a-z0-9]+/).filter(w => w.length >= 3 && !/^(con|del|las|los|para|una|uno|unid|und|pcs|par)$/.test(w)).map(w => INV_SYN[w] || w.slice(0, 4)));
+}
+function invoiceMatch(lines, groups) {
+  const gt = groups.map(g => invTokens(g.label));
+  const pairs = [];
+  lines.forEach((l, i) => { const lt = invTokens(l.description); gt.forEach((t, j) => { let n = 0; for (const w of lt) if (t.has(w)) n++; if (n) pairs.push({ i, j, s: n / Math.sqrt(lt.size * t.size || 1) }); }); });
+  pairs.sort((a, b) => b.s - a.s);
+  const li = new Map(), used = new Set();
+  for (const x of pairs) if (!li.has(x.i) && !used.has(x.j) && x.s >= 0.25) { li.set(x.i, x.j); used.add(x.j); }
+  return lines.map((_, i) => li.has(i) ? li.get(i) : -1);
+}
+
+// Aviso de calidad (no bloquea): lista de problemas + "Repetir foto".
+function QualityWarn({ issues, onRetake, testid, compact }) {
+  if (!issues || !issues.length) return null;
+  return (
+    <div role="status" aria-live="polite" data-testid={testid || 'qualityWarn'} style={{ marginTop: compact ? 4 : 8, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 10, padding: compact ? '4px 8px' : '8px 10px', fontSize: compact ? 11 : 12, color: '#92400E', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+      <span style={{ flex: 1, minWidth: 0 }}><span aria-hidden="true">◇ </span>{qualityText(issues)}{compact ? '' : '. Puedes seguir igual.'}</span>
+      {onRetake && <button type="button" onClick={onRetake} style={{ minHeight: compact ? 32 : 36, padding: '0 12px', borderRadius: 99, border: '1.5px solid #FDBA74', background: 'white', color: '#9A3412', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>Repetir foto</button>}
+    </div>
+  );
+}
+
+// "Contar unidades con foto" (/product/count, Haiku, tope 100/día): una foto → número → Robin confirma.
+function CountPhotoButton({ token, hint, onUse, testid = 'countBtn', small }) {
+  const ref = useRef();
+  const [st, setSt] = useState(null); // { busy } | { count, by_color, draft } | { err }
+  const pick = async e => {
+    const f = e.target.files && e.target.files[0]; e.target.value = '';
+    if (!f) return;
+    setSt({ busy: true });
+    try {
+      const cv = await fileToCanvas(f, 1280);
+      const b64 = canvasJpegB64(cv, 1024, 290 * 1024);
+      const r = await apiCall('product/count', { token, image: b64, mediaType: 'image/jpeg', hint: hint || undefined });
+      setSt({ count: r.count, by_color: r.by_color || [], draft: String(r.count) });
+    } catch (e2) {
+      setSt({ err: e2 && e2.status === 429 ? 'Se alcanzó el límite de conteos de hoy: cuéntalas a mano.' : e2 && e2.status === 503 ? 'Contar con IA no está activado todavía.' : 'No se pudo contar: ' + ((e2 && e2.message) || 'error') });
+    }
+  };
+  const n = st && st.draft != null ? Number(st.draft) : NaN;
+  return (
+    <>
+      <input ref={ref} type="file" accept="image/*" onChange={pick} style={{ display: 'none' }} aria-label="Foto para contar unidades" />
+      <button type="button" data-testid={testid} onClick={() => ref.current.click()} disabled={st && st.busy} aria-busy={!!(st && st.busy)}
+        style={{ minHeight: small ? 36 : 44, padding: '0 12px', borderRadius: 99, border: '1.5px solid #D9C9EE', background: 'white', color: '#5B3F8A', fontWeight: 700, fontSize: 12, cursor: 'pointer', whiteSpace: 'nowrap' }}>
+        {st && st.busy ? 'Contando…' : '✦ Contar unidades con foto'}
+      </button>
+      {st && !st.busy && (
+        <Modal onClose={() => setSt(null)} labelledBy="countTitle" boxStyle={{ maxWidth: 360 }}>
+          <h3 id="countTitle" style={{ fontSize: 17, fontWeight: 800, marginBottom: 10 }}>Contar unidades</h3>
+          {st.err ? <div role="alert" style={{ fontSize: 13, color: '#B91C1C' }}>{st.err}</div> : (
+            <div data-testid="countResult">
+              <div role="status" style={{ fontSize: 14, color: '#1A1118', marginBottom: 8 }}>Conté <b>{st.count}</b> unidad{st.count === 1 ? '' : 'es'}{st.by_color.length ? ': ' + st.by_color.map(c => c.color + ' ' + c.count).join(', ') : ''}.</div>
+              <label htmlFor="countDraft" style={{ fontSize: 12, fontWeight: 700, color: '#5B4A63' }}>Revisa o corrige el número</label>
+              <input id="countDraft" type="number" inputMode="numeric" min={0} max={9999} value={st.draft} onChange={e => setSt(s => ({ ...s, draft: e.target.value }))}
+                style={{ display: 'block', width: 120, marginTop: 4, padding: '8px 10px', border: '1.5px solid #E5DDEA', borderRadius: 8, fontSize: 15 }} />
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+            <button type="button" onClick={() => setSt(null)} style={{ flex: 1, minHeight: 44, borderRadius: 99, border: '1.5px solid #ddd', background: 'white', fontWeight: 700 }}>Cancelar</button>
+            {!st.err && <button type="button" data-testid="countUse" disabled={!(Number.isInteger(n) && n >= 0 && n <= 9999)} onClick={() => { onUse(n); setSt(null); }}
+              style={{ flex: 2, minHeight: 44, borderRadius: 99, border: 'none', background: 'linear-gradient(135deg,#C0336E,#9B5DE5)', color: 'white', fontWeight: 800 }}>Usar {Number.isInteger(n) ? n : ''} como stock</button>}
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+// Dictado por voz (solo si el navegador tiene Web Speech API). onResult(texto, campos).
+function DictateButton({ onResult }) {
+  const [on, setOn] = useState(false);
+  const [msg, setMsg] = useState('');
+  const recRef = useRef(null);
+  if (!speechSupported()) return null;
+  const start = () => {
+    if (on) { try { recRef.current && recRef.current.stop(); } catch (_) {} return; }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const rec = new SR(); recRef.current = rec;
+    rec.lang = speechLang(); rec.interimResults = false; rec.continuous = false; rec.maxAlternatives = 1;
+    rec.onresult = e => {
+      const text = Array.from(e.results || []).map(r => r[0] && r[0].transcript).filter(Boolean).join(' ');
+      const f = parseDictation(text);
+      setMsg('Escuché: "' + text + '"');
+      onResult(text, f);
+    };
+    rec.onerror = e => setMsg(e && e.error === 'not-allowed' ? 'Permite el micrófono para dictar.' : 'No se entendió, intenta de nuevo.');
+    rec.onend = () => setOn(false);
+    try { rec.start(); setOn(true); setMsg('Escuchando… di por ejemplo: "anillo corazón dorado, cantidad 12, costo 2,50, precio 25, talla 7"'); } catch (_) { setOn(false); }
+  };
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <button type="button" data-testid="dictateBtn" onClick={start} aria-pressed={on}
+        style={{ minHeight: 44, padding: '0 16px', borderRadius: 99, border: '1.5px solid ' + (on ? '#C0336E' : '#D9C9EE'), background: on ? '#FCE7F0' : 'white', color: on ? '#C0336E' : '#5B3F8A', fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
+        {on ? '● Escuchando… (toca para terminar)' : '◉ Dictar datos'}
+      </button>
+      {msg && <div role="status" aria-live="polite" data-testid="dictateMsg" style={{ fontSize: 11.5, color: '#5B4A63', marginTop: 6 }}>{msg}</div>}
+    </div>
+  );
+}
+
+// Margen de "precio sugerido = costo × margen" (Ajustes). Privado: se guarda en el Worker (/cost/set).
+function MarginSetting({ token, margin, onSaved }) {
+  const [draft, setDraft] = useState(String(margin || MARGIN_DEFAULT));
+  const [st, setSt] = useState('');
+  useEffect(() => { setDraft(String(margin || MARGIN_DEFAULT)); }, [margin]);
+  const save = async () => {
+    const m = Number(String(draft).replace(',', '.'));
+    if (!(m >= 1 && m <= 20)) { setSt('Usa un número entre 1 y 20'); return; }
+    setSt('Guardando…');
+    try { const r = await apiCall('cost/set', { token, margin: m }); onSaved(r.margin || m); setSt('✓ Guardado'); }
+    catch (e) { setSt('No se guardó (' + ((e && e.message) || 'error') + ')'); }
+  };
+  return (
+    <section data-testid="marginSetting" style={{ background: 'white', borderRadius: 14, padding: 16, boxShadow: '0 1px 6px rgba(0,0,0,.06)', marginTop: 16, maxWidth: 560 }}>
+      <h3 style={{ fontSize: 15, fontWeight: 800, marginBottom: 4 }}>Margen para el precio sugerido</h3>
+      <p style={{ fontSize: 12, color: '#7A6880', marginBottom: 10 }}>Precio sugerido = costo × margen, redondeado como los precios de tu catálogo. El costo y el margen son privados: nunca salen en la tienda.</p>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <label htmlFor="marginInput" style={{ fontSize: 13, fontWeight: 700, color: '#5B4A63' }}>Margen ×</label>
+        <input id="marginInput" type="number" inputMode="decimal" min={1} max={20} step={0.1} value={draft} onChange={e => setDraft(e.target.value)}
+          style={{ width: 90, padding: '8px 10px', border: '1.5px solid #E5DDEA', borderRadius: 8, fontSize: 15 }} />
+        <button type="button" onClick={save} style={{ minHeight: 40, padding: '0 16px', borderRadius: 99, border: 'none', background: 'linear-gradient(135deg,#C0336E,#9B5DE5)', color: 'white', fontWeight: 800 }}>Guardar</button>
+        <span role="status" aria-live="polite" style={{ fontSize: 12, color: st.startsWith('✓') ? '#15803D' : '#7A6880' }}>{st}</span>
+      </div>
+    </section>
+  );
+}
+
+// Revisión antes de publicar: avisos por producto, no bloquea.
+function PrePublishModal({ items, onPublish, onReview, onEdit }) {
+  return (
+    <Modal onClose={onReview} labelledBy="prePubTitle" overlayStyle={{ alignItems: 'flex-start', overflowY: 'auto' }} boxStyle={{ maxWidth: 520, marginTop: 20, padding: 20 }}>
+      <h2 id="prePubTitle" style={{ fontSize: 18, fontWeight: 800, marginBottom: 4 }}>Antes de publicar</h2>
+      <p style={{ fontSize: 12.5, color: '#7A6880', marginBottom: 12 }}>Revisé {items.length === 1 ? 'un producto nuevo o cambiado que tiene' : items.length + ' productos nuevos o cambiados que tienen'} algo para mirar. Nada de esto impide publicar.</p>
+      <ul data-testid="prePubList" style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 8, maxHeight: '55vh', overflowY: 'auto' }}>
+        {items.map(({ p, isNew, warnings }) => (
+          <li key={p.id} style={{ background: '#FAF7FB', borderRadius: 12, padding: '10px 12px' }}>
+            <button type="button" onClick={() => onEdit(p)} style={{ background: 'none', border: 'none', padding: 0, textAlign: 'left', fontWeight: 800, fontSize: 13.5, color: '#5B3F8A', cursor: 'pointer', textDecoration: 'underline' }}>
+              {(normalizeSku(p.sku) ? normalizeSku(p.sku) + ' · ' : '') + (p.name || 'Sin nombre')}
+            </button>
+            <span style={{ fontSize: 11, color: '#7A6880', marginLeft: 6 }}>{isNew ? 'nuevo' : 'cambiado'}</span>
+            <ul style={{ margin: '4px 0 0', paddingLeft: 18, fontSize: 12.5, color: '#3F3346' }}>{warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>
+          </li>
+        ))}
+      </ul>
+      <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+        <button type="button" data-testid="prePubReview" onClick={onReview} style={{ flex: 1, minHeight: 46, borderRadius: 99, border: '1.5px solid #D9C9EE', background: 'white', color: '#5B3F8A', fontWeight: 800 }}>Revisar</button>
+        <button type="button" data-testid="prePubGo" onClick={onPublish} style={{ flex: 1, minHeight: 46, borderRadius: 99, border: 'none', background: 'linear-gradient(135deg,#C0336E,#9B5DE5)', color: 'white', fontWeight: 800 }}>Publicar igual</button>
+      </div>
+    </Modal>
+  );
+}
+
+// ── Ingreso por lote (27 nov) ──
+// Robin elige muchas fotos de la galería (p. ej. 40 fotos de 15 piezas). En el teléfono: huella de
+// cada foto (foto entera + solo la pieza), aviso de calidad, grupos de fotos de la misma pieza
+// (clusterPhotos) y, por grupo, "¿ya existe?" (mismos umbrales DUP_* de Nuevo producto) → "sumar
+// al stock", o borrador con "Sugerir datos" (Haiku /product/describe, como mucho BATCH_AI_MAX por
+// lote y siempre dentro del tope diario de 40 del Worker; al llegar al tope sigue con la sugerencia
+// básica). Todo en orden, una foto a la vez, cediendo la pantalla entre foto y foto. Nada se crea
+// solo: cada grupo se aprueba (o "Aprobar todo") y entonces sube las fotos y crea el producto igual
+// que "Nuevo producto" (principal + galería, código de su categoría, stock).
+const BATCH_AI_MAX = 40, BATCH_MAX_PHOTOS = 80;
+let _batchSeq = 0;
+const batchId = () => 'b' + (++_batchSeq) + '_' + Date.now().toString(36);
+const yieldUi = () => new Promise(r => setTimeout(r, 0));
+
+async function batchEmbedPhoto(eng, cv) {
+  const r = eng.kind === 'v3' ? await embedV3Both(eng, cv, null) : null;
+  const q = { emb: r ? r.all : await embedPhoto(eng, cv, 'base'), embRef: r ? r.ref : null, color: colorDescriptor(cv), kind: eng.kind, cw: eng.cw, margin: eng.margin, pct: eng.pct };
+  let box;
+  if (pieceAvailable(eng)) {
+    try { const pc = await pieceCanvas(eng, cv); box = pc.box || null; if (pc.cv) { q.piece = (await embedV3Both(eng, pc.cv, null)).all; q.pieceOk = pc.ok; } } catch (e) { console.warn('lote, pieza:', e && e.message); }
+  }
+  return { q, quality: photoQualityCheck(cv, box) };
+}
+// Mejores candidatas del catálogo para un grupo: "¿ya existe?" con cada foto, máximo por producto.
+async function batchMatch(photos, items) {
+  const best = new Map();
+  for (const ph of photos) {
+    let ranked = [];
+    try { ranked = await dupCandidates(ph.q, items); } catch (_) {}
+    for (const r of ranked) { const id = String(r.p.id), b = best.get(id); if (!b || r.score > b.score) best.set(id, { p: r.p, score: r.score }); }
+  }
+  const list = [...best.values()].sort((a, b) => b.score - a.score);
+  const top = list.length ? list[0].score : -1;
+  const level = top >= DUP_HIGH ? 'high' : top >= DUP_MEDIUM ? 'medium' : null;
+  if (!level) return null;
+  return { level, cands: list.filter(r => r.score >= (level === 'high' ? DUP_HIGH : DUP_MEDIUM)).slice(0, 3), idx: 0 };
+}
+function groupLabel(g) { return (g.action === 'stock' && g.match ? g.match.cands[g.match.idx].p.name : g.fields.name) || ''; }
+
+function BatchIntakeModal({ token, products, categories, materials, costs, margin, onCreate, onStockAdded, onCostsSaved, onPendingStock, onClose }) {
+  const cats = (categories && categories.length) ? categories : DEFAULT_CATEGORIES;
+  const mats = (materials && materials.length) ? materials : DEFAULT_MATERIALS;
+  const fileRef = useRef(), invRef = useRef(), retakeRef = useRef(), retakeFor = useRef(null);
+  const cancelRef = useRef(false), cvRef = useRef(new Map()), catRef = useRef(null);
+  const [phase, setPhase] = useState('pick'); // pick | work | review
+  const [photos, setPhotos] = useState([]);   // { id, file, url, q, quality, name }
+  const [groups, setGroups] = useState([]);   // ver newGroup
+  const [prog, setProg] = useState({ label: '', i: 0, n: 0 });
+  const [msg, setMsg] = useState('');
+  const [aiInfo, setAiInfo] = useState({ used: 0, cap: false });
+  const [inv, setInv] = useState(null);       // { busy } | { lines, assign } | { err }
+  const [busyAll, setBusyAll] = useState(false);
+  const photoById = id => photos.find(p => p.id === id);
+  const style = catalogPriceStyle(products);
+  useEffect(() => () => { cancelRef.current = true; photos.forEach(p => { try { URL.revokeObjectURL(p.url); } catch (_) {} }); }, []);
+
+  const newGroup = (photoIds, extra) => ({ id: batchId(), photoIds, action: 'new', match: null, fields: { name: '', name_en: '', description: '', description_en: '', category: cats[0], material: mats[0], price: '', color: 'rose' },
+    tags: {}, note: '', neighbors: [], nbPrice: null, qty: photoIds.length ? 1 : 1, qtyTouched: false, cost: '', currency: 'USD', status: 'pending', err: '', result: null, drafted: false, ...extra });
+  const setGroup = (gid, fn) => setGroups(gs => gs.map(g => g.id === gid ? { ...g, ...(typeof fn === 'function' ? fn(g) : fn) } : g));
+
+  // Borrador de un grupo (vecinas + IA si se permite). Devuelve el parche de campos.
+  const draftFor = async (g, phs, useAi) => {
+    const rep = phs.find(p => !p.quality.issues.length && p.q.pieceOk !== false) || phs[0];
+    const img = cvRef.current.get(rep.id);
+    const items = catRef.current ? catRef.current.items : [];
+    const r = await suggestCore({ img, q: rep.q, items, cats, mats, token, useAi });
+    const tpl = templateProductText(r.sug, r.category, r.material);
+    const text = k => (r.ai && String(r.ai[k] || '').trim()) ? [String(r.ai[k]).trim(), 'ia'] : [tpl[k], 'local'];
+    const fields = { ...g.fields }, tags = {};
+    for (const k of ['name', 'name_en', 'description', 'description_en']) { const [v, t] = text(k); fields[k] = v; tags[k] = t; }
+    if (cats.includes(r.category)) { fields.category = r.category; tags.category = r.catAi ? 'ia' : 'local'; }
+    if (mats.includes(r.material)) { fields.material = r.material; tags.material = r.matAi ? 'ia' : 'local'; }
+    if (r.hasClose && r.sug.price) { fields.price = String(r.sug.price); tags.price = 'local'; }
+    if (r.hasClose && r.sug.color && COLORS[r.sug.color]) fields.color = r.sug.color;
+    const note = r.note + (r.hasClose ? '' : (r.note ? '. ' : '') + 'Diseño nuevo: revisa el precio');
+    return { patch: { fields, tags, note, drafted: true, nbPrice: r.hasClose ? r.sug.price : null, neighbors: r.close.slice(0, 3).map(x => ({ id: String(x.p.id), sku: normalizeSku(x.p.sku) || x.p.name, img: productImageUrl(x.p) })) }, aiStatus: r.aiStatus };
+  };
+
+  const analyze = async files => {
+    const list = files.filter(f => f && /^image\//.test(f.type || 'image/')).slice(0, BATCH_MAX_PHOTOS);
+    if (!list.length) return;
+    cancelRef.current = false; setPhase('work'); setMsg(files.length > BATCH_MAX_PHOTOS ? `Se usan las primeras ${BATCH_MAX_PHOTOS} fotos.` : '');
+    try {
+      setProg({ label: _prewarmState === 'done' ? 'Preparando el reconocimiento…' : 'Cargando el reconocimiento (la primera vez descarga ~55 MB; conviene wifi)…', i: 0, n: list.length });
+      const eng = await loadRecognitionModel();
+      const cat = await prepareCatalogShared(products); catRef.current = cat;
+      setProg({ label: 'Preparando el catálogo…', i: 0, n: list.length });
+      await preparePieceItems(cat.items).catch(() => false);
+      const phs = [];
+      for (let i = 0; i < list.length; i++) {
+        if (cancelRef.current) return;
+        setProg({ label: `Analizando foto ${i + 1} de ${list.length}…`, i, n: list.length });
+        await yieldUi();
+        const f = list[i];
+        try {
+          const cv = await fileToCanvas(f, 1024);
+          const { q, quality } = await batchEmbedPhoto(eng, cv);
+          q.t = await exifCaptureTime(f);
+          const id = batchId(); cvRef.current.set(id, cv);
+          phs.push({ id, file: f, url: URL.createObjectURL(f), q, quality, name: f.name || 'foto ' + (i + 1) });
+        } catch (e) { setMsg(m => (m ? m + ' ' : '') + `No se pudo leer ${f.name || 'una foto'}.`); }
+      }
+      if (cancelRef.current || !phs.length) { if (!phs.length) setPhase('pick'); return; }
+      setPhotos(phs);
+      const idx = clusterPhotos(phs.map(p => p.q));
+      let gs = idx.map(ix => newGroup(ix.map(i => phs[i].id)));
+      let used = 0, cap = false;
+      for (let k = 0; k < gs.length; k++) {
+        if (cancelRef.current) return;
+        setProg({ label: `Revisando pieza ${k + 1} de ${gs.length}…`, i: k, n: gs.length });
+        await yieldUi();
+        const g = gs[k], gph = g.photoIds.map(id => phs.find(p => p.id === id));
+        g.qty = 1;
+        g.match = await batchMatch(gph, cat.items);
+        if (g.match && g.match.level === 'high') { g.action = 'stock'; continue; }
+        const allowAi = !cap && used < BATCH_AI_MAX;
+        try {
+          const d = await draftFor(g, gph, allowAi);
+          Object.assign(g, d.patch);
+          if (allowAi && d.aiStatus !== 'skip') used++;
+          if (d.aiStatus === 'cap' || d.aiStatus === 'off') cap = true;
+        } catch (e) { g.note = 'No se pudo sugerir: ' + ((e && e.message) || 'error'); }
+      }
+      setAiInfo({ used, cap });
+      setGroups(gs); setPhase('review');
+    } catch (e) {
+      setMsg('No se pudo analizar el lote: ' + ((e && e.message) || 'error')); setPhase('pick');
+    }
+  };
+
+  // ── Edición de grupos ──
+  const movePhoto = (pid, toGid) => setGroups(gs => {
+    let out = gs.map(g => ({ ...g, photoIds: g.photoIds.filter(x => x !== pid) }));
+    if (toGid === '__new') out.push(newGroup([pid], { note: 'Grupo nuevo: toca "✦ Sugerir datos" o escribe los datos.' }));
+    else out = out.map(g => g.id === toGid ? { ...g, photoIds: [...g.photoIds, pid] } : g);
+    return out.filter(g => g.photoIds.length || g.status === 'done');
+  });
+  const mergeInto = (fromGid, toGid) => setGroups(gs => {
+    const from = gs.find(g => g.id === fromGid); if (!from) return gs;
+    return gs.filter(g => g.id !== fromGid).map(g => g.id === toGid ? { ...g, photoIds: [...g.photoIds, ...from.photoIds] } : g);
+  });
+  const resuggest = async gid => {
+    const g = groups.find(x => x.id === gid); if (!g) return;
+    setGroup(gid, { busy: true });
+    try {
+      const d = await draftFor(g, g.photoIds.map(photoById), !aiInfo.cap);
+      if (!aiInfo.cap && d.aiStatus !== 'skip') setAiInfo(a => ({ used: a.used + 1, cap: a.cap || d.aiStatus === 'cap' || d.aiStatus === 'off' }));
+      setGroup(gid, x => ({ ...d.patch, fields: { ...d.patch.fields, ...Object.fromEntries(Object.entries(x.fields).filter(([k]) => x.touched && x.touched[k])) }, busy: false }));
+    } catch (e) { setGroup(gid, { busy: false, note: 'No se pudo sugerir: ' + ((e && e.message) || 'error') }); }
+  };
+  const setField = (gid, k, v) => setGroup(gid, g => ({ fields: { ...g.fields, [k]: v }, tags: { ...g.tags, [k]: undefined }, touched: { ...(g.touched || {}), [k]: true } }));
+  const retake = async e => {
+    const f = e.target.files && e.target.files[0]; e.target.value = '';
+    const pid = retakeFor.current; retakeFor.current = null;
+    if (!f || !pid) return;
+    try {
+      const eng = await loadRecognitionModel(), cv = await fileToCanvas(f, 1024);
+      const { q, quality } = await batchEmbedPhoto(eng, cv);
+      cvRef.current.set(pid, cv);
+      setPhotos(ps => ps.map(p => { if (p.id !== pid) return p; try { URL.revokeObjectURL(p.url); } catch (_) {} return { ...p, file: f, url: URL.createObjectURL(f), q, quality, name: f.name || p.name }; }));
+    } catch (e2) { setMsg('No se pudo leer la foto nueva: ' + ((e2 && e2.message) || 'error')); }
+  };
+
+  // ── Aprobar ──
+  const groupProblem = g => {
+    if (!g.photoIds.length) return 'Sin fotos';
+    const q = Number(g.qty);
+    if (!Number.isInteger(q) || q < (g.action === 'stock' ? 1 : 0) || q > 9999) return g.action === 'stock' ? 'Unidades a sumar: entero de 1 a 9999' : 'Cantidad: entero de 0 a 9999';
+    if (g.cost !== '' && !(Number(g.cost) >= 0)) return 'Costo inválido';
+    if (g.action === 'new' && !String(g.fields.name || '').trim()) return 'Falta el nombre';
+    if (g.action === 'new' && !(Number(g.fields.price) > 0)) return 'Falta el precio';
+    return '';
+  };
+  const approve = async gid => {
+    const g = groups.find(x => x.id === gid);
+    if (!g || g.status === 'done' || g.status === 'saving') return true;
+    const prob = groupProblem(g);
+    if (prob) { setGroup(gid, { err: prob }); return false; }
+    setGroup(gid, { status: 'saving', err: '' });
+    const gph = g.photoIds.map(photoById).filter(Boolean);
+    try {
+      if (g.action === 'stock') {
+        const c = g.match.cands[g.match.idx], id = String(c.p.id);
+        let cur = 1; try { const r = await apiCall('stock/list', { token }); cur = stockOf(r && r.stock, id); } catch (_) {}
+        const next = Math.min(9999, cur + Number(g.qty));
+        await apiCall('stock/set', { token, id, qty: next });
+        // Las fotos del taller sirven como fotos reales aprendidas de esa pieza (como "Sí, es el mismo").
+        for (const ph of gph.slice(0, 3)) if (ph.q.kind === RECOG_KIND && ph.q.embRef) apiCall('identify/ref/add', { token, id, vector: learnedRefVector(ph.q) }).then(r => { if (r && Number.isInteger(r.count)) setRefCount(id, r.count); }).catch(() => {});
+        if (g.cost !== '') { try { const r = await apiCall('cost/set', { token, items: [{ id, cost: Number(g.cost), currency: g.currency }] }); onCostsSaved && onCostsSaved(r); } catch (_) {} }
+        onStockAdded && onStockAdded(c.p, cur, next);
+        setGroup(gid, { status: 'done', result: `Stock ${normalizeSku(c.p.sku) || c.p.name}: ${cur} → ${next}` });
+        return true;
+      }
+      const urls = [];
+      for (let i = 0; i < gph.length; i++) {
+        setGroup(gid, { result: `Subiendo foto ${i + 1} de ${gph.length}…` });
+        const b64 = await compressImage(gph[i].file);
+        const slug = (gph[i].name || 'foto').replace(/[^a-z0-9]+/gi, '_').toLowerCase().substring(0, 40) || 'foto';
+        const fname = `${Date.now()}_${slug}.webp`;
+        const res = await apiUpload(token, `${IMAGES_PATH}/${fname}`, b64, `Imagen: ${fname}`);
+        urls.push(res.url);
+      }
+      const f = g.fields;
+      const created = onCreate({ name: f.name.trim(), name_en: String(f.name_en || '').trim(), description: f.description || '', description_en: String(f.description_en || '').trim(), category: f.category, material: f.material,
+        price: Number(f.price), oldPrice: null, img: 'collar', color: f.color || 'rose', tag: null, personalized: false, available: true, imageUrl: urls[0], images: urls.slice(1), focalX: 50, focalY: 50, zoom: 1, promo: null });
+      const qty = Number(g.qty);
+      if (qty !== 1) onPendingStock && onPendingStock(created.id, qty);
+      if (g.cost !== '') { try { const r = await apiCall('cost/set', { token, items: [{ id: String(created.id), cost: Number(g.cost), currency: g.currency }] }); onCostsSaved && onCostsSaved(r); } catch (e) { setGroup(gid, { err: 'El producto se creó pero el costo no se guardó (' + ((e && e.message) || 'error') + ').' }); } }
+      setGroup(gid, { status: 'done', result: `Creado ${created.sku} · stock ${qty}${qty !== 1 ? ' (se guarda al publicar)' : ''}` });
+      return true;
+    } catch (e) {
+      setGroup(gid, { status: 'pending', result: null, err: (e && e.status === 401 ? 'Sesión expirada: vuelve a entrar.' : 'No se pudo aprobar: ' + ((e && e.message) || 'error')) });
+      return false;
+    }
+  };
+  const approveAll = async () => {
+    if (busyAll) return;
+    setBusyAll(true);
+    let okN = 0, bad = 0;
+    for (const g of groups) { if (g.status === 'done') continue; (await approve(g.id)) ? okN++ : bad++; await yieldUi(); }
+    setBusyAll(false);
+    setMsg(`✓ ${okN} aprobada${okN === 1 ? '' : 's'}` + (bad ? ` · ${bad} con algo por corregir (marcadas en rojo)` : '') + '. Los productos nuevos se suben a la tienda con "Publicar cambios".');
+  };
+
+  // ── Factura del proveedor ──
+  const readInvoice = async e => {
+    const f = e.target.files && e.target.files[0]; e.target.value = '';
+    if (!f) return;
+    setInv({ busy: true });
+    try {
+      const cv = await fileToCanvas(f, 2000);
+      const b64 = canvasJpegB64(cv, 1600, 590 * 1024);
+      const r = await apiCall('product/invoice', { token, image: b64, mediaType: 'image/jpeg' });
+      const lines = r.lines || [];
+      const open = groups.filter(g => g.status !== 'done');
+      const asg = invoiceMatch(lines, open.map(g => ({ label: groupLabel(g) })));
+      setInv({ lines, assign: asg.map(j => j >= 0 ? open[j].id : '') });
+    } catch (e2) {
+      setInv({ err: e2 && e2.status === 429 ? 'Se alcanzó el límite de facturas de hoy: escribe el costo a mano.' : e2 && e2.status === 503 ? 'Leer facturas con IA no está activado todavía.' : 'No se pudo leer la factura: ' + ((e2 && e2.message) || 'error') });
+    }
+  };
+  const applyInvoice = () => {
+    const by = new Map();
+    inv.lines.forEach((l, i) => { const gid = inv.assign[i]; if (gid) by.set(gid, l); });
+    setGroups(gs => gs.map(g => {
+      const l = by.get(g.id); if (!l) return g;
+      const cost = l.unit_cost > 0 ? String(l.unit_cost) : g.cost;
+      const fields = { ...g.fields };
+      const sp = l.unit_cost > 0 && l.currency === 'USD' ? priceFromCost(l.unit_cost, margin, products) : null;
+      const tags = { ...g.tags };
+      if (sp && g.action === 'new' && !(g.touched && g.touched.price) && !(Number(fields.price) > 0)) { fields.price = String(sp); tags.price = 'local'; }
+      return { ...g, cost, currency: l.currency || 'USD', qty: l.quantity > 0 ? l.quantity : g.qty, fields, tags, invoiceLine: l.description };
+    }));
+    setMsg(`✓ Factura aplicada a ${by.size} pieza${by.size === 1 ? '' : 's'}: costo y cantidad. Revísalos antes de aprobar.`);
+    setInv(null);
+  };
+
+  const inp = { padding: '9px 11px', border: '1.5px solid #e4e4e4', borderRadius: 10, fontSize: 15, outline: 'none', width: '100%', boxSizing: 'border-box', background: 'white' };
+  const lbl = { display: 'block', fontSize: 11, fontWeight: 700, color: '#6B5A73', letterSpacing: '.06em', textTransform: 'uppercase', marginBottom: 4 };
+  const pill = { minHeight: 40, padding: '0 14px', borderRadius: 99, border: '1.5px solid #D9C9EE', background: 'white', color: '#5B3F8A', fontWeight: 700, fontSize: 12.5, cursor: 'pointer' };
+  const pending = groups.filter(g => g.status !== 'done');
+  const Tag = ({ g, k }) => g.tags && g.tags[k] ? <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: '#7C3AED', background: '#F1EAFB', borderRadius: 99, padding: '1px 7px', textTransform: 'none', letterSpacing: 0 }}>{g.tags[k] === 'ia' ? 'sugerido (IA)' : 'sugerido'}</span> : null;
+
+  const tryClose = () => { if (phase === 'review' && pending.length && !confirm('¿Cerrar el lote? Las piezas sin aprobar se pierden.')) return; cancelRef.current = true; onClose(); };
+  return (
+    <Modal onClose={tryClose}
+      labelledBy="batchTitle" overlayStyle={{ alignItems: 'flex-start', overflowY: 'auto', padding: 10 }} boxStyle={{ maxWidth: 640, padding: '18px 14px 14px', marginTop: 6, borderRadius: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
+        <h2 id="batchTitle" style={{ fontSize: 19, fontWeight: 800 }}>Ingreso por lote</h2>
+        <button type="button" onClick={tryClose} aria-label="Cerrar" style={{ width: 40, height: 40, borderRadius: '50%', background: '#f0f0f0', color: '#666', fontSize: 18, border: 'none' }}>✕</button>
+      </div>
+      <input ref={fileRef} type="file" accept="image/*" multiple onChange={e => { const fs = Array.from(e.target.files || []); e.target.value = ''; analyze(fs); }} style={{ display: 'none' }} aria-label="Fotos del lote" data-testid="batchFiles" />
+      <input ref={retakeRef} type="file" accept="image/*" onChange={retake} style={{ display: 'none' }} aria-label="Foto de reemplazo" data-testid="batchRetakeFile" />
+      <input ref={invRef} type="file" accept="image/*" onChange={readInvoice} style={{ display: 'none' }} aria-label="Foto de la factura" data-testid="invoiceFile" />
+
+      {phase === 'pick' && (
+        <div>
+          <p style={{ fontSize: 13.5, color: '#3F3346', marginBottom: 10, lineHeight: 1.45 }}>Elige de tu galería todas las fotos de las piezas nuevas (puedes poner 2 o 3 fotos de cada una). Las agrupo por pieza, te digo cuáles ya existen para sumar stock y preparo un borrador para las demás. Nada se crea hasta que lo apruebes.</p>
+          <PhotoTip style={{ marginBottom: 12 }} />
+          <button type="button" data-testid="batchPick" onClick={() => fileRef.current.click()} style={{ width: '100%', minHeight: 52, borderRadius: 99, border: 'none', background: 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', fontWeight: 800, fontSize: 15 }}>Elegir fotos</button>
+          {msg && <div role="status" style={{ fontSize: 12.5, color: '#92400E', marginTop: 10 }}>{msg}</div>}
+        </div>
+      )}
+
+      {phase === 'work' && (
+        <div data-testid="batchWork" style={{ padding: '18px 4px' }}>
+          <div role="status" aria-live="polite" style={{ fontSize: 14, fontWeight: 700, color: '#5B3F8A', marginBottom: 10 }}>{prog.label}</div>
+          <div role="progressbar" aria-valuemin={0} aria-valuemax={prog.n || 1} aria-valuenow={prog.i} aria-label="Avance del lote" style={{ height: 8, background: '#EFE7F5', borderRadius: 99, overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: (prog.n ? Math.round(100 * prog.i / prog.n) : 5) + '%', background: 'linear-gradient(90deg,#E8508A,#9B5DE5)', transition: 'width .2s' }} />
+          </div>
+          <p style={{ fontSize: 12, color: '#7A6880', marginTop: 10 }}>Puedes dejar el teléfono: trabaja una foto a la vez. Las sugerencias con IA usan como mucho {BATCH_AI_MAX} del cupo diario.</p>
+          {msg && <div role="status" style={{ fontSize: 12, color: '#92400E', marginTop: 6 }}>{msg}</div>}
+          <button type="button" onClick={() => { cancelRef.current = true; setPhase('pick'); }} style={{ ...pill, marginTop: 12 }}>Cancelar</button>
+        </div>
+      )}
+
+      {phase === 'review' && (
+        <div>
+          <div role="status" aria-live="polite" data-testid="batchSummary" style={{ fontSize: 13, color: '#3F3346', marginBottom: 8, lineHeight: 1.4 }}>
+            {photos.length} fotos → <b>{groups.length} pieza{groups.length === 1 ? '' : 's'}</b>: {groups.filter(g => g.action === 'stock').length} para sumar stock, {groups.filter(g => g.action === 'new').length} nueva{groups.filter(g => g.action === 'new').length === 1 ? '' : 's'}.
+            {aiInfo.cap ? ' Se llegó al límite de IA de hoy: algunos borradores usan la sugerencia básica.' : aiInfo.used ? ` IA usada en ${aiInfo.used} borrador${aiInfo.used === 1 ? '' : 'es'}.` : ''}
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+            <button type="button" data-testid="invoiceBtn" onClick={() => invRef.current.click()} disabled={inv && inv.busy} style={pill}>{inv && inv.busy ? 'Leyendo factura…' : 'Leer factura (opcional)'}</button>
+          </div>
+          {inv && !inv.busy && (
+            <div data-testid="invoicePanel" style={{ background: '#F7F3FA', borderRadius: 12, padding: 12, marginBottom: 12 }}>
+              {inv.err ? <div role="alert" style={{ fontSize: 13, color: '#B91C1C' }}>{inv.err}</div> : (
+                <>
+                  <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 6 }}>Factura: {inv.lines.length} línea{inv.lines.length === 1 ? '' : 's'}</div>
+                  <p style={{ fontSize: 12, color: '#7A6880', marginBottom: 8 }}>Elige a qué pieza corresponde cada línea (propuse las que se parecen por el nombre). Al aplicar se llenan el costo y la cantidad.</p>
+                  {inv.lines.map((l, i) => (
+                    <div key={i} data-testid="invoiceLine" style={{ background: 'white', borderRadius: 10, padding: 8, marginBottom: 6 }}>
+                      <div style={{ fontSize: 13, color: '#1A1118' }}><b>{l.quantity}</b> × {l.description} · <b>{l.currency === 'USD' ? '$' : l.currency + ' '}{l.unit_cost}</b> c/u</div>
+                      <label style={{ ...SR_ONLY }} htmlFor={'invl' + i}>Pieza para la línea {i + 1}</label>
+                      <select id={'invl' + i} value={inv.assign[i] || ''} onChange={e => setInv(s => ({ ...s, assign: s.assign.map((x, j) => j === i ? e.target.value : x) }))} style={{ ...inp, marginTop: 4, fontSize: 14 }}>
+                        <option value="">— Ninguna —</option>
+                        {pending.map((g, k) => <option key={g.id} value={g.id}>{'Pieza ' + (groups.indexOf(g) + 1) + ': ' + (groupLabel(g) || 'sin nombre')}</option>)}
+                      </select>
+                    </div>
+                  ))}
+                </>
+              )}
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <button type="button" onClick={() => setInv(null)} style={{ ...pill, flex: 1 }}>Cerrar</button>
+                {!inv.err && <button type="button" data-testid="invoiceApply" onClick={applyInvoice} style={{ ...pill, flex: 2, border: 'none', background: 'linear-gradient(135deg,#C0336E,#9B5DE5)', color: 'white' }}>Aplicar a las piezas</button>}
+              </div>
+            </div>
+          )}
+
+          <ol style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {groups.map((g, gi) => {
+              const gph = g.photoIds.map(photoById).filter(Boolean), done = g.status === 'done';
+              const c = g.match ? g.match.cands[g.match.idx] : null;
+              const costPrice = g.cost !== '' && g.currency === 'USD' ? priceFromCost(g.cost, margin, products) : null;
+              const others = groups.filter(x => x.id !== g.id && x.status !== 'done');
+              return (
+                <li key={g.id} data-testid="batchGroup" data-action={g.action} data-status={g.status} aria-labelledby={'bg' + g.id}
+                  style={{ border: '1.5px solid ' + (g.err ? '#FCA5A5' : done ? '#86EFAC' : '#EDE3F1'), background: done ? '#F0FDF4' : 'white', borderRadius: 14, padding: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                    <h3 id={'bg' + g.id} style={{ fontSize: 14.5, fontWeight: 800, flex: 1, minWidth: 0 }}>Pieza {gi + 1} <span style={{ fontWeight: 600, color: '#7A6880', fontSize: 12 }}>· {gph.length} foto{gph.length === 1 ? '' : 's'}</span></h3>
+                    {done && <span data-testid="groupDone" style={{ fontSize: 12, fontWeight: 800, color: '#15803D' }}>✓ {g.result}</span>}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4 }}>
+                    {gph.map(ph => (
+                      <div key={ph.id} data-testid="batchPhoto" data-name={ph.name} style={{ width: 92, flexShrink: 0 }}>
+                        <ZoomImg src={ph.url} title={'Pieza ' + (gi + 1)} sub={ph.name} alt={'Foto de la pieza ' + (gi + 1)} style={{ width: 92, height: 92, objectFit: 'cover', borderRadius: 10, display: 'block', border: ph.quality.issues.length ? '2px solid #FDBA74' : '1px solid #eee' }} />
+                        {ph.quality.issues.length > 0 && <div data-testid="photoQWarn" style={{ fontSize: 10, color: '#9A3412', marginTop: 2, lineHeight: 1.2 }}>◇ {qualityText(ph.quality.issues)}</div>}
+                        {!done && (
+                          <>
+                            {ph.quality.issues.length > 0 && <button type="button" onClick={() => { retakeFor.current = ph.id; retakeRef.current.click(); }} style={{ fontSize: 11, fontWeight: 700, color: '#9A3412', background: 'none', border: 'none', padding: '2px 0', textDecoration: 'underline' }}>Repetir foto</button>}
+                            <label htmlFor={'mv' + ph.id} style={SR_ONLY}>Mover esta foto a</label>
+                            <select id={'mv' + ph.id} data-testid="movePhoto" value="" onChange={e => e.target.value && movePhoto(ph.id, e.target.value)} style={{ width: '100%', fontSize: 11, padding: '4px 2px', borderRadius: 6, border: '1px solid #E5DDEA', marginTop: 2, background: 'white' }}>
+                              <option value="">Mover a…</option>
+                              {others.map(o => <option key={o.id} value={o.id}>Pieza {groups.indexOf(o) + 1}</option>)}
+                              {gph.length > 1 && <option value="__new">Pieza nueva (separar)</option>}
+                            </select>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  {!done && (
+                    <>
+                      {g.match && (
+                        <div data-testid="groupMatch" data-level={g.match.level} style={{ marginTop: 8, background: g.match.level === 'high' ? '#FFF7ED' : '#F7F3FA', border: '1px solid ' + (g.match.level === 'high' ? '#FDBA74' : '#E2D4F5'), borderRadius: 12, padding: 10 }}>
+                          <div style={{ fontWeight: 800, fontSize: 13, marginBottom: 6 }}>{g.match.level === 'high' ? '◇ Parece que ya existe' : '◇ Se parece a'} {g.match.cands.length > 1 && <span style={{ fontWeight: 600, fontSize: 11, color: '#7A6880' }}>({g.match.idx + 1} de {g.match.cands.length})</span>}</div>
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            <figure style={{ margin: 0, flex: 1, minWidth: 0 }}><ZoomImg src={gph[0] && gph[0].url} title="Tu foto" alt="Tu foto" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 10, display: 'block' }} /><figcaption style={{ fontSize: 10, color: '#7A6880' }}>Tu foto</figcaption></figure>
+                            <figure style={{ margin: 0, flex: 1, minWidth: 0 }}><ZoomImg src={productImageUrl(c.p)} title={normalizeSku(c.p.sku)} sub={c.p.name} alt={'Foto del catálogo de ' + c.p.name} style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 10, display: 'block' }} /><figcaption style={{ fontSize: 10, color: '#7A6880' }}>En el catálogo</figcaption></figure>
+                          </div>
+                          <div style={{ fontSize: 12.5, marginTop: 6 }}><SkuChip sku={normalizeSku(c.p.sku)} /> <b>{c.p.name}</b></div>
+                          <div role="radiogroup" aria-label={'Qué hacer con la pieza ' + (gi + 1)} style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 6, fontSize: 13 }}>
+                            <label style={{ display: 'flex', gap: 8, alignItems: 'center', minHeight: 32 }}><input type="radio" name={'act' + g.id} checked={g.action === 'stock'} onChange={() => setGroup(g.id, { action: 'stock', qty: Math.max(1, Number(g.qty) || 1), err: '' })} />Es la misma: sumar al stock de {normalizeSku(c.p.sku) || c.p.name}</label>
+                            <label style={{ display: 'flex', gap: 8, alignItems: 'center', minHeight: 32 }}><input type="radio" name={'act' + g.id} checked={g.action === 'new'} onChange={() => setGroup(g.id, { action: 'new', err: '' })} />Es un producto nuevo</label>
+                          </div>
+                          {g.match.cands.length > 1 && <button type="button" onClick={() => setGroup(g.id, x => ({ match: { ...x.match, idx: (x.match.idx + 1) % x.match.cands.length } }))} style={{ ...pill, minHeight: 34, marginTop: 4 }}>Ver otro candidato</button>}
+                        </div>
+                      )}
+                      {g.action === 'new' && (
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
+                          {!g.drafted && <button type="button" onClick={() => resuggest(g.id)} disabled={g.busy} style={{ ...pill, gridColumn: 'span 2' }}>{g.busy ? 'Sugiriendo…' : '✦ Sugerir datos'}</button>}
+                          {g.note && <div data-testid="groupNote" style={{ gridColumn: 'span 2', fontSize: 11.5, color: '#92400E' }}>{g.note}</div>}
+                          <div style={{ gridColumn: 'span 2' }}>
+                            <label htmlFor={'bn' + g.id} style={lbl}>Nombre *<Tag g={g} k="name" /></label>
+                            <input id={'bn' + g.id} data-testid="groupName" value={g.fields.name} onChange={e => setField(g.id, 'name', e.target.value)} style={inp} />
+                          </div>
+                          <div>
+                            <label htmlFor={'bc' + g.id} style={lbl}>Categoría<Tag g={g} k="category" /></label>
+                            <select id={'bc' + g.id} value={g.fields.category} onChange={e => setField(g.id, 'category', e.target.value)} style={inp}>{cats.map(x => <option key={x}>{x}</option>)}</select>
+                          </div>
+                          <div>
+                            <label htmlFor={'bm' + g.id} style={lbl}>Material<Tag g={g} k="material" /></label>
+                            <select id={'bm' + g.id} value={g.fields.material} onChange={e => setField(g.id, 'material', e.target.value)} style={inp}>{mats.map(x => <option key={x}>{x}</option>)}</select>
+                          </div>
+                          <div>
+                            <label htmlFor={'bp' + g.id} style={lbl}>Precio USD *<Tag g={g} k="price" /></label>
+                            <input id={'bp' + g.id} data-testid="groupPrice" type="number" inputMode="decimal" min={0} step="0.01" value={g.fields.price} onChange={e => setField(g.id, 'price', e.target.value)} style={inp} />
+                          </div>
+                          <div>
+                            <label htmlFor={'bk' + g.id} style={lbl}>Costo (opcional)</label>
+                            <input id={'bk' + g.id} data-testid="groupCost" type="number" inputMode="decimal" min={0} step="0.01" value={g.cost} onChange={e => setGroup(g.id, { cost: e.target.value })} style={inp} />
+                          </div>
+                          {(g.nbPrice || costPrice) && (
+                            <div data-testid="groupPriceHints" style={{ gridColumn: 'span 2', display: 'flex', gap: 6, flexWrap: 'wrap', fontSize: 12 }}>
+                              <span style={{ color: '#7A6880' }}>Sugerencias:</span>
+                              {g.nbPrice ? <button type="button" onClick={() => setField(g.id, 'price', String(g.nbPrice))} style={{ ...pill, minHeight: 32, fontSize: 12 }}>Parecidas: ${g.nbPrice}</button> : null}
+                              {costPrice ? <button type="button" data-testid="costPriceHint" onClick={() => setField(g.id, 'price', String(costPrice))} style={{ ...pill, minHeight: 32, fontSize: 12 }}>Costo × {margin || MARGIN_DEFAULT}: ${costPrice}</button> : null}
+                            </div>
+                          )}
+                          {g.neighbors.length > 0 && <div style={{ gridColumn: 'span 2', fontSize: 11, color: '#5B4A63', display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>Se parece a: {g.neighbors.map(nb => <span key={nb.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>{nb.img ? <ZoomImg src={nb.img} title={nb.sku} style={{ width: 24, height: 24, borderRadius: 5, objectFit: 'cover' }} /> : null}<b style={{ fontFamily: 'ui-monospace, Menlo, monospace', color: '#5B3F8A' }}>{nb.sku}</b></span>)}</div>}
+                          <details style={{ gridColumn: 'span 2', background: '#FAF7FB', borderRadius: 10, padding: '6px 10px' }}>
+                            <summary style={{ fontSize: 12, fontWeight: 700, color: '#7A6880', cursor: 'pointer', minHeight: 28 }}>Descripción y textos en inglés</summary>
+                            <label htmlFor={'bd' + g.id} style={{ ...lbl, marginTop: 8 }}>Descripción<Tag g={g} k="description" /></label>
+                            <textarea id={'bd' + g.id} rows={3} value={g.fields.description} onChange={e => setField(g.id, 'description', e.target.value)} style={{ ...inp, resize: 'vertical' }} />
+                            <label htmlFor={'bne' + g.id} style={{ ...lbl, marginTop: 8 }}>Nombre en inglés<Tag g={g} k="name_en" /></label>
+                            <input id={'bne' + g.id} value={g.fields.name_en} onChange={e => setField(g.id, 'name_en', e.target.value)} style={inp} />
+                            <label htmlFor={'bde' + g.id} style={{ ...lbl, marginTop: 8 }}>Descripción en inglés<Tag g={g} k="description_en" /></label>
+                            <textarea id={'bde' + g.id} rows={3} value={g.fields.description_en} onChange={e => setField(g.id, 'description_en', e.target.value)} style={{ ...inp, resize: 'vertical' }} />
+                          </details>
+                        </div>
+                      )}
+                      {g.action === 'stock' && (
+                        <div style={{ marginTop: 10 }}>
+                          <label htmlFor={'bk' + g.id} style={lbl}>Costo (privado, opcional)</label>
+                          <input id={'bk' + g.id} data-testid="groupCost" type="number" inputMode="decimal" min={0} step="0.01" value={g.cost} onChange={e => setGroup(g.id, { cost: e.target.value })} style={{ ...inp, maxWidth: 160 }} />
+                        </div>
+                      )}
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap', marginTop: 10 }}>
+                        <div>
+                          <label htmlFor={'bq' + g.id} style={lbl}>{g.action === 'stock' ? 'Unidades a sumar' : 'Cantidad (stock)'}</label>
+                          <input id={'bq' + g.id} data-testid="groupQty" type="number" inputMode="numeric" min={g.action === 'stock' ? 1 : 0} max={9999} value={g.qty} onChange={e => setGroup(g.id, { qty: e.target.value === '' ? '' : Number(e.target.value), qtyTouched: true })} style={{ ...inp, width: 100 }} />
+                        </div>
+                        <CountPhotoButton token={token} small hint={groupLabel(g)} testid="groupCount" onUse={n => setGroup(g.id, { qty: g.action === 'stock' ? Math.max(1, n) : n, qtyTouched: true })} />
+                      </div>
+                      {others.length > 0 && (
+                        <div style={{ marginTop: 8 }}>
+                          <label htmlFor={'mg' + g.id} style={SR_ONLY}>Unir esta pieza con</label>
+                          <select id={'mg' + g.id} data-testid="mergeGroup" value="" onChange={e => e.target.value && mergeInto(g.id, e.target.value)} style={{ fontSize: 12.5, padding: '6px 8px', borderRadius: 8, border: '1px solid #E5DDEA', background: 'white' }}>
+                            <option value="">Unir con otra pieza…</option>
+                            {others.map(o => <option key={o.id} value={o.id}>Pieza {groups.indexOf(o) + 1}{groupLabel(o) ? ': ' + groupLabel(o) : ''}</option>)}
+                          </select>
+                        </div>
+                      )}
+                      {g.err && <div role="alert" data-testid="groupErr" style={{ fontSize: 12.5, color: '#B91C1C', marginTop: 6 }}>{g.err}</div>}
+                      <button type="button" data-testid="groupApprove" onClick={() => approve(g.id)} disabled={g.status === 'saving' || busyAll}
+                        style={{ width: '100%', minHeight: 46, marginTop: 10, borderRadius: 99, border: 'none', background: 'linear-gradient(135deg,#C0336E,#9B5DE5)', color: 'white', fontWeight: 800, fontSize: 14, opacity: g.status === 'saving' ? .7 : 1 }}>
+                        {g.status === 'saving' ? (g.result || 'Guardando…') : g.action === 'stock' ? `✓ Aprobar: sumar ${Number(g.qty) || 0} al stock` : '✓ Aprobar y crear producto'}
+                      </button>
+                    </>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+          <div style={{ position: 'sticky', bottom: 0, background: 'white', paddingTop: 10, marginTop: 10, borderTop: '1px solid #F0E8F4' }}>
+            {msg && <div role="status" aria-live="polite" data-testid="batchMsg" style={{ fontSize: 12.5, color: msg.startsWith('✓') ? '#065F46' : '#92400E', marginBottom: 8 }}>{msg}</div>}
+            <button type="button" data-testid="batchApproveAll" onClick={approveAll} disabled={busyAll || !pending.length}
+              style={{ width: '100%', minHeight: 50, borderRadius: 99, border: 'none', background: pending.length ? 'linear-gradient(135deg,#E8508A,#9B5DE5)' : '#C9B8D3', color: 'white', fontWeight: 800, fontSize: 15 }}>
+              {busyAll ? 'Aprobando…' : pending.length ? `✓ Aprobar todo (${pending.length})` : '✓ Todo aprobado'}
+            </button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function ProductModal({ product, onSave, onClose, token, categories, materials, fbSurcharges = {}, fbMarkets = {}, allProducts = [], skuSeq = {}, onEnroll, onDupStock, stockQty, costInfo, margin }) {
   const refCountsPM = useRefCounts(token);
   const cats = (categories && categories.length) ? categories : DEFAULT_CATEGORIES;
   const mats = (materials && materials.length) ? materials : DEFAULT_MATERIALS;
@@ -1410,6 +2391,15 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
   const [sugBusy, setSugBusy] = useState(false);
   const [sugInfo, setSugInfo] = useState(null); // { neighbors: [{ id, sku, name, img }], note }
   const [sugPhase, setSugPhase] = useState(''); // texto de avance mientras sugiere
+  const [sugPrice, setSugPrice] = useState(null); // precio de las parecidas (para la sugerencia junto al precio)
+  // Stock y costo (27 nov): no van en data/products.json. El stock va al Worker (/stock/set; si la pieza
+  // es nueva, queda pendiente hasta publicar) y el costo, privado, a /cost/set. Ambos opcionales.
+  const initStock = Number.isInteger(stockQty) ? stockQty : STOCK_DEFAULT;
+  const [stockDraft, setStockDraft] = useState(String(initStock));
+  const initCost = costInfo && Number.isFinite(costInfo.cost) ? String(costInfo.cost) : '';
+  const [costDraft, setCostDraft] = useState(initCost);
+  const [qWarn, setQWarn] = useState(null); // aviso de calidad de la foto recién elegida
+  const [dictNote, setDictNote] = useState('');
   // Al abrir "Nuevo producto" se precarga el reconocimiento en segundo plano (misma precarga que
   // Pedidos: una vez por sesión, nunca con Ahorro de datos), así "Sugerir datos" responde rápido.
   useEffect(() => { if (isNew) prewarmRecognition(allProducts); }, []);
@@ -1449,6 +2439,13 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
     })().catch(e => { if (alive) setDup({ status: 'error' }); console.warn('¿ya existe?:', e && e.message); });
     return () => { alive = false; };
   }, [imgPrev, uploading]);
+  // Aviso de calidad (27 nov, gratis): movida, oscura, quemada o pieza muy chica. No bloquea.
+  useEffect(() => {
+    if (!imgPrev || !/^(blob:|data:)/.test(imgPrev)) { setQWarn(null); return; }
+    let alive = true;
+    loadImg(imgPrev, false).then(img => { if (alive) setQWarn(photoQualityCheck(img)); }).catch(() => {});
+    return () => { alive = false; };
+  }, [imgPrev]);
   const dupConfirm = async () => {
     const c = dup && dup.cands && dup.cands[dup.idx];
     if (!c || dup.busy) return;
@@ -1494,32 +2491,10 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
       const q = pq ? pq.q : { emb: await embedPhoto(eng, img, 'base'), color: colorDescriptor(img), kind: eng.kind, cw: eng.cw, margin: eng.margin };
       if (!q.piece && pieceAvailable(eng)) { try { q.piece = (await embedPiece(eng, img)).emb; } catch (_) {} }
       if (q.piece) await preparePieceItems(cat.items).catch(() => false); // items es un filtro de cat.items: comparten it.piece
-      const sug = localProductSuggestion(q, items, { tone: photoTone(img) });
-      if (!sug) throw new Error('No hay piezas del catálogo para comparar.');
-      const top3 = sug.neighbors.slice(0, 3);
-      const topScore = sug.neighbors.length ? sug.neighbors[0].score : -2;
-      const close = sug.neighbors.filter(x => x.score >= SUGGEST_MIN && x.score >= topScore - SUGGEST_GAP);
-      const hasClose = close.length > 0;
-      let ai = null, note = '';
-      try {
-        // Foto achicada (máx. 768 px, JPEG 0,8; < 600 KB) para la IA.
-        const k = Math.min(1, 768 / Math.max(img.naturalWidth || img.width, img.naturalHeight || img.height));
-        const cv = document.createElement('canvas'); cv.width = Math.round((img.naturalWidth || img.width) * k); cv.height = Math.round((img.naturalHeight || img.height) * k);
-        cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
-        let qual = 0.8, b64 = cv.toDataURL('image/jpeg', qual).split(',')[1];
-        while (b64.length * 0.75 > 600 * 1024 && qual > 0.4) { qual -= 0.1; b64 = cv.toDataURL('image/jpeg', qual).split(',')[1]; }
-        setSugPhase('Escribiendo nombre y descripción…');
-        const r = await apiCall('product/describe', { token, image: b64, mediaType: 'image/jpeg', neighborIds: top3.map(x => String(x.p.id)), hints: hasClose ? { category: sug.category, material: sug.material } : {} });
-        ai = r && r.suggestion && typeof r.suggestion.name === 'string' && r.suggestion.name.trim() ? r.suggestion : null;
-        if (!ai) note = 'IA no disponible, sugerencia básica';
-      } catch (e) {
-        note = e && e.status === 503 ? 'Sugerencia básica (IA no activada)' : e && e.status === 429 ? 'Sugerencia básica (límite de hoy)' : 'IA no disponible, sugerencia básica';
-      }
-      // Categoría y material: el voto local manda si es claro; si no, lo de la IA (si es válido).
-      // Sin piezas parecidas de verdad, la categoría y el material los decide la IA (mira la foto).
-      const catAi = ai && (!hasClose || sug.catShare < SUGGEST_STRONG) && cats.includes(ai.category);
-      const matAi = ai && (!hasClose || sug.matShare < SUGGEST_STRONG) && mats.includes(ai.material);
-      const category = catAi ? ai.category : sug.category, material = matAi ? ai.material : sug.material;
+      const core = await suggestCore({ img, q, items, cats, mats, token, onPhase: setSugPhase });
+      const { sug, close, hasClose, ai, catAi, matAi, category, material } = core;
+      let note = core.note;
+      setSugPrice(hasClose && sug.price ? sug.price : null);
       // Las plantillas usan la categoría/material que quedan en el formulario (si se eligieron a mano, esas).
       const tpl = templateProductText(sug, touched.current.has('category') ? form.category : category, touched.current.has('material') ? form.material : material);
       const text = k2 => (ai && String(ai[k2] || '').trim()) ? [String(ai[k2]).trim(), 'ia'] : [tpl[k2], 'local'];
@@ -1645,7 +2620,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
   };
 
   const save = async () => {
-    if (!form.name.trim() || !form.price) return;
+    if (!form.name.trim() || !form.price || !stockOk || !costOk) return;
     setTranslateWarn('');
     let name_en = (form.name_en || '').trim();
     let description_en = (form.description_en || '').trim();
@@ -1683,8 +2658,25 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
       available: form.available !== false,
       surcharge: !!form.surcharge,
       market,
-      promo
+      promo,
+      _stock: stockChanged ? Number(stockDraft) : undefined,
+      _cost: costDraft.trim() !== initCost ? (costDraft.trim() === '' ? null : Number(costDraft)) : undefined
     });
+  };
+  const stockOk = /^\d{1,4}$/.test(String(stockDraft).trim());
+  const stockChanged = stockOk && (isNew ? Number(stockDraft) !== STOCK_DEFAULT : Number(stockDraft) !== initStock);
+  const costOk = costDraft.trim() === '' || Number(costDraft) >= 0;
+  const costPrice = costOk && costDraft.trim() !== '' ? priceFromCost(costDraft, margin, allProducts) : null;
+  const applyDictation = (text, f) => {
+    const got = [];
+    if (f.name) { set('name', f.name + (f.size ? ' talla ' + f.size : '')); got.push('nombre'); }
+    if (f.price != null) { set('price', String(f.price)); got.push('precio'); }
+    if (f.cost != null) { setCostDraft(String(f.cost)); got.push('costo'); }
+    if (f.qty != null) { setStockDraft(String(f.qty)); got.push('cantidad'); }
+    if (f.color) { const fb = COLOR_TO_FALLBACK[f.color]; if (fb) set('color', fb); got.push('color ' + f.color); }
+    if (f.size && !f.name) { set('description', ((form.description || '').trim() + ' Talla: ' + f.size + '.').trim()); got.push('talla'); }
+    else if (f.size) got.push('talla ' + f.size);
+    setDictNote(got.length ? '✓ Llené: ' + got.join(', ') + '. Revisa antes de guardar.' : 'No reconocí datos; intenta con "cantidad", "costo" y "precio".');
   };
 
   const inp = { padding: '10px 13px', border: '1.5px solid #e4e4e4', borderRadius: 10, fontSize: 14, outline: 'none', width: '100%', boxSizing: 'border-box', background: 'white' };
@@ -1751,6 +2743,7 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
           )}
           {uploadMsg && <div role="status" aria-live="polite" style={{ fontSize: 12, marginTop: 6, color: uploadMsg.startsWith('✅') ? '#065F46' : '#DC2626', fontWeight: 500 }}>{uploadMsg}</div>}
           {!uploadMsg && <div style={{ fontSize: 11, color: '#767676', marginTop: 6 }}>{imgPrev ? 'Así se verá en la tarjeta de la tienda. ' : ''}La foto se optimiza automáticamente para cargar rápido en la tienda.</div>}
+          {imgPrev && !uploading && qWarn && <QualityWarn issues={qWarn.issues} onRetake={() => fileRef.current.click()} />}
           {isNew && imgPrev && !uploading && dup && dup.status === 'checking' && <div role="status" aria-live="polite" data-testid="dupChecking" style={{ fontSize: 11, color: '#7A6880', marginTop: 8 }}>Revisando si ya existe…</div>}
           {isNew && imgPrev && !uploading && dup && dup.status === 'done' && dup.level && (() => {
             const c = dup.cands[dup.idx], gal = (c.p.images || []).filter(u => typeof u === 'string' && /^https:/.test(u)).slice(0, 3), cur = stockOf(dup.stock, c.p.id);
@@ -1846,6 +2839,8 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
           </div>
         </details>
 
+        <DictateButton onResult={applyDictation} />
+        {dictNote && <div role="status" aria-live="polite" data-testid="dictNote" style={{ fontSize: 12, color: dictNote.startsWith('✓') ? '#065F46' : '#92400E', margin: '-6px 0 12px' }}>{dictNote}</div>}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
           <div style={{ gridColumn: 'span 2' }}>
             <label htmlFor="pmName" style={lbl}>Nombre del producto *<SugTag k="name" /></label>
@@ -1908,6 +2903,25 @@ function ProductModal({ product, onSave, onClose, token, categories, materials, 
           <div>
             <label htmlFor="pmOldPrice" style={lbl}>Precio anterior (tachado)</label>
             <input id="pmOldPrice" type="number" min="0" step="0.01" value={form.oldPrice || ''} onChange={e => set('oldPrice', e.target.value)} placeholder="60" style={inp} />
+          </div>
+          {(sugPrice || costPrice) && (
+            <div data-testid="pmPriceHints" style={{ gridColumn: 'span 2', display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', fontSize: 12, marginTop: -6 }}>
+              <span style={{ color: '#7A6880' }}>Precio sugerido:</span>
+              {sugPrice ? <button type="button" onClick={() => set('price', String(sugPrice))} style={{ minHeight: 32, padding: '0 10px', borderRadius: 99, border: '1.5px solid #D9C9EE', background: 'white', color: '#5B3F8A', fontWeight: 700, fontSize: 12 }}>Parecidas: ${sugPrice}</button> : null}
+              {costPrice ? <button type="button" data-testid="pmCostPrice" onClick={() => set('price', String(costPrice))} style={{ minHeight: 32, padding: '0 10px', borderRadius: 99, border: '1.5px solid #D9C9EE', background: 'white', color: '#5B3F8A', fontWeight: 700, fontSize: 12 }}>Costo × {margin || MARGIN_DEFAULT}: ${costPrice}</button> : null}
+            </div>
+          )}
+          <div>
+            <label htmlFor="pmStock" style={lbl}>Stock (unidades)</label>
+            <input id="pmStock" data-testid="pmStock" type="number" inputMode="numeric" min={0} max={9999} step={1} value={stockDraft} onChange={e => setStockDraft(e.target.value)} aria-describedby="pmStockHint" style={{ ...inp, borderColor: stockOk ? '#e4e4e4' : '#FCA5A5' }} />
+          </div>
+          <div>
+            <label htmlFor="pmCost" style={lbl}>Costo USD (opcional)</label>
+            <input id="pmCost" data-testid="pmCost" type="number" inputMode="decimal" min={0} step="0.01" value={costDraft} onChange={e => setCostDraft(e.target.value)} aria-describedby="pmStockHint" placeholder="Privado" style={{ ...inp, borderColor: costOk ? '#e4e4e4' : '#FCA5A5' }} />
+          </div>
+          <div style={{ gridColumn: 'span 2', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: -6 }}>
+            <CountPhotoButton token={token} hint={form.name} testid="pmCount" onUse={n => setStockDraft(String(n))} />
+            <span id="pmStockHint" style={{ fontSize: 11, color: '#7A6880', flex: 1, minWidth: 160 }}>{isNew ? 'El stock se guarda al publicar. ' : 'El stock se guarda al tocar Guardar. '}El costo es privado: no sale en la tienda.</span>
           </div>
           <div style={{ gridColumn: 'span 2' }}>
             <label htmlFor="pmDescription" style={lbl}>Descripción<SugTag k="description" /></label>
@@ -9904,6 +10918,13 @@ function App() {
   const [showBulk, setShowBulk]             = useState(false);
   const [bulkMsg, setBulkMsg]               = useState('');
   const [slipOrders, setSlipOrders]         = useState(null);  // Hoja de preparación: pedidos a imprimir
+  // Ingreso de inventario (27 nov): lote, costo privado (/cost/list) y stock pendiente de piezas nuevas.
+  const [showBatch, setShowBatch]           = useState(false);
+  const [costs, setCosts]                   = useState({});    // { id: { cost, currency } } — privado, nunca en products.json
+  const [margin, setMargin]                 = useState(MARGIN_DEFAULT);
+  const [pendingStock, setPendingStock]     = useState(() => pendingStockRead());
+  const [prePub, setPrePub]                 = useState(null);  // avisos de "Antes de publicar"
+  const latestRef = React.useRef({ products: [], skuSeq: {} });
   const refCounts = useRefCounts(session && session.token);
   const [tiktokExportBusy, setTiktokExportBusy] = useState(false);
   const [tiktokExportMsg, setTiktokExportMsg]   = useState('');
@@ -9941,6 +10962,7 @@ function App() {
     for (const [k, v] of Object.entries(cfgNow)) if (base.cfg[k] !== JSON.stringify(v)) n++;
     return n;
   }, [dirty, products, whatsappNum, categories, materials, shipping, texts, campaign, home, lovers, pages, combos]);
+  latestRef.current = { products, skuSeq };
   const pendingText = pendingCount ? `Tienes ${pendingCount} cambio${pendingCount === 1 ? '' : 's'} sin publicar` : 'Tienes cambios sin publicar';
 
   useEffect(() => {
@@ -9987,6 +11009,7 @@ function App() {
       try { sessionStorage.setItem('cacusa_session', JSON.stringify(session)); } catch (_) {}
       loadData();
       loadStock();
+      loadCosts();
       // Badge de suscriptoras de Lovers — requiere el token de sesión real, así que se
       // carga recién acá (post-login), no en el useEffect de montaje.
       (async () => {
@@ -10227,6 +11250,7 @@ function App() {
       // Pedidos: ya no se resave acá — cada pedido se persiste al instante en su propia
       // llave (ver updateOrderRemote/deleteOrderRemote/apiOrderManual más arriba).
       setDirty(false);
+      if (Object.keys(pendingStockRead()).length) [80000, 160000, 300000].forEach(ms => setTimeout(() => loadStock(), ms)); // stock de piezas nuevas, cuando la tienda ya las tenga
       setSyncMsg('✅ ¡Publicado en cacusabytaitus.com! La tienda se actualiza en 1–2 min.');
       setTimeout(() => setSyncMsg(''), 8000);
     } catch (e) {
@@ -10235,8 +11259,36 @@ function App() {
     setSyncing(false);
   };
 
+  // Producto aprobado en "Ingreso por lote": mismo resultado que "Nuevo producto" (código siguiente de su
+  // categoría, sin reusar). Usa latestRef para que "Aprobar todo" no repita códigos entre piezas seguidas.
+  const createBatchProduct = prod => {
+    const cur = latestRef.current;
+    let id = Date.now(); while (cur.products.some(x => x.id === id)) id++;
+    const prefix = skuPrefixFor(prod.category, cur.products), n = skuMaxNumber(prefix, cur.products, cur.skuSeq) + 1;
+    const out = { ...prod, id, sku: formatSku(prefix, n) };
+    const seq = { ...cur.skuSeq, [prefix]: Math.max(n, Number.isInteger(cur.skuSeq[prefix]) ? cur.skuSeq[prefix] : 0) };
+    latestRef.current = { products: [...cur.products, out], skuSeq: seq };
+    setProducts(prev => [...prev, out]); setSkuSeq(seq); setDirty(true);
+    return out;
+  };
+  // Antes de publicar: avisos (no bloquean) de los productos nuevos o cambiados.
+  const requestPublish = () => {
+    if (syncing) return;
+    const base = pubBaseRef.current;
+    const pieceItems = _prepLast && Array.isArray(_prepLast.items) && _prepLast.items.some(it => it.piece) ? _prepLast.items : null;
+    let items = [];
+    try { items = prePublishWarnings({ products, baseProds: base ? base.prods : null, stock, pendingStock, pieceItems }); } catch (e) { console.warn('revisión antes de publicar:', e && e.message); }
+    if (items.length) setPrePub(items); else publish();
+  };
   const saveProduct = async p => {
-    const { surcharge, market, marketEC, marketUS, promoEnabled, promoPrice, promoLabel, promoEndsAt, ...prodRaw } = p;
+    const { surcharge, market, marketEC, marketUS, promoEnabled, promoPrice, promoLabel, promoEndsAt, _stock, _cost, cost: _c1, costCurrency: _c2, ...prodRaw } = p;
+    // Stock y costo nunca entran al producto (data/products.json es público).
+    const known = products.some(x => x.id === prodRaw.id) && pubBaseRef.current && pubBaseRef.current.prods.has(String(prodRaw.id));
+    if (_stock !== undefined) {
+      if (known) saveStock(prodRaw.id, _stock).catch(e => setSyncMsg('✕ No se guardó el stock (' + ((e && e.message) || 'error') + ').'));
+      else addPendingStock(prodRaw.id, _stock);
+    }
+    if (_cost !== undefined) apiCall('cost/set', { token: session.token, items: [{ id: String(prodRaw.id), cost: _cost }] }).then(costsSaved).catch(e => setSyncMsg('✕ No se guardó el costo (' + ((e && e.message) || 'error') + ').'));
     // Código de producto: se conserva el que ya tiene (aunque cambie de categoría); una pieza
     // nueva recibe el siguiente número libre de su categoría (máximo existente + 1, nunca reusado).
     let prodData = prodRaw;
@@ -10274,8 +11326,29 @@ function App() {
   // pantalla mostraba el cambio como si estuviera guardado).
   // Stock (18 nov): se lee del Worker (/stock/list) al entrar y al abrir Productos/Pedidos.
   const loadStock = async () => {
-    try { const r = await apiCall('stock/list', { token: session.token }); if (r && r.stock) setStock(r.stock); }
+    try { const r = await apiCall('stock/list', { token: session.token }); if (r && r.stock) { setStock(r.stock); flushPendingStock(r.stock); } }
     catch (e) { if (e && e.status === 401) sessionExpired(); else console.warn('stock/list:', e && e.message); }
+  };
+  const loadCosts = async () => {
+    try { const r = await apiCall('cost/list', { token: session.token }); if (r && r.costs) { setCosts(r.costs); if (r.margin) setMargin(r.margin); } }
+    catch (e) { console.warn('cost/list:', e && e.message); } // Worker sin /cost/list todavía: el campo sigue, sin datos previos
+  };
+  const costsSaved = r => { if (r && r.costs) setCosts(r.costs); if (r && r.margin) setMargin(r.margin); };
+  // Stock de piezas nuevas: queda pendiente (localStorage) hasta que la pieza está en el catálogo publicado.
+  const addPendingStock = (id, qty) => setPendingStock(prev => { const n = { ...prev, [String(id)]: qty }; pendingStockWrite(n); return n; });
+  const flushingRef = React.useRef(false);
+  const flushPendingStock = async listed => {
+    const pend = pendingStockRead();
+    const ids = Object.keys(pend).filter(id => !listed || id in listed); // /stock/list solo trae los publicados
+    if (!ids.length || flushingRef.current) return;
+    flushingRef.current = true;
+    const done = [];
+    for (const id of ids) {
+      try { await apiCall('stock/set', { token: session.token, id, qty: pend[id] }); done.push(id); setStock(prev => ({ ...(prev || {}), [id]: pend[id] })); }
+      catch (e) { if (e && e.status === 401) break; }
+    }
+    flushingRef.current = false;
+    if (done.length) setPendingStock(prev => { const n = { ...prev }; done.forEach(id => delete n[id]); pendingStockWrite(n); return n; });
   };
   const saveStock = async (id, qty) => {
     try {
@@ -10465,7 +11538,7 @@ function App() {
         {!isMobile && (
           <aside className="adm-side" data-testid="sidebar" style={{ width: 236, flexShrink: 0, position: 'sticky', top: 56, height: 'calc(100vh - 56px)', overflowY: 'auto', padding: '16px 12px 24px', borderRight: '1px solid #E7E1EA', background: '#FBFAFC' }}>
             <div data-testid="publishBox" style={{ background: dirty ? '#FFF4F8' : 'white', border: '1px solid ' + (dirty ? '#F8C9DA' : '#EDE8EA'), borderRadius: 14, padding: 12, marginBottom: 14 }}>
-              <button onClick={publish} disabled={!dirty || syncing}
+              <button onClick={requestPublish} disabled={!dirty || syncing}
                 style={{ width: '100%', minHeight: 44, background: dirty ? 'linear-gradient(135deg,#C0336E,#9B5DE5)' : '#E7E3EA', color: dirty ? 'white' : '#8A7F90', borderRadius: 99, fontWeight: 800, fontSize: 13.5, opacity: syncing ? .7 : 1, boxShadow: dirty ? '0 4px 12px rgba(192,51,110,.25)' : 'none', cursor: dirty && !syncing ? 'pointer' : 'default' }}>
                 {syncing ? 'Publicando…' : 'Publicar cambios'}
               </button>
@@ -10923,6 +11996,7 @@ function App() {
             setDirty={setDirty}
           />
         )}
+        {activeTab === 'settings' && <MarginSetting token={session.token} margin={margin} onSaved={setMargin} />}
 
         {/* ── Modals ── */}
         {showNtfyModal && <NtfyModal token={session.token} onClose={() => setShowNtfyModal(false)} />}
@@ -10932,8 +12006,15 @@ function App() {
             .catch(e => { console.warn('order manual:', e); setSyncMsg('❌ No se pudo guardar el pedido: ' + e.message); });
         }} />}
         {showModal && <ProductModal product={editProduct} token={session.token} categories={categories} materials={materials} fbSurcharges={fbSurcharges} fbMarkets={fbMarkets} allProducts={products} skuSeq={skuSeq} onSave={saveProduct} onClose={() => { setShowModal(false); setEditProd(null); }}
+          stockQty={editProduct ? (pendingStock[String(editProduct.id)] != null ? pendingStock[String(editProduct.id)] : stockOf(stock, editProduct.id)) : undefined} costInfo={editProduct ? costs[String(editProduct.id)] : undefined} margin={margin}
           onDupStock={(p, from, to) => { setStock(prev => ({ ...(prev || {}), [String(p.id)]: to })); setSyncMsg('✅ ' + (normalizeSku(p.sku) || p.name) + ': stock ' + from + ' → ' + to); setTimeout(() => setSyncMsg(''), 6000); }}
           onEnroll={p => { setEnrollOnly(String(p.id)); setShowEnroll(true); }} />}
+        {showBatch && <BatchIntakeModal token={session.token} products={products} categories={categories} materials={materials} costs={costs} margin={margin}
+          onCreate={createBatchProduct} onPendingStock={addPendingStock} onCostsSaved={costsSaved}
+          onStockAdded={(p, from, to) => setStock(prev => ({ ...(prev || {}), [String(p.id)]: to }))}
+          onClose={() => setShowBatch(false)} />}
+        {prePub && <PrePublishModal items={prePub} onReview={() => setPrePub(null)} onPublish={() => { setPrePub(null); publish(); }}
+          onEdit={p => { setPrePub(null); setEditProd(p); setShowModal(true); setActiveTab('products'); }} />}
         {showLabels && <LabelsModal products={products} categories={categories} stock={stock} onClose={() => setShowLabels(false)} />}
         {showEnroll && !enrollOnly && <EnrollPhotosModal products={products} token={session.token} onClose={() => setShowEnroll(false)} />}
         {showEnroll && enrollOnly && <EnrollPhotosModal products={products} token={session.token} onlyId={enrollOnly} onClose={() => { setShowEnroll(false); setEnrollOnly(null); }} />}
@@ -10963,7 +12044,7 @@ function App() {
           <span role="status" aria-live="polite" style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 700, lineHeight: 1.3 }}>
             <span aria-hidden="true" style={{ color: '#FBBF24' }}>● </span>{syncing ? (syncMsg || 'Publicando…') : pendingText}
           </span>
-          <button type="button" onClick={publish} disabled={syncing} aria-label={syncing ? undefined : 'Publicar cambios'}
+          <button type="button" onClick={requestPublish} disabled={syncing} aria-label={syncing ? undefined : 'Publicar cambios'}
             style={{ minHeight: 44, padding: '0 18px', borderRadius: 99, background: 'linear-gradient(135deg,#E8508A,#9B5DE5)', color: 'white', fontWeight: 800, fontSize: 14, flexShrink: 0, opacity: syncing ? .7 : 1 }}>
             {syncing ? 'Publicando…' : 'Publicar'}
           </button>
@@ -11003,6 +12084,9 @@ function App() {
       {showTools && (
         <Sheet title="Herramientas" onClose={() => setShowTools(false)} mobile={isMobile} testid="toolsSheet">
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <button type="button" style={SHEET_ITEM} data-testid="batchOpen" onClick={() => { setShowTools(false); setShowBatch(true); }}>
+              <span aria-hidden="true" style={SHEET_GLYPH}>✦</span><span style={{ flex: 1 }}>Ingreso por lote<span style={{ display: 'block', fontSize: 11.5, fontWeight: 500, color: '#7A6880' }}>Muchas fotos a la vez: agrupa por pieza, suma stock o prepara borradores</span></span>
+            </button>
             <button type="button" style={SHEET_ITEM} onClick={() => { setShowTools(false); setShowLabels(true); }}>
               <span aria-hidden="true" style={SHEET_GLYPH}>◈</span><span style={{ flex: 1 }}>Etiquetas con QR<span style={{ display: 'block', fontSize: 11.5, fontWeight: 500, color: '#7A6880' }}>Imprimir etiquetas por pieza o categoría</span></span>
             </button>

@@ -393,3 +393,90 @@ rutas nuevas en el Worker. Fechas en la hora local del dispositivo.
   (`promo.price`/`label`/`endsAt` solamente): la oferta empieza al publicar.
 
 Prueba: `pwmgmt.js` (escritorio y 390 px).
+
+## Ingreso de inventario (27 nov): lote, calidad de foto, factura, conteo, dictado y revisión antes de publicar
+
+Pensado para el iPhone (390 px). Todo lo gratis corre en el teléfono; lo que usa Claude Haiku se llama
+solo con un toque o dentro del lote, siempre con tope diario en el Worker.
+
+### ✦ Ingreso por lote (Productos → Herramientas)
+
+1. Se eligen muchas fotos de la galería a la vez (`<input type=file multiple>`, sin `capture`); máx. 80.
+2. Por foto, una a la vez y cediendo la pantalla entre foto y foto: huella v3 de la foto entera y de la
+   pieza sola (u2netp, la misma de "¿ya existe?"), aviso de calidad y hora de la toma (EXIF, si viene).
+3. Grupos (`clusterPhotos`): similitud = 0,3 × pieza + 0,7 × foto entera (+ 0,3 si 2 fotos son seguidas
+   y con ≤ 90 s entre sí según el EXIF); enlace completo con umbral `BATCH_LINK` = 0,38.
+4. Por grupo: "¿ya existe?" con cada foto (`dupCandidates`, mismos umbrales `DUP_HIGH`/`DUP_MEDIUM` y la
+   misma comparación lado a lado). Alto → propone "sumar al stock"; medio → muestra el candidato pero
+   queda como producto nuevo. Si no, borrador con "Sugerir datos" (`suggestCore`, compartido con el
+   formulario: vecinas → categoría/material/precio; `/product/describe` para nombre y textos). Como
+   mucho 40 llamadas por lote; al primer 429 (tope diario de 40) o 503 deja de llamar y sigue con
+   la sugerencia básica (plantillas).
+5. Revisión: unir grupos, separar una foto (pieza nueva), moverla a otro grupo, "Repetir foto" en las
+   que tienen aviso, editar campos, cantidad, costo (opcional), contar con foto, aprobar uno o todos.
+   Aprobar un producto nuevo sube las fotos (principal + galería, igual que "Nuevo producto"), le da el
+   código siguiente de su categoría (`createBatchProduct`, sin repetir entre aprobaciones seguidas) y
+   queda para "Publicar cambios". Aprobar "sumar al stock" llama `/stock/set` al instante y aprende
+   hasta 3 fotos como fotos reales de esa pieza.
+6. Stock de piezas nuevas: `/stock/set` exige que la pieza ya esté en el catálogo publicado, así que
+   la cantidad queda pendiente en el teléfono (`cacusa-admin-pending-stock`) y se manda sola cuando
+   `/stock/list` ya la trae (al cargar el stock y a los 80/160/300 s de publicar).
+
+Fotos reales del taller (30 fotos de 15 piezas, 2 por pieza: frente y otro ángulo, mismo mantel; NO
+están en el repo), por el camino real del panel (`pwbatch`): **9 de 15 piezas agrupadas exactas**, 11 de
+15 pares de la misma pieza juntos, 9 pares de piezas distintas juntados de más (17 grupos); ninguna pieza
+nueva se propuso como "ya existe" y la foto de una pieza del catálogo sí ("sumar stock"). Barrido
+(fotos sin hora): enlace completo con 0,3 de pieza fue lo mejor (promedio y simple, y más peso a la
+pieza o al color, quedan en 7–8 de 15). Frente vs. espalda de la misma pieza se parece menos (0,12–0,83)
+que 2 piezas distintas sobre el mismo mantel (hasta 0,71), por eso la revisión es parte del flujo. Si las
+fotos traen la hora de la toma (simulado: fotos de cada pieza seguidas), sube a 12,4 de 15.
+
+### Aviso de calidad de foto (gratis)
+
+En "Nuevo producto"/"Editar" (foto principal recién elegida, zona automática `pieceBox`) y en el lote
+(zona de u2netp): oscura (luminancia media < 62), movida (varianza del laplaciano del recorte de la pieza
+llevado a 256 px < 40), quemada (≥ 50 % de los píxeles de la pieza sin detalle) o pieza muy chica (< 0,5 %
+de la foto). No bloquea: "Repetir foto". Catálogo (93 fotos): **0 falsas alarmas** con las 2 zonas
+(mínimos: nitidez 50, quemado 0,40, pieza 0,65 %); fotos reales del taller: ver `pwbatch`. Sintéticas:
+oscuras (brillo × 0,3) ~83 %, movidas (desenfoque 4 px) 48–60 %, quemadas (brillo × 2,2) 17–27 % (en fondo
+blanco la pieza quemada se confunde con el fondo).
+
+### Costo privado y precio sugerido
+
+`data/products.json` es público, así que el costo NO va en el producto: vive en el Worker (KV
+`admin_costs`, una sola llave, `/cost/list` + `/cost/set`; respaldada por `cacusa-backup`), como el
+stock. `saveProduct` saca `_stock`/`_cost` antes de guardar el producto y el Worker además borra
+`cost`/`costCurrency` de cualquier producto en `/save`. El costo es opcional (a mano, por factura o
+dictado); el formulario y el lote muestran "Costo × margen" junto al precio de las parecidas (sin costo,
+solo el de las parecidas). Margen en Ajustes (por defecto 3, privado, en la misma llave). Redondeo como
+el catálogo (`roundCatalogPrice`: dólares enteros, o x,99 si la mayoría termina así; prefiere finales
+que el catálogo usa: hoy 0, 5 y 8).
+
+### Leer factura (opcional) y contar unidades con foto
+
+- **Leer factura (opcional)** (lote): `/product/invoice` (Haiku 5.5, sin thinking, effort low,
+  json_schema, foto ≤ 600 KB, tope 30/día) → líneas `{description, quantity, unit_cost, currency}`. Se
+  proponen las piezas por palabras del nombre (`invoiceMatch`) y Robin confirma con "Aplicar". Nunca es
+  un paso obligatorio ni se pide.
+- **✦ Contar unidades con foto** (junto al stock, en el formulario y en el lote): `/product/count`
+  (Haiku, foto ≤ 300 KB, tope 100/día) → `{count, by_color}`; Robin revisa el número antes de usarlo.
+- Costo estimado (Haiku 5.5: US$ 0,10 / 0,50 por millón de tokens de entrada / salida): factura
+  ~US$ 0,0006 (peor caso US$ 0,0013), conteo ~US$ 0,0002. El lote usa `/product/describe` (~US$ 0,0005
+  por borrador, como mucho 40 por día).
+
+### ◉ Dictar datos (gratis)
+
+Botón en el formulario solo si el navegador tiene Web Speech API (`webkitSpeechRecognition`, es-EC o
+es-US). `parseDictation` (local, sin llamadas) entiende números dichos ("doce noventa y nueve", "dos con
+cincuenta") y saca nombre, cantidad, costo, precio, color (también el color de respaldo) y talla (se
+agrega al nombre). Ej.: "aretes argolla dorada, cantidad doce, costo dos con cincuenta, precio veinticinco".
+
+### Antes de publicar (gratis)
+
+"Publicar cambios" revisa los productos nuevos o cambiados (contra lo último cargado/publicado) y avisa,
+sin bloquear ("Publicar igual" / "Revisar"; tocar un producto abre su ficha): falta texto en inglés,
+emojis de color en nombre/descripción, precio > 2× o < 0,5× la mediana de las piezas parecidas (huella de
+pieza si el identificador ya preparó el catálogo en la sesión; si no, las de la misma categoría y
+material), sin foto principal, producto nuevo con stock 0. Nunca avisa por el costo.
+
+Pruebas: `pwbatch` (fotos reales, local), `pwquality`, `pwinvoice`, `pwcount`, `pwvoice`, `pwprepublish`.
